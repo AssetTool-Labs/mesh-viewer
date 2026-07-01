@@ -41,6 +41,11 @@ jobs:
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
+      - name: Ensure Open VSX namespace exists
+        run: npx ovsx create-namespace AssetToolLabs -p "$OVSX_PAT" || true
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+
       - name: Publish to Open VSX (Cursor, VSCodium, etc.)
         run: npx ovsx publish -i extension.vsix -p "$OVSX_PAT"
         env:
