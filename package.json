@@ -3,8 +3,16 @@
   "displayName": "3D Mesh Viewer",
   "description": "View and inspect 3D meshes (OBJ, FBX, GLB/GLTF, STL, PLY, DAE, 3DS, USD/USDA/USDC/USDZ, 3MF, VRML, and more) directly inside VS Code.",
   "version": "0.1.0",
-  "publisher": "local",
+  "publisher": "AssetToolLabs",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AssetTool-Labs/mesh-viewer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AssetTool-Labs/mesh-viewer/issues"
+  },
+  "homepage": "https://github.com/AssetTool-Labs/mesh-viewer#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -172,6 +180,7 @@
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "package": "vsce package --no-dependencies",
+    "publish": "vsce publish --no-dependencies",
     "vscode:prepublish": "node esbuild.js --production",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.webview.json"
   },
@@ -182,6 +191,7 @@
     "@types/node": "20.19.4",
     "@types/three": "0.184.0",
     "@types/vscode": "1.85.0",
+    "@vscode/vsce": "3.2.1",
     "esbuild": "0.28.0",
     "typescript": "5.6.3"
   }
