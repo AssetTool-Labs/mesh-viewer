@@ -1,0 +1,13 @@
+# By default vsce packages everything that isn't matched here.
+# We use a positive-include strategy: ignore everything, then re-include
+# only the files the runtime actually needs.
+
+**
+
+!package.json
+!README.md
+!LICENSE
+!out/extension.js
+!out/webview.js
+!out/webview.css
+!out/viewer.html

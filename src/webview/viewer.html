@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="{{csp}}" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="{{styleUri}}" />
+    <title>3D Mesh Viewer</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header class="sidebar-header">
+          <div class="header-row">
+            <div class="header-text">
+              <div class="title" id="fileName">Loading…</div>
+              <div class="subtitle" id="fileSubtitle"></div>
+            </div>
+            <button id="importMeshBtn" class="header-btn" title="Add another mesh to this scene">+ Import Mesh…</button>
+          </div>
+        </header>
+
+        <nav class="tabs" role="tablist">
+          <button class="tab active" data-tab="hierarchy" role="tab">Hierarchy</button>
+          <button class="tab" data-tab="textures" role="tab">Textures</button>
+          <button class="tab" data-tab="animations" role="tab">Animations</button>
+          <button class="tab" data-tab="settings" role="tab">View</button>
+          <button class="tab" data-tab="info" role="tab">Info</button>
+        </nav>
+
+        <section class="tab-panel active" data-tab="hierarchy">
+          <div class="tree-toolbar">
+            <input id="treeFilter" type="search" placeholder="Filter…" />
+            <button id="treeExpandAll" title="Expand all">⊞</button>
+            <button id="treeCollapseAll" title="Collapse all">⊟</button>
+          </div>
+          <div id="treeContainer" class="tree"></div>
+          <div class="selection-panel">
+            <div class="section-title">Selection</div>
+            <div id="selectionDetails" class="kv-list">
+              <div class="kv-empty">Select a node to inspect it.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-tab="textures">
+          <div class="tex-toolbar">
+            <label class="row">
+              <span>Texture</span>
+              <select id="textureSelect"></select>
+            </label>
+            <label class="row checkbox">
+              <input type="checkbox" id="toggleShowUV" />
+              <span>Show UV map overlay</span>
+            </label>
+            <div id="textureSummary" class="tex-summary"></div>
+          </div>
+          <div id="textureView" class="tex-view">
+            <div class="kv-empty">No textures in this scene.</div>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-tab="animations">
+          <div class="section-title">Animations</div>
+          <div id="animationList" class="anim-list">
+            <div class="kv-empty">No animations in this file.</div>
+          </div>
+          <div class="anim-transport">
+            <button id="animPlay" disabled>▶ Play</button>
+            <button id="animPause" disabled>❚❚ Pause</button>
+            <button id="animStop" disabled>■ Stop</button>
+          </div>
+          <div class="anim-time">
+            <input id="animScrub" type="range" min="0" max="1000" value="0" disabled />
+            <div class="anim-time-labels">
+              <span id="animCurrent">0.00s</span>
+              <span id="animDuration">/ 0.00s</span>
+            </div>
+          </div>
+          <label class="row">
+            <span>Speed</span>
+            <input id="animSpeed" type="range" min="0" max="200" value="100" />
+            <span id="animSpeedLabel">1.00×</span>
+          </label>
+        </section>
+
+        <section class="tab-panel" data-tab="settings">
+          <label class="row">
+            <span>Shading</span>
+            <select id="shadingSelect">
+              <option value="smooth">Smooth</option>
+              <option value="flat">Flat</option>
+              <option value="wireframe">Wireframe</option>
+              <option value="points">Points</option>
+              <option value="normals">Normals</option>
+            </select>
+          </label>
+          <label class="row checkbox">
+            <input type="checkbox" id="toggleGrid" />
+            <span>Show grid</span>
+          </label>
+          <label class="row checkbox">
+            <input type="checkbox" id="toggleAxes" />
+            <span>Show axes</span>
+          </label>
+          <label class="row checkbox">
+            <input type="checkbox" id="toggleBounds" />
+            <span>Show bounding box</span>
+          </label>
+          <label class="row checkbox">
+            <input type="checkbox" id="toggleSkeleton" />
+            <span>Show skeleton</span>
+          </label>
+          <label class="row checkbox">
+            <input type="checkbox" id="toggleWireframeOverlay" />
+            <span>Wireframe overlay</span>
+          </label>
+          <label class="row checkbox">
+            <input type="checkbox" id="toggleAutoRotate" />
+            <span>Auto-rotate camera</span>
+          </label>
+          <label class="row">
+            <span>Background</span>
+            <input type="color" id="bgColor" />
+          </label>
+          <label class="row">
+            <span>Environment</span>
+            <select id="envSelect">
+              <option value="studio">Studio</option>
+              <option value="neutral">Neutral</option>
+              <option value="none">None</option>
+            </select>
+          </label>
+          <button id="resetCamera" class="primary">Reset Camera</button>
+          <button id="frameSelection">Frame Selection</button>
+        </section>
+
+        <section class="tab-panel" data-tab="info">
+          <div class="section-title">File</div>
+          <div id="fileInfo" class="kv-list"></div>
+          <div class="section-title">Scene Totals</div>
+          <div id="sceneTotals" class="kv-list"></div>
+          <div class="section-title">Geometry</div>
+          <div id="geomTotals" class="kv-list"></div>
+          <div class="section-title">Materials</div>
+          <div id="materialList" class="kv-list"></div>
+          <div class="section-title">Cameras / Lights</div>
+          <div id="extraList" class="kv-list"></div>
+        </section>
+      </aside>
+
+      <main id="viewport">
+        <canvas id="canvas"></canvas>
+        <div id="hud">
+          <div id="hudStats"></div>
+        </div>
+        <div id="overlay" class="hidden">
+          <div class="overlay-card">
+            <div class="spinner"></div>
+            <div id="overlayMessage">Loading…</div>
+          </div>
+        </div>
+        <div id="errorOverlay" class="hidden">
+          <div class="overlay-card error">
+            <div class="error-title">Failed to load</div>
+            <div id="errorMessage"></div>
+          </div>
+        </div>
+        <div id="dropOverlay" class="hidden">
+          <div class="drop-card">
+            <div class="drop-icon">⬇</div>
+            <div class="drop-title">Drop to import into scene</div>
+            <div class="drop-hint">Adds the file alongside what's already loaded.</div>
+          </div>
+        </div>
+        <div id="toastStack"></div>
+      </main>
+
+      <button id="sidebarToggle" aria-label="Toggle panel" title="Toggle panel">⮜</button>
+    </div>
+
+    <script nonce="{{nonce}}" src="{{scriptUri}}"></script>
+  </body>
+</html>

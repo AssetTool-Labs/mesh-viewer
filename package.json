@@ -1,0 +1,188 @@
+{
+  "name": "mesh-viewer-vscode",
+  "displayName": "3D Mesh Viewer",
+  "description": "View and inspect 3D meshes (OBJ, FBX, GLB/GLTF, STL, PLY, DAE, 3DS, USD/USDA/USDC/USDZ, 3MF, VRML, and more) directly inside VS Code.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "3d",
+    "mesh",
+    "viewer",
+    "gltf",
+    "glb",
+    "obj",
+    "fbx",
+    "usd",
+    "usdz",
+    "stl",
+    "ply",
+    "collada",
+    "three.js"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "3dMeshViewer.viewer",
+        "displayName": "3D Mesh Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.obj"
+          },
+          {
+            "filenamePattern": "*.fbx"
+          },
+          {
+            "filenamePattern": "*.glb"
+          },
+          {
+            "filenamePattern": "*.gltf"
+          },
+          {
+            "filenamePattern": "*.stl"
+          },
+          {
+            "filenamePattern": "*.ply"
+          },
+          {
+            "filenamePattern": "*.dae"
+          },
+          {
+            "filenamePattern": "*.3ds"
+          },
+          {
+            "filenamePattern": "*.3mf"
+          },
+          {
+            "filenamePattern": "*.wrl"
+          },
+          {
+            "filenamePattern": "*.vrml"
+          },
+          {
+            "filenamePattern": "*.usd"
+          },
+          {
+            "filenamePattern": "*.usda"
+          },
+          {
+            "filenamePattern": "*.usdc"
+          },
+          {
+            "filenamePattern": "*.usdz"
+          },
+          {
+            "filenamePattern": "*.vox"
+          },
+          {
+            "filenamePattern": "*.pcd"
+          },
+          {
+            "filenamePattern": "*.xyz"
+          },
+          {
+            "filenamePattern": "*.lwo"
+          },
+          {
+            "filenamePattern": "*.kmz"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "3dMeshViewer.openWith",
+        "title": "Open With 3D Mesh Viewer",
+        "category": "3D Mesh Viewer"
+      },
+      {
+        "command": "3dMeshViewer.resetCamera",
+        "title": "Reset Camera",
+        "category": "3D Mesh Viewer"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "3dMeshViewer.openWith",
+          "when": "resourceExtname =~ /\\.(obj|fbx|glb|gltf|stl|ply|dae|3ds|3mf|wrl|vrml|usd|usda|usdc|usdz|vox|pcd|xyz|lwo|kmz)$/i",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "3D Mesh Viewer",
+      "properties": {
+        "3dMeshViewer.backgroundColor": {
+          "type": "string",
+          "default": "#1e1e1e",
+          "description": "Background color of the 3D viewport (CSS color)."
+        },
+        "3dMeshViewer.showGrid": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show ground grid helper in the viewport."
+        },
+        "3dMeshViewer.showAxes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show axis helper in the viewport."
+        },
+        "3dMeshViewer.autoRotate": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-rotate the camera around the model."
+        },
+        "3dMeshViewer.shading": {
+          "type": "string",
+          "enum": [
+            "smooth",
+            "flat",
+            "wireframe",
+            "points",
+            "normals"
+          ],
+          "default": "smooth",
+          "description": "Default shading mode."
+        },
+        "3dMeshViewer.environment": {
+          "type": "string",
+          "enum": [
+            "studio",
+            "neutral",
+            "none"
+          ],
+          "default": "studio",
+          "description": "Image-based lighting environment for PBR materials."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "vsce package --no-dependencies",
+    "vscode:prepublish": "node esbuild.js --production",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.webview.json"
+  },
+  "dependencies": {
+    "three": "0.184.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.4",
+    "@types/three": "0.184.0",
+    "@types/vscode": "1.85.0",
+    "esbuild": "0.28.0",
+    "typescript": "5.6.3"
+  }
+}

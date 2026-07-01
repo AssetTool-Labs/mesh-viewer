@@ -1,0 +1,27 @@
+node_modules/
+out/
+*.vsix
+test_data/
+.DS_Store
+
+# Local test 3D assets (don't commit large binaries)
+*.glb
+*.gltf
+*.fbx
+*.obj
+*.stl
+*.ply
+*.dae
+*.3ds
+*.3mf
+*.usd
+*.usda
+*.usdc
+*.usdz
+*.vox
+*.pcd
+*.xyz
+*.lwo
+*.kmz
+*.wrl
+*.vrml
