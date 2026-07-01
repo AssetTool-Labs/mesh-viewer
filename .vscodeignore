@@ -7,6 +7,7 @@
 !package.json
 !README.md
 !LICENSE
+!media/icon.png
 !out/extension.js
 !out/webview.js
 !out/webview.css
