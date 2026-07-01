@@ -6,6 +6,9 @@ on:
       - "v*.*.*"
   workflow_dispatch: {}
 
+permissions:
+  contents: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -30,12 +33,24 @@ jobs:
             exit 1
           fi
 
+      - name: Package
+        run: npx vsce package --no-dependencies -o extension.vsix
+
       - name: Publish to VS Code Marketplace
-        run: npx vsce publish --no-dependencies -p "$VSCE_PAT"
+        run: npx vsce publish -i extension.vsix -p "$VSCE_PAT"
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
       - name: Publish to Open VSX (Cursor, VSCodium, etc.)
-        run: npx ovsx publish --no-dependencies -p "$OVSX_PAT"
+        run: npx ovsx publish -i extension.vsix -p "$OVSX_PAT"
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
+
+      - name: Create GitHub release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" extension.vsix \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
