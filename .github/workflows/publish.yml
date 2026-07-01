@@ -1,4 +1,4 @@
-name: Publish to VS Code Marketplace
+name: Publish extension
 
 on:
   push:
@@ -30,7 +30,12 @@ jobs:
             exit 1
           fi
 
-      - name: Publish
+      - name: Publish to VS Code Marketplace
         run: npx vsce publish --no-dependencies -p "$VSCE_PAT"
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Publish to Open VSX (Cursor, VSCodium, etc.)
+        run: npx ovsx publish --no-dependencies -p "$OVSX_PAT"
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
