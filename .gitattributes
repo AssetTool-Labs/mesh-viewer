@@ -58,3 +58,6 @@
 *.[dD][bB] filter=lfs diff=lfs merge=lfs -text
 
 *.[bB][iI][nN] filter=lfs diff=lfs merge=lfs -text
+
+# Keep the extension icon as a normal Git blob.
+media/icon.png -filter -diff -merge -text
