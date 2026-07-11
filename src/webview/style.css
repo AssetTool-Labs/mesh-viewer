@@ -191,6 +191,7 @@ html, body {
   border-radius: 2px;
 }
 .tree-toolbar button:hover { background: var(--hover); }
+.tree-toolbar button.off { color: #6a6a6a; }
 
 .tree {
   flex: 1 1 auto;
