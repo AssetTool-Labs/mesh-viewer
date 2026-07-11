@@ -194,10 +194,18 @@ textureSelect.addEventListener('change', () => {
 });
 
 // ---- Tree filter ----
+/** Returns true when a node matches the current filter query (empty query
+ *  matches everything). Shared by the filter input and the bulk hide/show
+ *  actions so they always target exactly the same set of rows. */
+function nodeMatchesFilter(obj: THREE.Object3D): boolean {
+  const q = treeFilter.value.trim().toLowerCase();
+  return !q || obj.name.toLowerCase().includes(q) || obj.type.toLowerCase().includes(q);
+}
+
 treeFilter.addEventListener('input', () => {
   const q = treeFilter.value.trim().toLowerCase();
   for (const view of nodeViews.values()) {
-    const matches = !q || view.object.name.toLowerCase().includes(q) || view.object.type.toLowerCase().includes(q);
+    const matches = nodeMatchesFilter(view.object);
     view.row.classList.toggle('dim', !matches);
     if (matches && q) {
       let parent = view.object.parent;
@@ -211,6 +219,7 @@ treeFilter.addEventListener('input', () => {
       }
     }
   }
+  refreshToggleButton();
 });
 
 $<HTMLButtonElement>('treeExpandAll').addEventListener('click', () => {
@@ -218,6 +227,62 @@ $<HTMLButtonElement>('treeExpandAll').addEventListener('click', () => {
 });
 $<HTMLButtonElement>('treeCollapseAll').addEventListener('click', () => {
   for (const v of nodeViews.values()) toggleNode(v, false);
+});
+
+// ---- Bulk hide/show of filtered results ----
+// One toggle button + Blender-style shortcuts act on every node matching the
+// current filter at once, instead of toggling eye icons one by one. When the
+// filter is empty this acts on the whole hierarchy.
+const toggleVisBtn = $<HTMLButtonElement>('treeToggleVisibility');
+
+function matchingViews(): NodeView[] {
+  const out: NodeView[] = [];
+  for (const v of nodeViews.values()) if (nodeMatchesFilter(v.object)) out.push(v);
+  return out;
+}
+
+/** Keep the toggle button in sync with the filtered set: it shows a filled dot
+ *  (◉, matching the tree eyes) while the set is visible and a hollow dot (○)
+ *  once it is hidden. The tooltip spells out the action a click will perform. */
+function refreshToggleButton(): void {
+  const anyVisible = matchingViews().some((v) => v.object.visible);
+  toggleVisBtn.textContent = anyVisible ? '◉' : '○';
+  toggleVisBtn.classList.toggle('off', !anyVisible);
+  toggleVisBtn.title = anyVisible
+    ? 'Hide filtered results (H)'
+    : 'Show filtered results (Alt+H / Shift+H)';
+}
+
+function setFilteredVisibility(visible: boolean): void {
+  let changed = 0;
+  for (const view of nodeViews.values()) {
+    if (!nodeMatchesFilter(view.object)) continue;
+    if (view.object.visible !== visible) changed++;
+    setObjectVisibility(view.object, visible);
+  }
+  const q = treeFilter.value.trim();
+  const scope = q ? `matching “${q}”` : 'all nodes';
+  showToast({ title: `${visible ? 'Showed' : 'Hid'} ${changed} ${changed === 1 ? 'node' : 'nodes'}`, body: scope });
+  refreshToggleButton();
+}
+
+// Click toggles: hide the filtered set if any of it is visible, otherwise reveal it.
+toggleVisBtn.addEventListener('click', () => {
+  const anyVisible = matchingViews().some((v) => v.object.visible);
+  setFilteredVisibility(!anyVisible);
+});
+
+// Blender-style keyboard shortcuts: H hides the filtered set, Alt+H (or Shift+H)
+// reveals it. We key off ev.code so Alt+H works on macOS, where Option+H would
+// otherwise produce a "˙" character instead of "h". Ignored while typing in an
+// input/textarea so the filter box keeps accepting the letter "h".
+document.addEventListener('keydown', (ev) => {
+  if (ev.code !== 'KeyH' && ev.key !== 'h' && ev.key !== 'H') return;
+  if (ev.ctrlKey || ev.metaKey) return;
+  const target = ev.target as HTMLElement | null;
+  if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+  ev.preventDefault();
+  setFilteredVisibility(ev.shiftKey || ev.altKey);
 });
 
 // ---- Animation transport ----
@@ -677,6 +742,7 @@ function buildHierarchy(): void {
   for (const entry of viewer.entries) {
     buildNode(entry.wrapper, treeContainer, 0);
   }
+  refreshToggleButton();
 }
 
 function buildNode(obj: THREE.Object3D, parentContainer: HTMLElement, depth: number): void {
@@ -727,6 +793,7 @@ function buildNode(obj: THREE.Object3D, parentContainer: HTMLElement, depth: num
     ev.stopPropagation();
     setObjectVisibility(obj, !obj.visible);
     refreshVisibilityIcon(view);
+    refreshToggleButton();
   });
   row.addEventListener('click', () => selectObject(obj));
   row.addEventListener('dblclick', () => viewer.frameObject(obj));
