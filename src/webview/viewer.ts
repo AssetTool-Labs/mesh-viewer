@@ -78,7 +78,9 @@ export class Viewer {
   private currentClip: THREE.AnimationClip | null = null;
   private animationSpeed = 1;
   private animationPaused = false;
+  private animationLooping = true;
   private animationCallback: ((time: number, duration: number) => void) | null = null;
+  private animationFinishedCallback: (() => void) | null = null;
 
   private originalMaterials = new WeakMap<THREE.Object3D, MaterialBackup>();
   private shadingMode: ShadingMode = 'smooth';
@@ -153,6 +155,11 @@ export class Viewer {
 
   setAnimationCallback(cb: (time: number, duration: number) => void): void {
     this.animationCallback = cb;
+  }
+
+  /** Fired when a non-looping clip reaches its end. */
+  setAnimationFinishedCallback(cb: () => void): void {
+    this.animationFinishedCallback = cb;
   }
 
   setBackground(color: string): void {
@@ -504,7 +511,16 @@ export class Viewer {
       }
     });
 
-    if (!this.mixer) this.mixer = new THREE.AnimationMixer(this.contentRoot);
+    if (!this.mixer) {
+      this.mixer = new THREE.AnimationMixer(this.contentRoot);
+      this.mixer.addEventListener('finished', () => {
+        // Only fires for LoopOnce actions. clampWhenFinished keeps the pose on
+        // the last frame; flip our pause flag so the UI shows "stopped at end".
+        this.animationPaused = true;
+        if (this.activeAction) this.activeAction.paused = true;
+        this.animationFinishedCallback?.();
+      });
+    }
     const actions = asset.animations.map((clip) => this.mixer!.clipAction(clip, asset.root));
 
     const entry: AssetEntry = { label, wrapper, asset, actions };
@@ -591,10 +607,57 @@ export class Viewer {
     }
     action.reset().fadeIn(0.2).play();
     action.setEffectiveTimeScale(this.animationSpeed);
+    this.applyLoopMode(action);
     this.activeAction = action;
     this.currentClip = action.getClip();
     this.animationPaused = false;
     action.paused = false;
+  }
+
+  /** Activate an action paused on its first frame, so the timeline can scrub
+   *  and step frames without starting playback (Blender-style clip select). */
+  selectActionPaused(action: THREE.AnimationAction): void {
+    if (!this.mixer) return;
+    if (this.activeAction && this.activeAction !== action) {
+      this.activeAction.stop();
+    }
+    action.reset().play();
+    action.setEffectiveTimeScale(this.animationSpeed);
+    action.setEffectiveWeight(1);
+    this.applyLoopMode(action);
+    action.paused = true;
+    this.activeAction = action;
+    this.currentClip = action.getClip();
+    this.animationPaused = true;
+    // Evaluate once so the model snaps to frame 0 of the selected clip.
+    this.mixer.update(0);
+  }
+
+  setClipLooping(loop: boolean): void {
+    this.animationLooping = loop;
+    if (this.activeAction) this.applyLoopMode(this.activeAction);
+  }
+
+  private applyLoopMode(action: THREE.AnimationAction): void {
+    action.setLoop(this.animationLooping ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+    action.clampWhenFinished = true;
+  }
+
+  get clipLooping(): boolean {
+    return this.animationLooping;
+  }
+
+  get isAnimationPlaying(): boolean {
+    return this.activeAction !== null && !this.animationPaused;
+  }
+
+  /** Current time (seconds) of the active action, 0 when none. */
+  get animationTime(): number {
+    return this.activeAction ? this.activeAction.time : 0;
+  }
+
+  get activeClipDuration(): number {
+    return this.currentClip ? this.currentClip.duration : 0;
   }
 
   pauseAnimation(): void {

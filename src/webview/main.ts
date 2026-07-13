@@ -16,6 +16,7 @@ import {
   type EnvironmentMode,
   type HudInfo,
 } from './viewer';
+import { TimelinePanel, type TimelineClip } from './timeline';
 
 declare function acquireVsCodeApi(): {
   postMessage(msg: unknown): void;
@@ -96,6 +97,83 @@ const textureSelect = $<HTMLSelectElement>('textureSelect');
 const toggleShowUV = $<HTMLInputElement>('toggleShowUV');
 
 importMeshBtn.addEventListener('click', () => requestPickAndImport());
+
+// ---- Blender-style timeline / dope sheet (bottom dock) ----
+// The panel is a read-only visualization: it scrubs/steps/plays through the
+// viewer's animation mixer but never modifies keyframes.
+const timeline = new TimelinePanel({
+  getTime: () => viewer.animationTime,
+  isPlaying: () => viewer.isAnimationPlaying,
+  seekSeconds: (t) => {
+    if (!ensureActiveAnim()) return;
+    viewer.seekAnimation(t);
+    syncSidebarTime();
+  },
+  togglePlay: () => toggleAnimPlayback(),
+  setSpeed: (s) => {
+    viewer.setAnimationSpeed(s);
+    animSpeed.value = String(Math.round(s * 100));
+    animSpeedLabel.textContent = `${s.toFixed(2)}×`;
+  },
+  setLoop: (loop) => viewer.setClipLooping(loop),
+  selectClip: (i) => {
+    const row = animRows[i];
+    if (row) selectAnim(row, viewer.isAnimationPlaying);
+  },
+});
+
+/** Make sure some action is active (paused) so seeks/steps have a target.
+ *  Returns false when the scene has no animations at all. */
+function ensureActiveAnim(): boolean {
+  if (activeAnimRow) return true;
+  const idx = timeline.activeClipIndex;
+  const row = animRows[idx >= 0 ? idx : 0];
+  if (!row) return false;
+  selectAnim(row, false);
+  return true;
+}
+
+/** Activate a clip, either playing or paused on its current/first frame. */
+function selectAnim(row: AnimRow, play: boolean): void {
+  const clip = row.entry.asset.animations[row.index];
+  const action = row.entry.actions[row.index];
+  if (!clip || !action) return;
+  animDuration.textContent = `/ ${clip.duration.toFixed(2)}s`;
+  if (play) viewer.playAction(action);
+  else viewer.selectActionPaused(action);
+  activeAnimRow = row;
+  refreshAnimationActiveRow();
+  const idx = animRows.indexOf(row);
+  if (idx >= 0 && idx !== timeline.activeClipIndex) timeline.setActiveClip(idx);
+  timeline.setPlaying(viewer.isAnimationPlaying);
+  syncSidebarTime();
+  timeline.refresh();
+}
+
+function toggleAnimPlayback(): void {
+  if (!animRows.length) return;
+  if (!activeAnimRow && !ensureActiveAnim()) return;
+  if (viewer.isAnimationPlaying) {
+    viewer.pauseAnimation();
+  } else {
+    // A finished non-looping clip restarts from frame 0, like Blender.
+    const dur = viewer.activeClipDuration;
+    if (!viewer.clipLooping && dur > 0 && viewer.animationTime >= dur - 1e-4) {
+      viewer.seekAnimation(0);
+    }
+    viewer.resumeAnimation();
+  }
+  timeline.setPlaying(viewer.isAnimationPlaying);
+  timeline.refresh();
+}
+
+/** Push the viewer's current animation time into the sidebar scrub UI. */
+function syncSidebarTime(): void {
+  const dur = viewer.activeClipDuration;
+  const t = viewer.animationTime;
+  if (dur > 0) animScrub.value = String(Math.round((t / dur) * 1000));
+  animCurrent.textContent = `${t.toFixed(2)}s`;
+}
 
 function requestPickAndImport(): void {
   const requestId = `pick-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -288,18 +366,24 @@ document.addEventListener('keydown', (ev) => {
 // ---- Animation transport ----
 animPlay.addEventListener('click', () => {
   if (!activeAnimRow) {
-    if (animRows.length) startAnim(animRows[0]);
+    if (animRows.length) selectAnim(animRows[0], true);
     return;
   }
-  viewer.resumeAnimation();
+  if (!viewer.isAnimationPlaying) toggleAnimPlayback();
 });
-animPause.addEventListener('click', () => viewer.pauseAnimation());
+animPause.addEventListener('click', () => {
+  viewer.pauseAnimation();
+  timeline.setPlaying(false);
+  timeline.refresh();
+});
 animStop.addEventListener('click', () => {
   viewer.stopAnimation();
   activeAnimRow = null;
   refreshAnimationActiveRow();
   animScrub.value = '0';
   animCurrent.textContent = '0.00s';
+  timeline.setPlaying(false);
+  timeline.refresh();
 });
 
 animScrub.addEventListener('input', () => {
@@ -319,12 +403,14 @@ animScrub.addEventListener('change', () => {
   viewer.seekAnimation(t);
   animCurrent.textContent = `${t.toFixed(2)}s`;
   scrubLocked = false;
+  timeline.refresh();
 });
 
 animSpeed.addEventListener('input', () => {
   const s = Number(animSpeed.value) / 100;
   animSpeedLabel.textContent = `${s.toFixed(2)}×`;
   viewer.setAnimationSpeed(s);
+  timeline.setSpeedDisplay(s);
 });
 
 // ---- HUD ----
@@ -340,6 +426,12 @@ viewer.setAnimationCallback((time, duration) => {
   if (scrubLocked || duration <= 0) return;
   animScrub.value = String(Math.round((time / duration) * 1000));
   animCurrent.textContent = `${time.toFixed(2)}s`;
+  timeline.refresh();
+});
+
+viewer.setAnimationFinishedCallback(() => {
+  timeline.setPlaying(false);
+  timeline.refresh();
 });
 
 // ---- Picking ----
@@ -1072,6 +1164,7 @@ function populateAnimations(): void {
     animDuration.textContent = '/ 0.00s';
     animScrub.value = '0';
     activeAnimRow = null;
+    timeline.setClips([], 0);
     return;
   }
   setAnimEnabled(true);
@@ -1101,22 +1194,35 @@ function populateAnimations(): void {
 
       row.append(name, dur);
       const animRow: AnimRow = { entry, index: i };
-      row.addEventListener('click', () => startAnim(animRow));
+      // Selecting a clip keeps the current play state (Blender-style): if
+      // something is playing, the new clip plays; otherwise it's shown paused
+      // on its first frame, ready for frame-by-frame stepping.
+      row.addEventListener('click', () => selectAnim(animRow, viewer.isAnimationPlaying));
       animationList.appendChild(row);
       animRows.push(animRow);
     });
   }
   refreshAnimationActiveRow();
-}
 
-function startAnim(row: AnimRow): void {
-  const clip = row.entry.asset.animations[row.index];
-  const action = row.entry.actions[row.index];
-  if (!clip || !action) return;
-  animDuration.textContent = `/ ${clip.duration.toFixed(2)}s`;
-  viewer.playAction(action);
-  activeAnimRow = row;
-  refreshAnimationActiveRow();
+  // Feed the bottom timeline / dope sheet.
+  const clips: TimelineClip[] = animRows.map((r) => {
+    const clip = r.entry.asset.animations[r.index];
+    const name = clip.name || `clip ${r.index}`;
+    return {
+      entry: r.entry,
+      index: r.index,
+      label: viewer.entries.length > 1 ? `${r.entry.label} · ${name}` : name,
+      clip,
+    };
+  });
+  // animRows was rebuilt, so match the active row by value, not identity.
+  const activeIdx = activeAnimRow
+    ? animRows.findIndex((r) => r.entry === activeAnimRow!.entry && r.index === activeAnimRow!.index)
+    : 0;
+  timeline.setClips(clips, Math.max(0, activeIdx));
+
+  // Activate the first clip paused so the timeline is immediately scrubbable.
+  if (!activeAnimRow && animRows.length) selectAnim(animRows[0], false);
 }
 
 function setAnimEnabled(enabled: boolean): void {

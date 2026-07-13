@@ -105,6 +105,7 @@ For multi-file formats (`.gltf` + `.bin` + textures, `.obj` + `.mtl` + textures)
 - **Selection inspector** — click a node in the tree *or* directly in the viewport to see name, type, transform, vertex / triangle / index counts, attribute list, material list, bone count, and bounding box.
 - **File info panel** — format, size, parse time, glTF generator/version, scene totals, geometry totals, unique materials by type, texture count, light/camera summaries. Updates as you import more meshes.
 - **Animation control** — every `AnimationClip` is listed with its duration; play / pause / stop, scrub bar, and a 0–2× speed slider drive a real `THREE.AnimationMixer`. With multiple imports, animations are grouped under their source file and can be swapped on the fly.
+- **Timeline / dope sheet** — a Blender-style, read-only timeline docks under the viewport whenever the scene has animations: frame ruler with a scrubbable playhead, per-node keyframe rows (expandable to position / rotation / scale / morph channels), frame-by-frame stepping, keyframe jumping, auto-detected FPS (overridable), loop toggle, and playback-speed presets. `Space` plays/pauses, `←`/`→` step one frame, `Shift+←`/`→` jump to start/end, `↑`/`↓` jump between keyframes, `Ctrl`+scroll zooms the ruler.
 - **Shading modes** — smooth, flat, wireframe, points, and a normals debug shader.
 - **View helpers** — grid, axes, bounding box, auto-rotate, IBL studio/neutral environment, background color picker.
 - **Frame-to-fit** — `Reset Camera` for the whole scene, `Frame Selection` (or double-click a tree row) for a single node.
@@ -160,6 +161,24 @@ Each imported file is wrapped in a group named after its file name and added to 
 - **Hierarchy** — tree of every `Object3D` under `Content`, with eye-toggle visibility and a search box. Selected node's details appear at the bottom. Multiple imports show as siblings at the top level.
 - **Info** — file metadata + scene/geometry/material/light/camera totals, summed across all imports.
 - **Animations** — list of all clips grouped by source file, transport controls, time scrubber, speed slider.
+
+### Timeline / dope sheet
+
+When the loaded scene has at least one animation clip, a Blender-style timeline appears under the viewport. It's a **visualization-only** panel — it never edits keyframes.
+
+- **Transport bar** — clip dropdown, jump-to-start/end, previous/next keyframe, previous/next frame, play/pause, an editable current-frame field, auto-detected FPS (changeable), speed presets, and a loop toggle.
+- **Dope sheet** — the top *summary* row aggregates every key in the clip; below it, one row per animated node shows that node's keys as diamonds. Click a node row's label to expand its channels (Position / Rotation / Scale / Morph). Areas outside the clip's frame range are shaded dark.
+- **Scrubbing** — click or drag anywhere in the ruler or track area; the playhead snaps to whole frames. The frame field, sidebar scrub bar, and 3D pose all stay in sync.
+- **Navigation** — `Ctrl`/`Cmd` + scroll zooms around the cursor, `Shift` + scroll (or trackpad horizontal) pans, plain scroll moves through track rows.
+
+| Shortcut | Action |
+| --- | --- |
+| `Space` | Play / pause |
+| `←` / `→` | Step one frame back / forward |
+| `Shift+←` / `Shift+→` | Jump to first / last frame |
+| `↑` / `↓` | Jump to next / previous keyframe |
+
+Selecting a clip (sidebar row or timeline dropdown) while paused shows the clip's first frame without starting playback, so you can immediately step through frames; if a clip is already playing, the new clip keeps playing.
 - **View** — shading mode, grid/axes/bounds toggles, auto-rotate, background, environment, reset/frame buttons.
 
 ---
