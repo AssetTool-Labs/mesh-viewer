@@ -56,6 +56,9 @@ export class Viewer {
   private boundsHelper: THREE.Box3Helper | null = null;
   private skeletonHelpers: THREE.SkeletonHelper[] = [];
   private jointMarkers: THREE.Object3D[] = [];
+  private skeletonBones: THREE.Bone[] = [];
+  private jointInstances: THREE.InstancedMesh | null = null;
+  private boneLinks: { mesh: THREE.Mesh; bone: THREE.Bone; parent: THREE.Object3D }[] = [];
   private wireframeOverlays: THREE.Object3D[] = [];
   private showSkeleton = false;
   private showWireframeOverlay = false;
@@ -258,24 +261,21 @@ export class Viewer {
       opacity: 0.9,
     });
     const boneRadius = jointSize * 0.2;
-    const pA = new THREE.Vector3();
-    const pB = new THREE.Vector3();
+    // Unit-length cylinder along +Z; each frame it is positioned at the
+    // parent joint, aimed at the child joint, and scaled to the bone length
+    // so the markers follow animation playback.
+    const cyl = new THREE.CylinderGeometry(boneRadius, boneRadius, 1, 4, 1);
+    cyl.translate(0, 0.5, 0);
+    cyl.rotateX(Math.PI / 2);
     for (const bone of allBones) {
       if (!bone.parent || !(bone.parent as THREE.Bone).isBone) continue;
-      bone.getWorldPosition(pA);
-      bone.parent.getWorldPosition(pB);
-      const dist = pA.distanceTo(pB);
-      if (dist < 1e-6) continue;
-      const cyl = new THREE.CylinderGeometry(boneRadius, boneRadius, dist, 4, 1);
-      cyl.translate(0, dist / 2, 0);
-      cyl.rotateX(Math.PI / 2);
       const mesh = new THREE.Mesh(cyl, boneMat);
-      mesh.position.copy(pB);
-      mesh.lookAt(pA);
       mesh.renderOrder = 998;
+      mesh.frustumCulled = false;
       mesh.raycast = () => {};
       this.scene.add(mesh);
       this.jointMarkers.push(mesh);
+      this.boneLinks.push({ mesh, bone, parent: bone.parent });
     }
 
     // Joint spheres
@@ -290,15 +290,38 @@ export class Viewer {
     instances.frustumCulled = false;
     instances.renderOrder = 1000;
     instances.raycast = () => {};
-    const dummy = new THREE.Object3D();
-    for (let i = 0; i < allBones.length; i++) {
-      allBones[i].getWorldPosition(dummy.position);
-      dummy.updateMatrix();
-      instances.setMatrixAt(i, dummy.matrix);
-    }
-    instances.instanceMatrix.needsUpdate = true;
+    instances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(instances);
     this.jointMarkers.push(instances);
+    this.jointInstances = instances;
+    this.skeletonBones = allBones;
+
+    this.updateSkeletonMarkers();
+  }
+
+  /** Re-pose joint spheres and bone cylinders from current bone world positions. */
+  private updateSkeletonMarkers(): void {
+    const pA = new THREE.Vector3();
+    const pB = new THREE.Vector3();
+    for (const link of this.boneLinks) {
+      link.bone.getWorldPosition(pA);
+      link.parent.getWorldPosition(pB);
+      const dist = pA.distanceTo(pB);
+      link.mesh.visible = dist > 1e-6;
+      if (!link.mesh.visible) continue;
+      link.mesh.position.copy(pB);
+      link.mesh.lookAt(pA);
+      link.mesh.scale.set(1, 1, dist);
+    }
+    if (this.jointInstances) {
+      const dummy = new THREE.Object3D();
+      for (let i = 0; i < this.skeletonBones.length; i++) {
+        this.skeletonBones[i].getWorldPosition(dummy.position);
+        dummy.updateMatrix();
+        this.jointInstances.setMatrixAt(i, dummy.matrix);
+      }
+      this.jointInstances.instanceMatrix.needsUpdate = true;
+    }
   }
 
   private estimateJointSize(): number {
@@ -325,6 +348,9 @@ export class Viewer {
       }
     }
     this.jointMarkers = [];
+    this.boneLinks = [];
+    this.jointInstances = null;
+    this.skeletonBones = [];
   }
 
   private rebuildWireframeOverlays(): void {
@@ -741,6 +767,11 @@ export class Viewer {
       if (this.activeAction && this.currentClip && this.animationCallback) {
         this.animationCallback(this.activeAction.time, this.currentClip.duration);
       }
+    }
+    // Keep skeleton joint/bone markers in sync with animated bone poses
+    // (also covers paused timeline scrubbing, which poses bones via mixer.update(0)).
+    if (this.showSkeleton && this.skeletonBones.length > 0) {
+      this.updateSkeletonMarkers();
     }
     this.composer.render();
 
