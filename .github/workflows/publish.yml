@@ -58,3 +58,20 @@ jobs:
               --title "$GITHUB_REF_NAME" \
               --generate-notes
           fi
+
+      - name: Commit version bump back to main
+        if: github.event_name == 'push'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -- .
+          git fetch origin main
+          git checkout -B main origin/main
+          if [ "$(node -p "require('./package.json').version")" = "$VERSION" ]; then
+            echo "package.json on main is already at $VERSION; nothing to commit."
+            exit 0
+          fi
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          git commit -am "chore: bump version to $VERSION"
+          git push origin main
