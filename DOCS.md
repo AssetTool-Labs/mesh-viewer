@@ -176,8 +176,9 @@ These live under `3dMeshViewer.*` in your settings:
 | `3dMeshViewer.autoRotate` | `false` | Auto-rotate camera around model. |
 | `3dMeshViewer.shading` | `smooth` | One of `smooth`, `flat`, `wireframe`, `points`, `normals`. |
 | `3dMeshViewer.environment` | `studio` | IBL environment for PBR materials: `studio`, `neutral`, `none`. |
+| `3dMeshViewer.rememberViewSettings` | `true` | Remember the last view settings you chose (shading, grid, axes, auto-rotate, background, environment, and the bounds/skeleton/wireframe-overlay toggles) and apply them to newly opened viewers. Turn off to always start from the configured defaults above. |
 
-Settings apply to newly opened viewers; existing viewers keep their current state (you can change everything per-viewer in the **View** tab).
+Settings apply to newly opened viewers; existing viewers keep their current state (you can change everything per-viewer in the **View** tab). With `rememberViewSettings` on (the default), the last view settings you picked in any viewer carry over to the next file you open — and persist across restarts — taking precedence over the defaults above.
 
 ---
 

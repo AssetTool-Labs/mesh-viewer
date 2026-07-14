@@ -4,7 +4,7 @@ import type {
   AddFileMessage,
   FilePayload,
   InitMessage,
-  ViewerConfig,
+  ViewSettings,
 } from '../types';
 import { loadAsset, type LoadedAsset } from './loaders';
 import {
@@ -164,15 +164,23 @@ document.querySelectorAll<HTMLButtonElement>('.tab').forEach((tab) => {
 });
 
 // ---- View settings ----
-shadingSelect.addEventListener('change', () => viewer.setShading(shadingSelect.value as ShadingMode));
-toggleGrid.addEventListener('change', () => viewer.setGridVisible(toggleGrid.checked));
-toggleAxes.addEventListener('change', () => viewer.setAxesVisible(toggleAxes.checked));
-toggleBounds.addEventListener('change', () => viewer.setBoundsVisible(toggleBounds.checked));
-toggleSkeleton.addEventListener('change', () => viewer.setSkeletonVisible(toggleSkeleton.checked));
-toggleWireframeOverlay.addEventListener('change', () => viewer.setWireframeOverlayVisible(toggleWireframeOverlay.checked));
-toggleAutoRotate.addEventListener('change', () => viewer.setAutoRotate(toggleAutoRotate.checked));
+// Each control both applies its change live and reports the full settings
+// snapshot to the host, which remembers it for future viewers (see
+// pushViewSettings). Programmatic sync in applyViewSettings assigns
+// .value/.checked directly, which does NOT dispatch 'change', so it never
+// echoes back to the host.
+shadingSelect.addEventListener('change', () => { viewer.setShading(shadingSelect.value as ShadingMode); pushViewSettings(); });
+toggleGrid.addEventListener('change', () => { viewer.setGridVisible(toggleGrid.checked); pushViewSettings(); });
+toggleAxes.addEventListener('change', () => { viewer.setAxesVisible(toggleAxes.checked); pushViewSettings(); });
+toggleBounds.addEventListener('change', () => { viewer.setBoundsVisible(toggleBounds.checked); pushViewSettings(); });
+toggleSkeleton.addEventListener('change', () => { viewer.setSkeletonVisible(toggleSkeleton.checked); pushViewSettings(); });
+toggleWireframeOverlay.addEventListener('change', () => { viewer.setWireframeOverlayVisible(toggleWireframeOverlay.checked); pushViewSettings(); });
+toggleAutoRotate.addEventListener('change', () => { viewer.setAutoRotate(toggleAutoRotate.checked); pushViewSettings(); });
+// 'input' fires continuously as the color picker is dragged (live preview);
+// 'change' fires once when it closes, so we only persist then.
 bgColor.addEventListener('input', () => viewer.setBackground(bgColor.value));
-envSelect.addEventListener('change', () => viewer.applyEnvironment(envSelect.value as EnvironmentMode));
+bgColor.addEventListener('change', () => pushViewSettings());
+envSelect.addEventListener('change', () => { viewer.applyEnvironment(envSelect.value as EnvironmentMode); pushViewSettings(); });
 resetCameraBtn.addEventListener('click', () => viewer.frameAll());
 frameSelectionBtn.addEventListener('click', () => {
   if (selectedObject) viewer.frameObject(selectedObject);
@@ -555,7 +563,7 @@ async function fetchPayload(msg: FilePayload): Promise<ArrayBuffer | string> {
 vscode.postMessage({ type: 'ready' });
 
 async function handleInit(msg: InitMessage): Promise<void> {
-  applyConfig(msg.config);
+  applyViewSettings(msg.settings);
   primaryFile = { name: msg.fileName, ext: msg.fileExtension, size: msg.fileSizeBytes };
   fileNameEl.textContent = msg.fileName;
   fileSubtitleEl.textContent = `${msg.fileExtension.toUpperCase()} · ${formatBytes(msg.fileSizeBytes)}`;
@@ -645,20 +653,45 @@ function finishPendingImport(requestId: string | undefined): void {
   pending.toastEl?.remove();
 }
 
-function applyConfig(config: ViewerConfig): void {
-  viewer.setBackground(config.backgroundColor);
-  viewer.setGridVisible(config.showGrid);
-  viewer.setAxesVisible(config.showAxes);
-  viewer.setAutoRotate(config.autoRotate);
-  viewer.setShading(config.shading);
-  viewer.applyEnvironment(config.environment);
+function applyViewSettings(settings: ViewSettings): void {
+  viewer.setBackground(settings.backgroundColor);
+  viewer.setGridVisible(settings.showGrid);
+  viewer.setAxesVisible(settings.showAxes);
+  viewer.setAutoRotate(settings.autoRotate);
+  viewer.setShading(settings.shading);
+  viewer.applyEnvironment(settings.environment);
+  viewer.setBoundsVisible(settings.showBounds);
+  viewer.setSkeletonVisible(settings.showSkeleton);
+  viewer.setWireframeOverlayVisible(settings.showWireframeOverlay);
 
-  toggleGrid.checked = config.showGrid;
-  toggleAxes.checked = config.showAxes;
-  toggleAutoRotate.checked = config.autoRotate;
-  shadingSelect.value = config.shading;
-  envSelect.value = config.environment;
-  bgColor.value = normalizeHexColor(config.backgroundColor);
+  // Assigning .value/.checked directly does not dispatch a 'change' event, so
+  // this sync does not re-trigger pushViewSettings.
+  toggleGrid.checked = settings.showGrid;
+  toggleAxes.checked = settings.showAxes;
+  toggleAutoRotate.checked = settings.autoRotate;
+  toggleBounds.checked = settings.showBounds;
+  toggleSkeleton.checked = settings.showSkeleton;
+  toggleWireframeOverlay.checked = settings.showWireframeOverlay;
+  shadingSelect.value = settings.shading;
+  envSelect.value = settings.environment;
+  bgColor.value = normalizeHexColor(settings.backgroundColor);
+}
+
+/** Report the current control state to the host so it can remember it for
+ *  viewers opened later. */
+function pushViewSettings(): void {
+  const settings: ViewSettings = {
+    backgroundColor: bgColor.value,
+    showGrid: toggleGrid.checked,
+    showAxes: toggleAxes.checked,
+    autoRotate: toggleAutoRotate.checked,
+    shading: shadingSelect.value as ViewSettings['shading'],
+    environment: envSelect.value as ViewSettings['environment'],
+    showBounds: toggleBounds.checked,
+    showSkeleton: toggleSkeleton.checked,
+    showWireframeOverlay: toggleWireframeOverlay.checked,
+  };
+  vscode.postMessage({ type: 'viewSettingsChanged', settings });
 }
 
 function normalizeHexColor(c: string): string {

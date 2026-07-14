@@ -1,8 +1,11 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import type { FilePayload, InitMessage, ViewerConfig, FromWebviewMessage } from './types';
+import type { FilePayload, InitMessage, ViewerConfig, ViewSettings, FromWebviewMessage } from './types';
 
 const TEXT_EXTENSIONS = new Set(['obj', 'gltf', 'dae', 'wrl', 'vrml', 'usda', 'xyz']);
+
+/** globalState key under which the last-used view settings are remembered. */
+const REMEMBERED_KEY = '3dMeshViewer.viewSettings';
 
 // Image extensions that 3D formats may reference as textures.
 const TEXTURE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'ktx', 'ktx2', 'basis', 'tga', 'bmp', 'gif', 'exr', 'hdr'];
@@ -79,7 +82,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
         case 'ready':
           try {
             const payload = this.buildFilePayload(webview, document.uri);
-            const init: InitMessage = { type: 'init', config: this.readConfig(), ...payload };
+            const init: InitMessage = { type: 'init', settings: this.effectiveViewSettings(), ...payload };
             await webview.postMessage(init);
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
@@ -167,6 +170,13 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
         case 'error':
           vscode.window.showErrorMessage(`3D Mesh Viewer: ${msg.message}`);
           break;
+        case 'viewSettingsChanged':
+          // Remember the latest view settings so newly opened viewers can adopt
+          // them. Persist unconditionally; `rememberViewSettings` only gates
+          // whether they're re-applied on init (see effectiveViewSettings), so
+          // toggling that setting off then on restores the last state.
+          void this.context.globalState.update(REMEMBERED_KEY, msg.settings);
+          break;
       }
     });
     webviewPanel.onDidDispose(() => sub.dispose());
@@ -245,6 +255,26 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       shading: c.get<ViewerConfig['shading']>('shading', 'smooth'),
       environment: c.get<ViewerConfig['environment']>('environment', 'studio'),
     };
+  }
+
+  /**
+   * The view settings a freshly opened viewer should start with: the configured
+   * defaults, with the last-remembered settings merged over them when the
+   * `rememberViewSettings` setting is enabled.
+   */
+  private effectiveViewSettings(): ViewSettings {
+    const defaults: ViewSettings = {
+      ...this.readConfig(),
+      showBounds: false,
+      showSkeleton: false,
+      showWireframeOverlay: false,
+    };
+    const remember = vscode.workspace
+      .getConfiguration('3dMeshViewer')
+      .get<boolean>('rememberViewSettings', true);
+    if (!remember) return defaults;
+    const remembered = this.context.globalState.get<Partial<ViewSettings>>(REMEMBERED_KEY);
+    return remembered ? { ...defaults, ...remembered } : defaults;
   }
 
   private async buildHtml(webview: vscode.Webview, mediaRoot: vscode.Uri): Promise<string> {
