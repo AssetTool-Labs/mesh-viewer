@@ -13,11 +13,11 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
 
       - run: npm ci
 
@@ -57,7 +57,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "::warning::GitHub release $GITHUB_REF_NAME already exists. Skipping release creation."
+            echo "::notice::GitHub release $GITHUB_REF_NAME already exists. Uploading extension.vsix to it."
+            gh release upload "$GITHUB_REF_NAME" extension.vsix --clobber
           else
             gh release create "$GITHUB_REF_NAME" extension.vsix \
               --title "$GITHUB_REF_NAME" \
