@@ -23,15 +23,9 @@ jobs:
 
       - run: npm run typecheck
 
-      - name: Verify tag matches package.json version
+      - name: Sync package.json version from tag
         if: github.event_name == 'push'
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PKG_VERSION=$(node -p "require('./package.json').version")
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "Tag v$TAG_VERSION does not match package.json version $PKG_VERSION"
-            exit 1
-          fi
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
 
       - name: Package
         run: npx vsce package --no-dependencies -o extension.vsix
