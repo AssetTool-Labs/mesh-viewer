@@ -8,30 +8,25 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
 
       - run: npm ci
 
       - run: npm run typecheck
 
-      - name: Verify tag matches package.json version
+      - name: Sync package.json version from tag
         if: github.event_name == 'push'
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          PKG_VERSION=$(node -p "require('./package.json').version")
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "Tag v$TAG_VERSION does not match package.json version $PKG_VERSION"
-            exit 1
-          fi
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
 
       - name: Package
         run: npx vsce package --no-dependencies -o extension.vsix
@@ -57,9 +52,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "::warning::GitHub release $GITHUB_REF_NAME already exists. Skipping release creation."
+            echo "::notice::GitHub release $GITHUB_REF_NAME already exists. Uploading extension.vsix to it."
+            gh release upload "$GITHUB_REF_NAME" extension.vsix --clobber
           else
             gh release create "$GITHUB_REF_NAME" extension.vsix \
               --title "$GITHUB_REF_NAME" \
               --generate-notes
           fi
+
+      - name: Open version bump PR against main
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BRANCH="chore/bump-version-$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -- .
+          git fetch origin main
+          git checkout -B "$BRANCH" origin/main
+          if [ "$(node -p "require('./package.json').version")" = "$VERSION" ]; then
+            echo "package.json on main is already at $VERSION; nothing to do."
+            exit 0
+          fi
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          git commit -am "chore: bump version to $VERSION"
+          git push -f origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "chore: bump version to $VERSION" \
+            --body "Automated version bump after publishing $GITHUB_REF_NAME." \
+            || echo "::notice::A pull request for $BRANCH already exists."
