@@ -79,7 +79,10 @@ jobs:
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           git commit -am "chore: bump version to $VERSION"
           git push -f origin "$BRANCH"
-          gh pr create --base main --head "$BRANCH" \
-            --title "chore: bump version to $VERSION" \
-            --body "Automated version bump after publishing $GITHUB_REF_NAME." \
-            || echo "::notice::A pull request for $BRANCH already exists."
+          if [ -n "$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[].number')" ]; then
+            echo "::notice::A pull request for $BRANCH already exists."
+          else
+            gh pr create --base main --head "$BRANCH" \
+              --title "chore: bump version to $VERSION" \
+              --body "Automated version bump after publishing $GITHUB_REF_NAME."
+          fi
