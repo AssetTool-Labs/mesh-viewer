@@ -56,6 +56,9 @@ export class Viewer {
   private boundsHelper: THREE.Box3Helper | null = null;
   private skeletonHelpers: THREE.SkeletonHelper[] = [];
   private jointMarkers: THREE.Object3D[] = [];
+  private skeletonBones: THREE.Bone[] = [];
+  private jointInstances: THREE.InstancedMesh | null = null;
+  private boneLinks: { mesh: THREE.Mesh; bone: THREE.Bone; parent: THREE.Object3D }[] = [];
   private wireframeOverlays: THREE.Object3D[] = [];
   private showSkeleton = false;
   private showWireframeOverlay = false;
@@ -78,7 +81,9 @@ export class Viewer {
   private currentClip: THREE.AnimationClip | null = null;
   private animationSpeed = 1;
   private animationPaused = false;
+  private animationLooping = true;
   private animationCallback: ((time: number, duration: number) => void) | null = null;
+  private animationFinishedCallback: (() => void) | null = null;
 
   private originalMaterials = new WeakMap<THREE.Object3D, MaterialBackup>();
   private shadingMode: ShadingMode = 'smooth';
@@ -153,6 +158,11 @@ export class Viewer {
 
   setAnimationCallback(cb: (time: number, duration: number) => void): void {
     this.animationCallback = cb;
+  }
+
+  /** Fired when a non-looping clip reaches its end. */
+  setAnimationFinishedCallback(cb: () => void): void {
+    this.animationFinishedCallback = cb;
   }
 
   setBackground(color: string): void {
@@ -251,24 +261,21 @@ export class Viewer {
       opacity: 0.9,
     });
     const boneRadius = jointSize * 0.2;
-    const pA = new THREE.Vector3();
-    const pB = new THREE.Vector3();
+    // Unit-length cylinder along +Z; each frame it is positioned at the
+    // parent joint, aimed at the child joint, and scaled to the bone length
+    // so the markers follow animation playback.
+    const cyl = new THREE.CylinderGeometry(boneRadius, boneRadius, 1, 4, 1);
+    cyl.translate(0, 0.5, 0);
+    cyl.rotateX(Math.PI / 2);
     for (const bone of allBones) {
       if (!bone.parent || !(bone.parent as THREE.Bone).isBone) continue;
-      bone.getWorldPosition(pA);
-      bone.parent.getWorldPosition(pB);
-      const dist = pA.distanceTo(pB);
-      if (dist < 1e-6) continue;
-      const cyl = new THREE.CylinderGeometry(boneRadius, boneRadius, dist, 4, 1);
-      cyl.translate(0, dist / 2, 0);
-      cyl.rotateX(Math.PI / 2);
       const mesh = new THREE.Mesh(cyl, boneMat);
-      mesh.position.copy(pB);
-      mesh.lookAt(pA);
       mesh.renderOrder = 998;
+      mesh.frustumCulled = false;
       mesh.raycast = () => {};
       this.scene.add(mesh);
       this.jointMarkers.push(mesh);
+      this.boneLinks.push({ mesh, bone, parent: bone.parent });
     }
 
     // Joint spheres
@@ -283,15 +290,38 @@ export class Viewer {
     instances.frustumCulled = false;
     instances.renderOrder = 1000;
     instances.raycast = () => {};
-    const dummy = new THREE.Object3D();
-    for (let i = 0; i < allBones.length; i++) {
-      allBones[i].getWorldPosition(dummy.position);
-      dummy.updateMatrix();
-      instances.setMatrixAt(i, dummy.matrix);
-    }
-    instances.instanceMatrix.needsUpdate = true;
+    instances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(instances);
     this.jointMarkers.push(instances);
+    this.jointInstances = instances;
+    this.skeletonBones = allBones;
+
+    this.updateSkeletonMarkers();
+  }
+
+  /** Re-pose joint spheres and bone cylinders from current bone world positions. */
+  private updateSkeletonMarkers(): void {
+    const pA = new THREE.Vector3();
+    const pB = new THREE.Vector3();
+    for (const link of this.boneLinks) {
+      link.bone.getWorldPosition(pA);
+      link.parent.getWorldPosition(pB);
+      const dist = pA.distanceTo(pB);
+      link.mesh.visible = dist > 1e-6;
+      if (!link.mesh.visible) continue;
+      link.mesh.position.copy(pB);
+      link.mesh.lookAt(pA);
+      link.mesh.scale.set(1, 1, dist);
+    }
+    if (this.jointInstances) {
+      const dummy = new THREE.Object3D();
+      for (let i = 0; i < this.skeletonBones.length; i++) {
+        this.skeletonBones[i].getWorldPosition(dummy.position);
+        dummy.updateMatrix();
+        this.jointInstances.setMatrixAt(i, dummy.matrix);
+      }
+      this.jointInstances.instanceMatrix.needsUpdate = true;
+    }
   }
 
   private estimateJointSize(): number {
@@ -318,6 +348,9 @@ export class Viewer {
       }
     }
     this.jointMarkers = [];
+    this.boneLinks = [];
+    this.jointInstances = null;
+    this.skeletonBones = [];
   }
 
   private rebuildWireframeOverlays(): void {
@@ -504,7 +537,16 @@ export class Viewer {
       }
     });
 
-    if (!this.mixer) this.mixer = new THREE.AnimationMixer(this.contentRoot);
+    if (!this.mixer) {
+      this.mixer = new THREE.AnimationMixer(this.contentRoot);
+      this.mixer.addEventListener('finished', () => {
+        // Only fires for LoopOnce actions. clampWhenFinished keeps the pose on
+        // the last frame; flip our pause flag so the UI shows "stopped at end".
+        this.animationPaused = true;
+        if (this.activeAction) this.activeAction.paused = true;
+        this.animationFinishedCallback?.();
+      });
+    }
     const actions = asset.animations.map((clip) => this.mixer!.clipAction(clip, asset.root));
 
     const entry: AssetEntry = { label, wrapper, asset, actions };
@@ -591,10 +633,57 @@ export class Viewer {
     }
     action.reset().fadeIn(0.2).play();
     action.setEffectiveTimeScale(this.animationSpeed);
+    this.applyLoopMode(action);
     this.activeAction = action;
     this.currentClip = action.getClip();
     this.animationPaused = false;
     action.paused = false;
+  }
+
+  /** Activate an action paused on its first frame, so the timeline can scrub
+   *  and step frames without starting playback (Blender-style clip select). */
+  selectActionPaused(action: THREE.AnimationAction): void {
+    if (!this.mixer) return;
+    if (this.activeAction && this.activeAction !== action) {
+      this.activeAction.stop();
+    }
+    action.reset().play();
+    action.setEffectiveTimeScale(this.animationSpeed);
+    action.setEffectiveWeight(1);
+    this.applyLoopMode(action);
+    action.paused = true;
+    this.activeAction = action;
+    this.currentClip = action.getClip();
+    this.animationPaused = true;
+    // Evaluate once so the model snaps to frame 0 of the selected clip.
+    this.mixer.update(0);
+  }
+
+  setClipLooping(loop: boolean): void {
+    this.animationLooping = loop;
+    if (this.activeAction) this.applyLoopMode(this.activeAction);
+  }
+
+  private applyLoopMode(action: THREE.AnimationAction): void {
+    action.setLoop(this.animationLooping ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+    action.clampWhenFinished = true;
+  }
+
+  get clipLooping(): boolean {
+    return this.animationLooping;
+  }
+
+  get isAnimationPlaying(): boolean {
+    return this.activeAction !== null && !this.animationPaused;
+  }
+
+  /** Current time (seconds) of the active action, 0 when none. */
+  get animationTime(): number {
+    return this.activeAction ? this.activeAction.time : 0;
+  }
+
+  get activeClipDuration(): number {
+    return this.currentClip ? this.currentClip.duration : 0;
   }
 
   pauseAnimation(): void {
@@ -678,6 +767,11 @@ export class Viewer {
       if (this.activeAction && this.currentClip && this.animationCallback) {
         this.animationCallback(this.activeAction.time, this.currentClip.duration);
       }
+    }
+    // Keep skeleton joint/bone markers in sync with animated bone poses
+    // (also covers paused timeline scrubbing, which poses bones via mixer.update(0)).
+    if (this.showSkeleton && this.skeletonBones.length > 0) {
+      this.updateSkeletonMarkers();
     }
     this.composer.render();
 

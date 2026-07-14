@@ -150,6 +150,7 @@
         </section>
       </aside>
 
+      <div id="mainCol">
       <main id="viewport">
         <canvas id="canvas"></canvas>
         <div id="hud">
@@ -176,6 +177,46 @@
         </div>
         <div id="toastStack"></div>
       </main>
+
+      <!-- Blender-style animation timeline / dope sheet (read-only). -->
+      <section id="timeline" class="hidden">
+        <div class="tl-header">
+          <button id="tlCollapse" class="tl-btn" title="Collapse timeline">▾</button>
+          <select id="tlClipSelect" title="Animation clip"></select>
+          <div class="tl-transport">
+            <button id="tlToStart" class="tl-btn" title="Jump to start (Shift+←)">⏮</button>
+            <button id="tlPrevKey" class="tl-btn" title="Previous keyframe (↓)">◆‹</button>
+            <button id="tlPrevFrame" class="tl-btn" title="Previous frame (←)">‹</button>
+            <button id="tlPlay" class="tl-btn tl-play" title="Play (Space)">▶</button>
+            <button id="tlNextFrame" class="tl-btn" title="Next frame (→)">›</button>
+            <button id="tlNextKey" class="tl-btn" title="Next keyframe (↑)">›◆</button>
+            <button id="tlToEnd" class="tl-btn" title="Jump to end (Shift+→)">⏭</button>
+          </div>
+          <div class="tl-frame">
+            <input id="tlFrameInput" type="number" min="0" step="1" value="0" title="Current frame" />
+            <span id="tlFrameTotal" class="tl-muted">/ 0</span>
+            <span id="tlTimeLabel" class="tl-muted">0.00s</span>
+          </div>
+          <div class="tl-opts">
+            <label class="tl-opt">FPS <select id="tlFps"></select></label>
+            <label class="tl-opt">Speed
+              <select id="tlSpeed">
+                <option value="0.1">0.1×</option>
+                <option value="0.25">0.25×</option>
+                <option value="0.5">0.5×</option>
+                <option value="1" selected>1×</option>
+                <option value="1.5">1.5×</option>
+                <option value="2">2×</option>
+              </select>
+            </label>
+            <button id="tlLoop" class="tl-btn active" title="Loop playback">⟳</button>
+          </div>
+        </div>
+        <div id="tlBody" class="tl-body">
+          <canvas id="tlCanvas"></canvas>
+        </div>
+      </section>
+      </div>
 
       <button id="sidebarToggle" aria-label="Toggle panel" title="Toggle panel">⮜</button>
     </div>
