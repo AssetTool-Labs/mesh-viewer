@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   publish:
@@ -59,19 +60,26 @@ jobs:
               --generate-notes
           fi
 
-      - name: Commit version bump back to main
+      - name: Open version bump PR against main
         if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          BRANCH="chore/bump-version-$VERSION"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -- .
           git fetch origin main
-          git checkout -B main origin/main
+          git checkout -B "$BRANCH" origin/main
           if [ "$(node -p "require('./package.json').version")" = "$VERSION" ]; then
-            echo "package.json on main is already at $VERSION; nothing to commit."
+            echo "package.json on main is already at $VERSION; nothing to do."
             exit 0
           fi
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           git commit -am "chore: bump version to $VERSION"
-          git push origin main
+          git push -f origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "chore: bump version to $VERSION" \
+            --body "Automated version bump after publishing $GITHUB_REF_NAME." \
+            || echo "::notice::A pull request for $BRANCH already exists."
