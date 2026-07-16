@@ -9,6 +9,18 @@ export interface ViewerConfig {
   environment: 'studio' | 'neutral' | 'none';
 }
 
+/**
+ * The full set of view settings the viewer can remember across opened files.
+ * Superset of `ViewerConfig`: the extra booleans are not backed by VS Code
+ * settings (they default to false) but are still persisted when "remember view
+ * settings" is enabled.
+ */
+export interface ViewSettings extends ViewerConfig {
+  showBounds: boolean;
+  showSkeleton: boolean;
+  showWireframeOverlay: boolean;
+}
+
 /** Payload describing one loaded file. Reused by `init` and `addFile`. */
 export interface FilePayload {
   fileName: string;
@@ -25,7 +37,7 @@ export interface FilePayload {
 /** Message: extension -> webview, sent once when the editor opens. */
 export interface InitMessage extends FilePayload {
   type: 'init';
-  config: ViewerConfig;
+  settings: ViewSettings;
 }
 
 /** Message: extension -> webview, sent for each additional file imported via drag-and-drop. */
@@ -51,4 +63,6 @@ export type FromWebviewMessage =
   /** Ask the host to read the given URIs (e.g. dragged from VS Code's Explorer) and post them back as `addFile`. */
   | { type: 'loadUris'; requestId: string; uris: string[] }
   /** Ask the host to show an open-file dialog and import the selected files. */
-  | { type: 'pickAndImport'; requestId: string };
+  | { type: 'pickAndImport'; requestId: string }
+  /** Report the current view settings so the host can remember them for future viewers. */
+  | { type: 'viewSettingsChanged'; settings: ViewSettings };

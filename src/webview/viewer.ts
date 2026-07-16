@@ -60,6 +60,7 @@ export class Viewer {
   private jointInstances: THREE.InstancedMesh | null = null;
   private boneLinks: { mesh: THREE.Mesh; bone: THREE.Bone; parent: THREE.Object3D }[] = [];
   private wireframeOverlays: THREE.Object3D[] = [];
+  private showBounds = false;
   private showSkeleton = false;
   private showWireframeOverlay = false;
   private hemiLight: THREE.HemisphereLight | null = null;
@@ -195,14 +196,26 @@ export class Viewer {
   }
 
   setBoundsVisible(v: boolean): void {
-    if (v && !this.boundsHelper && this.entries.length) {
-      const box = new THREE.Box3().setFromObject(this.contentRoot);
-      this.boundsHelper = new THREE.Box3Helper(box, new THREE.Color(0xffaa00));
-      this.scene.add(this.boundsHelper);
-    } else if (!v && this.boundsHelper) {
+    this.showBounds = v;
+    if (v) {
+      this.rebuildBoundsHelper();
+    } else if (this.boundsHelper) {
       this.scene.remove(this.boundsHelper);
       this.boundsHelper = null;
     }
+  }
+
+  /** (Re)create the bounds helper around the currently loaded content. No-op
+   *  until an asset is loaded; `attachAsset` replays it once content exists. */
+  private rebuildBoundsHelper(): void {
+    if (this.boundsHelper) {
+      this.scene.remove(this.boundsHelper);
+      this.boundsHelper = null;
+    }
+    if (!this.entries.length) return;
+    const box = new THREE.Box3().setFromObject(this.contentRoot);
+    this.boundsHelper = new THREE.Box3Helper(box, new THREE.Color(0xffaa00));
+    this.scene.add(this.boundsHelper);
   }
 
   setSkeletonVisible(v: boolean): void {
@@ -562,6 +575,7 @@ export class Viewer {
       this.setShading(requested);
     }
 
+    if (this.showBounds) this.rebuildBoundsHelper();
     if (this.showSkeleton) this.rebuildSkeletonHelpers();
     if (this.showWireframeOverlay) this.rebuildWireframeOverlays();
 
