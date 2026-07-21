@@ -6,6 +6,9 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutlinePass } from 'three/examples/jsm/postprocessing/OutlinePass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import type { LoadedAsset } from './loaders';
+import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
+
+export type { WeightMode } from './weightMaterial';
 
 export type ShadingMode = 'smooth' | 'flat' | 'wireframe' | 'points' | 'normals';
 export type EnvironmentMode = 'studio' | 'neutral' | 'none';
@@ -62,6 +65,10 @@ export class Viewer {
   private wireframeOverlays: THREE.Object3D[] = [];
   private showSkeleton = false;
   private showWireframeOverlay = false;
+  private weightMode: WeightMode = 'off';
+  private weightBoneIndex = 0;
+  /** Debug materials created per SkinnedMesh while weight display is active. */
+  private weightMats: { mesh: THREE.SkinnedMesh; entry: WeightMaterialEntry }[] = [];
   private hemiLight: THREE.HemisphereLight | null = null;
   private dirLight: THREE.DirectionalLight | null = null;
 
@@ -221,6 +228,85 @@ export class Viewer {
     } else {
       this.clearWireframeOverlays();
     }
+  }
+
+  /**
+   * Switch the skin-weight visualization mode. When active it overrides the
+   * shading dropdown on skinned meshes (they render the debug material until
+   * this is set back to 'off'); non-skinned meshes keep their normal shading.
+   */
+  setWeightMode(mode: WeightMode): void {
+    if (this.weightMode === mode) return;
+    const wasActive = this.weightMode !== 'off';
+    this.weightMode = mode;
+    if (mode === 'off') {
+      this.clearWeightMaterials();
+      // Restore whatever shading mode is currently selected on every mesh.
+      this.contentRoot.traverse((o) => {
+        if ((o as THREE.Mesh).isMesh || (o as THREE.Points).isPoints) {
+          this.applyShadingToObject(o);
+        }
+      });
+    } else if (wasActive) {
+      // Already showing weights — just retarget the live uniforms.
+      for (const { entry } of this.weightMats) {
+        applyWeightUniforms(entry, this.weightMode, this.weightBoneIndex);
+      }
+    } else {
+      this.rebuildWeightMaterials();
+    }
+  }
+
+  /** Set which bone the 'isolate' mode highlights (index into the skeleton). */
+  setWeightBone(index: number): void {
+    this.weightBoneIndex = index;
+    for (const { entry } of this.weightMats) {
+      applyWeightUniforms(entry, this.weightMode, this.weightBoneIndex);
+    }
+  }
+
+  /** Bone list of the first skinned mesh, for populating the UI bone picker. */
+  getSkinnedBones(): { name: string; index: number }[] {
+    let result: { name: string; index: number }[] = [];
+    this.contentRoot.traverse((o) => {
+      const skinned = o as THREE.SkinnedMesh;
+      if (result.length === 0 && skinned.isSkinnedMesh && skinned.skeleton) {
+        result = skinned.skeleton.bones.map((b, i) => ({ name: b.name || `Bone ${i}`, index: i }));
+      }
+    });
+    return result;
+  }
+
+  /** Map a scene-tree Bone to its index within any loaded skeleton, or null. */
+  boneIndexOf(bone: THREE.Object3D): number | null {
+    let found: number | null = null;
+    this.contentRoot.traverse((o) => {
+      const skinned = o as THREE.SkinnedMesh;
+      if (found === null && skinned.isSkinnedMesh && skinned.skeleton) {
+        const idx = skinned.skeleton.bones.indexOf(bone as THREE.Bone);
+        if (idx >= 0) found = idx;
+      }
+    });
+    return found;
+  }
+
+  private rebuildWeightMaterials(): void {
+    this.clearWeightMaterials();
+    this.contentRoot.traverse((o) => {
+      const skinned = o as THREE.SkinnedMesh;
+      if (!skinned.isSkinnedMesh || !skinned.skeleton) return;
+      const entry = createWeightMaterial();
+      applyWeightUniforms(entry, this.weightMode, this.weightBoneIndex);
+      skinned.material = entry.material;
+      this.weightMats.push({ mesh: skinned, entry });
+    });
+  }
+
+  private clearWeightMaterials(): void {
+    for (const { entry } of this.weightMats) {
+      entry.material.dispose();
+    }
+    this.weightMats = [];
   }
 
   private rebuildSkeletonHelpers(): void {
@@ -443,6 +529,9 @@ export class Viewer {
   }
 
   private applyShadingToObject(o: THREE.Object3D): void {
+    // Weight display takes precedence over the shading dropdown on skinned
+    // meshes — leave the debug material in place until weight mode is 'off'.
+    if (this.weightMode !== 'off' && (o as THREE.SkinnedMesh).isSkinnedMesh) return;
     const backup = this.originalMaterials.get(o);
     if (!backup) return;
     const mode = this.shadingMode;
@@ -564,6 +653,7 @@ export class Viewer {
 
     if (this.showSkeleton) this.rebuildSkeletonHelpers();
     if (this.showWireframeOverlay) this.rebuildWireframeOverlays();
+    if (this.weightMode !== 'off') this.rebuildWeightMaterials();
 
     return entry;
   }
@@ -582,6 +672,7 @@ export class Viewer {
     }
     this.clearSkeletonHelpers();
     this.clearWireframeOverlays();
+    this.clearWeightMaterials();
     while (this.contentRoot.children.length) {
       const c = this.contentRoot.children[0];
       this.contentRoot.remove(c);

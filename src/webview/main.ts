@@ -14,6 +14,7 @@ import {
   type AssetEntry,
   type ShadingMode,
   type EnvironmentMode,
+  type WeightMode,
   type HudInfo,
 } from './viewer';
 import { TimelinePanel, type TimelineClip } from './timeline';
@@ -82,6 +83,12 @@ const toggleGrid = $<HTMLInputElement>('toggleGrid');
 const toggleAxes = $<HTMLInputElement>('toggleAxes');
 const toggleBounds = $<HTMLInputElement>('toggleBounds');
 const toggleSkeleton = $<HTMLInputElement>('toggleSkeleton');
+const toggleWeights = $<HTMLInputElement>('toggleWeights');
+const weightModeRow = $('weightModeRow');
+const weightModeSelect = $<HTMLSelectElement>('weightModeSelect');
+const weightBoneRow = $('weightBoneRow');
+const weightBoneSelect = $<HTMLSelectElement>('weightBoneSelect');
+const weightLegend = $('weightLegend');
 const toggleWireframeOverlay = $<HTMLInputElement>('toggleWireframeOverlay');
 const toggleAutoRotate = $<HTMLInputElement>('toggleAutoRotate');
 const bgColor = $<HTMLInputElement>('bgColor');
@@ -247,6 +254,64 @@ toggleGrid.addEventListener('change', () => viewer.setGridVisible(toggleGrid.che
 toggleAxes.addEventListener('change', () => viewer.setAxesVisible(toggleAxes.checked));
 toggleBounds.addEventListener('change', () => viewer.setBoundsVisible(toggleBounds.checked));
 toggleSkeleton.addEventListener('change', () => viewer.setSkeletonVisible(toggleSkeleton.checked));
+// "Show skin weights" drives on/off; the mode + bone rows below it appear only
+// while it's checked. Toggling off keeps the dropdown values so re-checking
+// returns to the last mode/bone within the session.
+toggleWeights.addEventListener('change', () => {
+  const on = toggleWeights.checked;
+  weightModeRow.style.display = on ? '' : 'none';
+  if (on) {
+    applyWeightMode();
+  } else {
+    viewer.setWeightMode('off');
+    weightBoneRow.style.display = 'none';
+    weightLegend.style.display = 'none';
+  }
+});
+weightModeSelect.addEventListener('change', applyWeightMode);
+weightBoneSelect.addEventListener('change', () => viewer.setWeightBone(Number(weightBoneSelect.value)));
+
+/** Push the selected weight mode into the viewer, reveal the bone picker for
+ *  'isolate' only, and refresh the color legend. Assumes the "Show skin
+ *  weights" box is checked. */
+function applyWeightMode(): void {
+  const mode = weightModeSelect.value as WeightMode;
+  viewer.setWeightMode(mode);
+  weightBoneRow.style.display = mode === 'isolate' ? '' : 'none';
+  if (mode === 'isolate') populateWeightBones();
+  renderWeightLegend(mode);
+}
+
+/** Swap the legend under the mode dropdown to explain the current mode's colors.
+ *  Swatch colors are the sRGB equivalents of the shader's linear output so they
+ *  match what's drawn in the viewport. */
+function renderWeightLegend(mode: WeightMode): void {
+  const chip = (color: string, label: string): string =>
+    `<span class="wl-item"><span class="wl-chip" style="background:${color}"></span>${label}</span>`;
+  let html = '';
+  if (mode === 'all') {
+    html = '<span class="wl-caption">Each color = a different bone. Switch to Isolate to identify one.</span>';
+  } else if (mode === 'isolate') {
+    html =
+      '<span class="wl-caption">Influence of selected bone</span>' +
+      '<div class="wl-bar" style="background:linear-gradient(to right,#0000ff,#00ffff,#00ff00,#ffff00,#ff0000)"></div>' +
+      '<div class="wl-scale"><span>0.0</span><span>0.25</span><span>0.5</span><span>0.75</span><span>1.0</span></div>';
+  } else if (mode === 'count') {
+    html =
+      '<span class="wl-caption">Influences per vertex</span>' +
+      '<div class="wl-swatches">' +
+      chip('#597cff', '1') + chip('#00ffff', '2') + chip('#00ff00', '3') + chip('#ffff00', '4') +
+      '</div>';
+  } else if (mode === 'normalize') {
+    html =
+      '<span class="wl-caption">Vertex weight sum vs 1.0</span>' +
+      '<div class="wl-swatches">' +
+      chip('#00ffff', 'under (&lt;1)') + chip('#6c6c6c', 'ok (=1)') + chip('#ff00ff', 'over (&gt;1)') +
+      '</div>';
+  }
+  weightLegend.innerHTML = html;
+  weightLegend.style.display = html ? '' : 'none';
+}
 toggleWireframeOverlay.addEventListener('change', () => viewer.setWireframeOverlayVisible(toggleWireframeOverlay.checked));
 toggleAutoRotate.addEventListener('change', () => viewer.setAutoRotate(toggleAutoRotate.checked));
 bgColor.addEventListener('input', () => viewer.setBackground(bgColor.value));
@@ -811,6 +876,7 @@ function rebuildAllPanels(): void {
   populateInfo();
   populateAnimations();
   refreshSubtitle();
+  if (toggleWeights.checked && weightModeSelect.value === 'isolate') populateWeightBones();
 }
 
 function refreshSubtitle(): void {
@@ -939,6 +1005,29 @@ function selectObject(obj: THREE.Object3D): void {
   // 4) If the user is viewing the Texture tab with UV overlay on, prefer the
   //    selected mesh's UVs (so they can inspect that exact mesh's unwrap).
   if (showUV) refreshUVOverlay();
+  // 5) If isolating a bone's weights, clicking a bone retargets the display and
+  //    keeps the bone dropdown in sync.
+  if (toggleWeights.checked && weightModeSelect.value === 'isolate' && (obj as THREE.Bone).isBone) {
+    const idx = viewer.boneIndexOf(obj);
+    if (idx !== null) {
+      viewer.setWeightBone(idx);
+      weightBoneSelect.value = String(idx);
+    }
+  }
+}
+
+/** Fill the isolate-mode bone dropdown from the loaded skeleton. */
+function populateWeightBones(): void {
+  const bones = viewer.getSkinnedBones();
+  weightBoneSelect.innerHTML = '';
+  for (const b of bones) {
+    const opt = document.createElement('option');
+    opt.value = String(b.index);
+    opt.textContent = b.name;
+    weightBoneSelect.append(opt);
+  }
+  const current = Number(weightBoneSelect.value);
+  if (Number.isFinite(current)) viewer.setWeightBone(current);
 }
 
 function renderSelectionDetails(obj: THREE.Object3D): void {

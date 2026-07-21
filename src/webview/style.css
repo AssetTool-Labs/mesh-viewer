@@ -449,6 +449,18 @@ html, body {
 .row input[type="color"] { padding: 0; height: 22px; min-width: 40px; }
 .row input[type="checkbox"] { margin: 0; }
 
+/* Contextual legend for the skin-weight display; content is swapped per mode. */
+.weight-legend { flex-direction: column; align-items: stretch; gap: 4px; }
+/* Opt out of the fixed 86px label-column width the generic `.row > span:first-child`
+   rule imposes, so the caption uses the full width and wraps naturally. */
+.row.weight-legend > span:first-child { width: auto; }
+.weight-legend .wl-caption { color: var(--muted); }
+.weight-legend .wl-bar { height: 10px; border-radius: 2px; }
+.weight-legend .wl-scale { display: flex; justify-content: space-between; color: var(--muted); font-variant-numeric: tabular-nums; }
+.weight-legend .wl-swatches { display: flex; flex-wrap: wrap; gap: 10px; }
+.weight-legend .wl-item { display: flex; align-items: center; gap: 4px; }
+.weight-legend .wl-chip { width: 12px; height: 12px; border-radius: 2px; flex-shrink: 0; }
+
 button.primary, #frameSelection {
   margin-top: 6px;
   background: var(--button-bg);
