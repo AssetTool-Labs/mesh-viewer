@@ -21,7 +21,7 @@ Skinned and keyframed assets get a Blender-style dope sheet: pick a clip, scrub 
 - **Wide format support** — GLB/GLTF, FBX, OBJ, USD/USDA/USDC/USDZ, STL, PLY, DAE (Collada), 3DS, 3MF, VRML, and more
 - **Scene hierarchy** — tree view with filtering, per-node visibility, and selection outlines
 - **Inspector** — object transforms, geometry stats, material and texture details
-- **View options** — wireframe overlay, skeleton overlay, grid/axes helpers, bounds, environment lighting
+- **View options** — wireframe overlay, skeleton overlay, skin-weight visualization, grid/axes helpers, bounds, environment lighting
 - **Drag & drop import** — merge extra meshes into the current scene
 - **Performance HUD** — FPS, triangle count, draw calls, memory
 

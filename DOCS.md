@@ -107,6 +107,7 @@ For multi-file formats (`.gltf` + `.bin` + textures, `.obj` + `.mtl` + textures)
 - **Animation control** — every `AnimationClip` is listed with its duration; play / pause / stop, scrub bar, and a 0–2× speed slider drive a real `THREE.AnimationMixer`. With multiple imports, animations are grouped under their source file and can be swapped on the fly.
 - **Timeline / dope sheet** — a Blender-style, read-only timeline docks under the viewport whenever the scene has animations: frame ruler with a scrubbable playhead, per-node keyframe rows (expandable to position / rotation / scale / morph channels), frame-by-frame stepping, keyframe jumping, auto-detected FPS (overridable), loop toggle, and playback-speed presets. `Space` plays/pauses, `←`/`→` step one frame, `Shift+←`/`→` jump to start/end, `↑`/`↓` jump between keyframes, `Ctrl`+scroll zooms the ruler.
 - **Shading modes** — smooth, flat, wireframe, points, and a normals debug shader.
+- **Skin-weight visualization** — for skinned meshes, *Show skin weights* recolors the surface by its skin weights, with four modes: **all bones** (each bone a palette color, blended per vertex), **isolate bone** (one bone's weight on a blue→red ramp), **influence count** (discrete bands by number of influences per vertex), and **normalization** (flags vertices whose weights don't sum to 1.0). A contextual legend explains the current mode's colors, and the coloring deforms with animation. Pick the isolated bone from the dropdown or by clicking a bone in the hierarchy.
 - **View helpers** — grid, axes, bounding box, auto-rotate, IBL studio/neutral environment, background color picker.
 - **Frame-to-fit** — `Reset Camera` for the whole scene, `Frame Selection` (or double-click a tree row) for a single node.
 - **HUD overlay** — live FPS, draw calls, triangle count, geometry/texture totals.
@@ -179,7 +180,7 @@ When the loaded scene has at least one animation clip, a Blender-style timeline 
 | `↑` / `↓` | Jump to next / previous keyframe |
 
 Selecting a clip (sidebar row or timeline dropdown) while paused shows the clip's first frame without starting playback, so you can immediately step through frames; if a clip is already playing, the new clip keeps playing.
-- **View** — shading mode, grid/axes/bounds toggles, auto-rotate, background, environment, reset/frame buttons.
+- **View** — shading mode, skeleton overlay, skin-weight display, grid/axes/bounds toggles, auto-rotate, background, environment, reset/frame buttons.
 
 ---
 
@@ -228,6 +229,7 @@ src/
   webview/
     main.ts             # UI wiring (tree, info panel, animation, picking, drop, import button)
     viewer.ts           # Three.js scene/camera/controls/IBL/shading/multi-asset content root
+    weightMaterial.ts   # skin-weight debug material (MeshBasicMaterial + onBeforeCompile)
     loaders.ts          # per-format dispatcher (lazy imports)
     viewer.html         # HTML shell
     style.css           # theme-aware styles
@@ -264,6 +266,7 @@ The packaged `.vsix` is intentionally small (~310 KB). Test 3D files dropped int
 - Imported sidecar payload is capped at 32 MB per file and 96 MB total to avoid pathological postMessage sizes.
 - The bundled USD loader supports a subset of USD/USDA/USDC/USDZ; complex production assets with custom schemas may not render perfectly.
 - Animation editing/baking is not supported — animations are read-only.
+- Skin-weight *influence count* is capped at 4 per vertex (the GPU skinning limit) — vertices originally bound to more bones can't be distinguished, since the extra influences are dropped at load. The *normalization* mode assumes weights should sum to 1.0; most loaders already deliver normalized weights, so it mainly flags atypical assets.
 - DRACO / Meshopt compressed glTF requires the corresponding decoder; the extension does not yet ship those decoders.
 - Encrypted or proprietary FBX variants from some pipelines may fail to parse.
 
