@@ -6,6 +6,9 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutlinePass } from 'three/examples/jsm/postprocessing/OutlinePass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import type { LoadedAsset } from './loaders';
+import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
+
+export type { WeightMode } from './weightMaterial';
 
 export type ShadingMode = 'smooth' | 'flat' | 'wireframe' | 'points' | 'normals';
 export type EnvironmentMode = 'studio' | 'neutral' | 'none';
@@ -59,10 +62,25 @@ export class Viewer {
   private skeletonBones: THREE.Bone[] = [];
   private jointInstances: THREE.InstancedMesh | null = null;
   private boneLinks: { mesh: THREE.Mesh; bone: THREE.Bone; parent: THREE.Object3D }[] = [];
+  /** Shared bone-cylinder materials; the highlight one marks the isolated bone. */
+  private skeletonBoneMat: THREE.MeshBasicMaterial | null = null;
+  private highlightBoneMat: THREE.MeshBasicMaterial | null = null;
+  private static readonly JOINT_COLOR = 0x00eeff;
+  /** White selected joint against dimmed neighbors — contrast is the cue, since
+   *  it survives dense clusters where a larger sphere would just occlude them.
+   *  The modest size bump is only a secondary hint. */
+  private static readonly JOINT_HIGHLIGHT = 0xffffff;
+  private static readonly HIGHLIGHT_SCALE = 1.5;
+  /** The bone whose joint is currently enlarged/tinted, or null. */
+  private highlightBone: THREE.Bone | null = null;
   private wireframeOverlays: THREE.Object3D[] = [];
   private showBounds = false;
   private showSkeleton = false;
   private showWireframeOverlay = false;
+  private weightMode: WeightMode = 'off';
+  private weightBoneIndex = 0;
+  /** Debug materials created per SkinnedMesh while weight display is active. */
+  private weightMats: { mesh: THREE.SkinnedMesh; entry: WeightMaterialEntry }[] = [];
   private hemiLight: THREE.HemisphereLight | null = null;
   private dirLight: THREE.DirectionalLight | null = null;
 
@@ -236,6 +254,89 @@ export class Viewer {
     }
   }
 
+  /**
+   * Switch the skin-weight visualization mode. When active it overrides the
+   * shading dropdown on skinned meshes (they render the debug material until
+   * this is set back to 'off'); non-skinned meshes keep their normal shading.
+   */
+  setWeightMode(mode: WeightMode): void {
+    if (this.weightMode === mode) return;
+    const wasActive = this.weightMode !== 'off';
+    this.weightMode = mode;
+    if (mode === 'off') {
+      this.clearWeightMaterials();
+      // Restore whatever shading mode is currently selected on every mesh.
+      this.contentRoot.traverse((o) => {
+        if ((o as THREE.Mesh).isMesh || (o as THREE.Points).isPoints) {
+          this.applyShadingToObject(o);
+        }
+      });
+    } else if (wasActive) {
+      // Already showing weights — just retarget the live uniforms.
+      for (const { entry } of this.weightMats) {
+        applyWeightUniforms(entry, this.weightMode, this.weightBoneIndex);
+      }
+    } else {
+      this.rebuildWeightMaterials();
+    }
+    // Entering/leaving 'isolate' changes whether a joint should be highlighted.
+    if (this.showSkeleton) this.updateSkeletonHighlight();
+  }
+
+  /** Set which bone the 'isolate' mode highlights (index into the skeleton). */
+  setWeightBone(index: number): void {
+    this.weightBoneIndex = index;
+    for (const { entry } of this.weightMats) {
+      applyWeightUniforms(entry, this.weightMode, this.weightBoneIndex);
+    }
+    if (this.showSkeleton) this.updateSkeletonHighlight();
+  }
+
+  /** Bone list of the first skinned mesh, for populating the UI bone picker. */
+  getSkinnedBones(): { name: string; index: number }[] {
+    let result: { name: string; index: number }[] = [];
+    this.contentRoot.traverse((o) => {
+      const skinned = o as THREE.SkinnedMesh;
+      if (result.length === 0 && skinned.isSkinnedMesh && skinned.skeleton) {
+        result = skinned.skeleton.bones.map((b, i) => ({ name: b.name || `Bone ${i}`, index: i }));
+      }
+    });
+    return result;
+  }
+
+  /** Map a scene-tree Bone to its index within any loaded skeleton, or null. */
+  boneIndexOf(bone: THREE.Object3D): number | null {
+    let found: number | null = null;
+    this.contentRoot.traverse((o) => {
+      const skinned = o as THREE.SkinnedMesh;
+      if (found === null && skinned.isSkinnedMesh && skinned.skeleton) {
+        const idx = skinned.skeleton.bones.indexOf(bone as THREE.Bone);
+        if (idx >= 0) found = idx;
+      }
+    });
+    return found;
+  }
+
+  private rebuildWeightMaterials(): void {
+    this.clearWeightMaterials();
+    this.contentRoot.traverse((o) => {
+      const skinned = o as THREE.SkinnedMesh;
+      if (!skinned.isSkinnedMesh || !skinned.skeleton) return;
+      this.disposeTransientMaterial(skinned);
+      const entry = createWeightMaterial();
+      applyWeightUniforms(entry, this.weightMode, this.weightBoneIndex);
+      skinned.material = entry.material;
+      this.weightMats.push({ mesh: skinned, entry });
+    });
+  }
+
+  private clearWeightMaterials(): void {
+    for (const { entry } of this.weightMats) {
+      entry.material.dispose();
+    }
+    this.weightMats = [];
+  }
+
   private rebuildSkeletonHelpers(): void {
     this.clearSkeletonHelpers();
     const roots = new Set<THREE.Object3D>();
@@ -273,6 +374,13 @@ export class Viewer {
       transparent: true,
       opacity: 0.9,
     });
+    this.skeletonBoneMat = boneMat;
+    this.highlightBoneMat = new THREE.MeshBasicMaterial({
+      color: Viewer.JOINT_HIGHLIGHT,
+      depthTest: false,
+      transparent: true,
+      opacity: 0.95,
+    });
     const boneRadius = jointSize * 0.2;
     // Unit-length cylinder along +Z; each frame it is positioned at the
     // parent joint, aimed at the child joint, and scaled to the bone length
@@ -291,10 +399,11 @@ export class Viewer {
       this.boneLinks.push({ mesh, bone, parent: bone.parent });
     }
 
-    // Joint spheres
+    // Joint spheres. Base color is white so per-instance colors drive the hue,
+    // letting us tint the isolated bone's joint without a second draw call.
     const geo = new THREE.SphereGeometry(jointSize, 10, 8);
     const mat = new THREE.MeshBasicMaterial({
-      color: 0x00eeff,
+      color: 0xffffff,
       depthTest: false,
       transparent: true,
       opacity: 0.95,
@@ -310,6 +419,49 @@ export class Viewer {
     this.skeletonBones = allBones;
 
     this.updateSkeletonMarkers();
+    this.updateSkeletonHighlight();
+  }
+
+  /** Tint the isolated bone's joint (and the segment leading into it) in the
+   *  skeleton overlay. Only highlights while weight display is in 'isolate'
+   *  mode; every other joint/bone renders in its base color. */
+  private updateSkeletonHighlight(): void {
+    if (!this.jointInstances) return;
+    const target = this.weightMode === 'isolate' ? this.resolveWeightBone() : null;
+    this.highlightBone = target;
+    const hi = new THREE.Color(Viewer.JOINT_HIGHLIGHT);
+    // While a bone is isolated, dim every other joint so the white one pops by
+    // contrast; with no target, all joints keep their normal color.
+    const others = new THREE.Color(Viewer.JOINT_COLOR);
+    if (target) others.multiplyScalar(0.35);
+    for (let i = 0; i < this.skeletonBones.length; i++) {
+      this.jointInstances.setColorAt(i, this.skeletonBones[i] === target ? hi : others);
+    }
+    if (this.jointInstances.instanceColor) this.jointInstances.instanceColor.needsUpdate = true;
+    // Dim the bone cylinders too while isolating, except the highlighted one.
+    if (this.skeletonBoneMat) this.skeletonBoneMat.opacity = target ? 0.3 : 0.9;
+    for (const link of this.boneLinks) {
+      link.mesh.material =
+        target && link.bone === target && this.highlightBoneMat
+          ? this.highlightBoneMat
+          : this.skeletonBoneMat!;
+    }
+    // The per-instance scale is written by updateSkeletonMarkers (runs each
+    // frame); refresh it now so the size change shows immediately.
+    this.updateSkeletonMarkers();
+  }
+
+  /** The THREE.Bone at the current weight-bone index, from the first skinned
+   *  mesh's skeleton (the same source the UI bone dropdown is built from). */
+  private resolveWeightBone(): THREE.Bone | null {
+    let bone: THREE.Bone | null = null;
+    this.contentRoot.traverse((o) => {
+      const skinned = o as THREE.SkinnedMesh;
+      if (!bone && skinned.isSkinnedMesh && skinned.skeleton) {
+        bone = skinned.skeleton.bones[this.weightBoneIndex] ?? null;
+      }
+    });
+    return bone;
   }
 
   /** Re-pose joint spheres and bone cylinders from current bone world positions. */
@@ -329,7 +481,10 @@ export class Viewer {
     if (this.jointInstances) {
       const dummy = new THREE.Object3D();
       for (let i = 0; i < this.skeletonBones.length; i++) {
-        this.skeletonBones[i].getWorldPosition(dummy.position);
+        const bone = this.skeletonBones[i];
+        bone.getWorldPosition(dummy.position);
+        const s = bone === this.highlightBone ? Viewer.HIGHLIGHT_SCALE : 1;
+        dummy.scale.setScalar(s);
         dummy.updateMatrix();
         this.jointInstances.setMatrixAt(i, dummy.matrix);
       }
@@ -360,6 +515,12 @@ export class Viewer {
         else (mesh.material as THREE.Material).dispose();
       }
     }
+    // highlightBoneMat is only assigned to a cylinder while isolating a bone; if
+    // nothing was highlighted it is never referenced by a mesh in the loop above.
+    this.highlightBoneMat?.dispose();
+    this.highlightBoneMat = null;
+    this.skeletonBoneMat = null;
+    this.highlightBone = null;
     this.jointMarkers = [];
     this.boneLinks = [];
     this.jointInstances = null;
@@ -455,7 +616,22 @@ export class Viewer {
     });
   }
 
+  /** Dispose a generated shading material (normals/points) without touching the
+   *  backed-up original from attachAsset. */
+  private disposeTransientMaterial(o: THREE.Object3D): void {
+    const backup = this.originalMaterials.get(o);
+    const mesh = o as THREE.Mesh;
+    if (!backup || !mesh.isMesh) return;
+    const current = mesh.material;
+    if (current === backup.material) return;
+    if (Array.isArray(current)) current.forEach((m) => m.dispose());
+    else current.dispose();
+  }
+
   private applyShadingToObject(o: THREE.Object3D): void {
+    // Weight display takes precedence over the shading dropdown on skinned
+    // meshes — leave the debug material in place until weight mode is 'off'.
+    if (this.weightMode !== 'off' && (o as THREE.SkinnedMesh).isSkinnedMesh) return;
     const backup = this.originalMaterials.get(o);
     if (!backup) return;
     const mode = this.shadingMode;
@@ -578,6 +754,7 @@ export class Viewer {
     if (this.showBounds) this.rebuildBoundsHelper();
     if (this.showSkeleton) this.rebuildSkeletonHelpers();
     if (this.showWireframeOverlay) this.rebuildWireframeOverlays();
+    if (this.weightMode !== 'off') this.rebuildWeightMaterials();
 
     return entry;
   }
@@ -596,6 +773,7 @@ export class Viewer {
     }
     this.clearSkeletonHelpers();
     this.clearWireframeOverlays();
+    this.clearWeightMaterials();
     while (this.contentRoot.children.length) {
       const c = this.contentRoot.children[0];
       this.contentRoot.remove(c);

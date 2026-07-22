@@ -113,6 +113,24 @@
             <span>Show skeleton</span>
           </label>
           <label class="row checkbox">
+            <input type="checkbox" id="toggleWeights" />
+            <span>Show skin weights</span>
+          </label>
+          <label class="row" id="weightModeRow" style="display:none">
+            <span>Mode</span>
+            <select id="weightModeSelect">
+              <option value="all">All bones</option>
+              <option value="isolate">Isolate bone</option>
+              <option value="count">Influence count</option>
+              <option value="normalize">Normalization</option>
+            </select>
+          </label>
+          <label class="row" id="weightBoneRow" style="display:none">
+            <span>Bone</span>
+            <select id="weightBoneSelect"></select>
+          </label>
+          <div class="row weight-legend" id="weightLegend" style="display:none"></div>
+          <label class="row checkbox">
             <input type="checkbox" id="toggleWireframeOverlay" />
             <span>Wireframe overlay</span>
           </label>
