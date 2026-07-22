@@ -86,7 +86,8 @@ const GLSL_COMPUTE = /* glsl */ `
     if (skinWeight.y > 1e-4) n++;
     if (skinWeight.z > 1e-4) n++;
     if (skinWeight.w > 1e-4) n++;
-    if (n <= 1)      vWeightColor = vec3(0.1, 0.2, 1.0); // rigid
+    if (n == 0)      vWeightColor = vec3(0.0);             // unbound
+    else if (n == 1) vWeightColor = vec3(0.1, 0.2, 1.0); // rigid
     else if (n == 2) vWeightColor = vec3(0.0, 1.0, 1.0);
     else if (n == 3) vWeightColor = vec3(0.0, 1.0, 0.0);
     else             vWeightColor = vec3(1.0, 1.0, 0.0); // 4 = max

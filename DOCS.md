@@ -267,7 +267,7 @@ The packaged `.vsix` is intentionally small (~310 KB). Test 3D files dropped int
 - Imported sidecar payload is capped at 32 MB per file and 96 MB total to avoid pathological postMessage sizes.
 - The bundled USD loader supports a subset of USD/USDA/USDC/USDZ; complex production assets with custom schemas may not render perfectly.
 - Animation editing/baking is not supported — animations are read-only.
-- Skin-weight *influence count* is capped at 4 per vertex (the GPU skinning limit) — vertices originally bound to more bones can't be distinguished, since the extra influences are dropped at load. The *normalization* mode assumes weights should sum to 1.0; most loaders already deliver normalized weights, so it mainly flags atypical assets.
+- Skin-weight *influence count* is capped at 4 per vertex (the GPU skinning limit) — vertices originally bound to more bones can't be distinguished, since the extra influences are dropped at load. The *normalization* mode assumes weights should sum to 1.0; most loaders already deliver normalized weights, so it mainly flags atypical assets. *Isolate bone* builds its picker from the first skinned mesh's skeleton and broadcasts that bone index to every skinned mesh, so merged scenes with multiple independent rigs may highlight mismatched bones.
 - DRACO / Meshopt compressed glTF requires the corresponding decoder; the extension does not yet ship those decoders.
 - Encrypted or proprietary FBX variants from some pipelines may fail to parse.
 

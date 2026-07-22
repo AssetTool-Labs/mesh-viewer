@@ -322,6 +322,7 @@ export class Viewer {
     this.contentRoot.traverse((o) => {
       const skinned = o as THREE.SkinnedMesh;
       if (!skinned.isSkinnedMesh || !skinned.skeleton) return;
+      this.disposeTransientMaterial(skinned);
       const entry = createWeightMaterial();
       applyWeightUniforms(entry, this.weightMode, this.weightBoneIndex);
       skinned.material = entry.material;
@@ -514,9 +515,8 @@ export class Viewer {
         else (mesh.material as THREE.Material).dispose();
       }
     }
-    // The cylinder meshes share these two materials, so dispose them once here
-    // rather than per-mesh (and the highlight one may be unused if nothing was
-    // highlighted, so it wouldn't be reached by the per-mesh disposal above).
+    // highlightBoneMat is only assigned to a cylinder while isolating a bone; if
+    // nothing was highlighted it is never referenced by a mesh in the loop above.
     this.highlightBoneMat?.dispose();
     this.highlightBoneMat = null;
     this.skeletonBoneMat = null;
@@ -614,6 +614,18 @@ export class Viewer {
       if (!mesh.isMesh && !(o as THREE.Points).isPoints) return;
       this.applyShadingToObject(o);
     });
+  }
+
+  /** Dispose a generated shading material (normals/points) without touching the
+   *  backed-up original from attachAsset. */
+  private disposeTransientMaterial(o: THREE.Object3D): void {
+    const backup = this.originalMaterials.get(o);
+    const mesh = o as THREE.Mesh;
+    if (!backup || !mesh.isMesh) return;
+    const current = mesh.material;
+    if (current === backup.material) return;
+    if (Array.isArray(current)) current.forEach((m) => m.dispose());
+    else current.dispose();
   }
 
   private applyShadingToObject(o: THREE.Object3D): void {
