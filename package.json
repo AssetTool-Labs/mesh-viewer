@@ -2,7 +2,7 @@
   "name": "mesh-viewer-vscode",
   "displayName": "3D Mesh Viewer",
   "description": "View and inspect 3D meshes (OBJ, FBX, GLB/GLTF, STL, PLY, DAE, 3DS, USD/USDA/USDC/USDZ, 3MF, VRML, and more) directly inside VS Code.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "AssetToolLabs",
   "icon": "media/icon.png",
   "license": "MIT",
