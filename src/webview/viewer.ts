@@ -77,6 +77,7 @@ export class Viewer {
   private showBounds = false;
   private showSkeleton = false;
   private showWireframeOverlay = false;
+  private upAxis: 'y' | 'z' = 'y';
   private weightMode: WeightMode = 'off';
   private weightBoneIndex = 0;
   /** Debug materials created per SkinnedMesh while weight display is active. */
@@ -205,12 +206,32 @@ export class Viewer {
   setAxesVisible(v: boolean): void {
     if (v && !this.axesHelper) {
       this.axesHelper = new THREE.AxesHelper(1);
+      this.axesHelper.rotation.x = this.upAxis === 'z' ? -Math.PI / 2 : 0;
       this.scene.add(this.axesHelper);
     } else if (!v && this.axesHelper) {
       this.scene.remove(this.axesHelper);
       this.axesHelper.dispose();
       this.axesHelper = null;
     }
+  }
+
+  /**
+   * Switch which axis is treated as "up". Robotics/CAD assets are often
+   * exported Z-up, which looks tipped over in this Y-up three.js viewer;
+   * rotating `contentRoot` -90° about X maps the asset's Z axis onto the
+   * world's Y (up) axis. Applied about the world origin, so callers that care
+   * about keeping content on-screen should re-frame the camera afterward
+   * (main.ts does this for user-initiated changes; init already frames after
+   * load).
+   */
+  setUpAxis(axis: 'y' | 'z'): void {
+    this.upAxis = axis;
+    this.contentRoot.rotation.x = axis === 'z' ? -Math.PI / 2 : 0;
+    this.contentRoot.updateMatrixWorld(true);
+    if (this.axesHelper) {
+      this.axesHelper.rotation.x = axis === 'z' ? -Math.PI / 2 : 0;
+    }
+    if (this.showBounds) this.rebuildBoundsHelper();
   }
 
   setBoundsVisible(v: boolean): void {

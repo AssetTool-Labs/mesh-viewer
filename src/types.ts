@@ -7,6 +7,7 @@ export interface ViewerConfig {
   autoRotate: boolean;
   shading: 'smooth' | 'flat' | 'wireframe' | 'points' | 'normals';
   environment: 'studio' | 'neutral' | 'none';
+  upAxis: 'y' | 'z';
 }
 
 /**

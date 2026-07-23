@@ -93,6 +93,7 @@ const toggleWireframeOverlay = $<HTMLInputElement>('toggleWireframeOverlay');
 const toggleAutoRotate = $<HTMLInputElement>('toggleAutoRotate');
 const bgColor = $<HTMLInputElement>('bgColor');
 const envSelect = $<HTMLSelectElement>('envSelect');
+const upAxisSelect = $<HTMLSelectElement>('upAxisSelect');
 const resetCameraBtn = $<HTMLButtonElement>('resetCamera');
 const frameSelectionBtn = $<HTMLButtonElement>('frameSelection');
 const sidebarToggle = $<HTMLButtonElement>('sidebarToggle');
@@ -325,6 +326,11 @@ toggleAutoRotate.addEventListener('change', () => { viewer.setAutoRotate(toggleA
 bgColor.addEventListener('input', () => viewer.setBackground(bgColor.value));
 bgColor.addEventListener('change', () => pushViewSettings());
 envSelect.addEventListener('change', () => { viewer.applyEnvironment(envSelect.value as EnvironmentMode); pushViewSettings(); });
+upAxisSelect.addEventListener('change', () => {
+  viewer.setUpAxis(upAxisSelect.value as 'y' | 'z');
+  viewer.frameAll();
+  pushViewSettings();
+});
 resetCameraBtn.addEventListener('click', () => viewer.frameAll());
 frameSelectionBtn.addEventListener('click', () => {
   if (selectedObject) viewer.frameObject(selectedObject);
@@ -818,6 +824,7 @@ function applyViewSettings(settings: ViewSettings): void {
   viewer.setAutoRotate(settings.autoRotate);
   viewer.setShading(settings.shading);
   viewer.applyEnvironment(settings.environment);
+  viewer.setUpAxis(settings.upAxis ?? 'y');
   viewer.setBoundsVisible(settings.showBounds);
   viewer.setSkeletonVisible(settings.showSkeleton);
   viewer.setWireframeOverlayVisible(settings.showWireframeOverlay);
@@ -832,6 +839,7 @@ function applyViewSettings(settings: ViewSettings): void {
   toggleWireframeOverlay.checked = settings.showWireframeOverlay;
   shadingSelect.value = settings.shading;
   envSelect.value = settings.environment;
+  upAxisSelect.value = settings.upAxis ?? 'y';
   bgColor.value = normalizeHexColor(settings.backgroundColor);
 }
 
@@ -845,6 +853,7 @@ function pushViewSettings(): void {
     autoRotate: toggleAutoRotate.checked,
     shading: shadingSelect.value as ViewSettings['shading'],
     environment: envSelect.value as ViewSettings['environment'],
+    upAxis: upAxisSelect.value as ViewSettings['upAxis'],
     showBounds: toggleBounds.checked,
     showSkeleton: toggleSkeleton.checked,
     showWireframeOverlay: toggleWireframeOverlay.checked,

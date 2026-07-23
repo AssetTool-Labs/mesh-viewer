@@ -254,6 +254,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       autoRotate: c.get<boolean>('autoRotate', false),
       shading: c.get<ViewerConfig['shading']>('shading', 'smooth'),
       environment: c.get<ViewerConfig['environment']>('environment', 'studio'),
+      upAxis: c.get<ViewerConfig['upAxis']>('upAxis', 'y'),
     };
   }
 
