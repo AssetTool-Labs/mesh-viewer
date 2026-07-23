@@ -197,7 +197,7 @@ These live under `3dMeshViewer.*` in your settings:
 | `3dMeshViewer.autoRotate` | `false` | Auto-rotate camera around model. |
 | `3dMeshViewer.shading` | `smooth` | One of `smooth`, `flat`, `wireframe`, `points`, `normals`. |
 | `3dMeshViewer.environment` | `studio` | IBL environment for PBR materials: `studio`, `neutral`, `none`. |
-| `3dMeshViewer.upAxis` | `y` | Which axis is "up" in the viewport: `y` (default) or `z` for robotics/CAD assets exported Z-up, which otherwise appear tipped over. In Z-up mode the asset is rotated to display upright, the grid follows the asset floor plane, and content is seated on the grid. |
+| `3dMeshViewer.upAxis` | `y` | Which axis is "up" in the viewport: `y` (default) or `z` for robotics/CAD assets exported Z-up, which otherwise appear tipped over. In Z-up mode the asset is rotated to display upright and seated on the ground grid. |
 | `3dMeshViewer.rememberViewSettings` | `true` | Remember the last view settings you chose (shading, grid, axes, auto-rotate, background, environment, up axis, and the bounds/skeleton/wireframe-overlay toggles) and apply them to newly opened viewers. Turn off to always start from the configured defaults above. |
 
 Settings apply to newly opened viewers; existing viewers keep their current state (you can change everything per-viewer in the **View** tab). With `rememberViewSettings` on (the default), the last view settings you picked in any viewer carry over to the next file you open — and persist across restarts — taking precedence over the defaults above.

@@ -55,10 +55,9 @@ export class Viewer {
   private readonly pmremGenerator: THREE.PMREMGenerator;
   private envTexture: THREE.Texture | null = null;
 
-  private showGrid = false;
   private gridHelper: THREE.GridHelper | null = null;
   private axesHelper: THREE.AxesHelper | null = null;
-  /** Corner orientation widget (Blender-style) — always visible, tracks camera. */
+  /** Corner orientation widget (Blender-style) — tracks the camera, shows the world frame. */
   private readonly viewHelper: ViewHelper;
   private boundsHelper: THREE.Box3Helper | null = null;
   private skeletonHelpers: THREE.SkeletonHelper[] = [];
@@ -202,15 +201,13 @@ export class Viewer {
   }
 
   setGridVisible(v: boolean): void {
-    this.showGrid = v;
     if (v && !this.gridHelper) {
       this.gridHelper = new THREE.GridHelper(20, 20, 0x666666, 0x333333);
       (this.gridHelper.material as THREE.Material).transparent = true;
       (this.gridHelper.material as THREE.Material).opacity = 0.7;
-      this.syncGridUpAxis();
-      this.contentRoot.add(this.gridHelper);
+      this.scene.add(this.gridHelper);
     } else if (!v && this.gridHelper) {
-      this.contentRoot.remove(this.gridHelper);
+      this.scene.remove(this.gridHelper);
       this.gridHelper.geometry.dispose();
       (this.gridHelper.material as THREE.Material).dispose();
       this.gridHelper = null;
@@ -218,16 +215,11 @@ export class Viewer {
   }
 
   /**
-   * GridHelper lies on local XZ by default (Y-up asset floor). Z-up assets use
-   * a local XY floor; the +90° X offset cancels the contentRoot −90° X rotation
-   * so the grid stays horizontal in world space while remaining in the asset floor plane.
+   * Seat loaded content on the world y=0 ground plane (where the grid lies)
+   * after an axis change or new import. The grid is world-space scenery — kept
+   * out of `contentRoot` so this translation never drags it along and framing/
+   * bounds never include its 20-unit extent.
    */
-  private syncGridUpAxis(): void {
-    if (!this.gridHelper) return;
-    this.gridHelper.rotation.x = this.upAxis === 'z' ? Math.PI / 2 : 0;
-  }
-
-  /** Seat loaded content on the y=0 grid plane after an axis change or new import. */
   private alignContentToGrid(): void {
     if (!this.entries.length) return;
     this.contentRoot.position.y = 0;
@@ -270,12 +262,14 @@ export class Viewer {
     this.upAxis = axis;
     this.contentRoot.rotation.x = axis === 'z' ? -Math.PI / 2 : 0;
     this.contentRoot.updateMatrixWorld(true);
-    this.syncGridUpAxis();
     this.alignContentToGrid();
     if (this.axesHelper) {
       this.axesHelper.rotation.x = axis === 'z' ? -Math.PI / 2 : 0;
     }
-    this.viewHelper.rotation.x = axis === 'z' ? -Math.PI / 2 : 0;
+    // The corner ViewHelper intentionally stays world-aligned: its render()
+    // re-derives its orientation from the camera every frame (any rotation set
+    // here is overwritten), and its click-to-snap targets are hardcoded world
+    // axes — a rotated display would disagree with where clicks snap.
     if (this.showBounds) this.rebuildBoundsHelper();
   }
 
@@ -842,10 +836,10 @@ export class Viewer {
     this.clearSkeletonHelpers();
     this.clearWireframeOverlays();
     this.clearWeightMaterials();
-    for (const child of [...this.contentRoot.children]) {
-      if (child === this.gridHelper) continue;
-      this.contentRoot.remove(child);
-      disposeObject(child);
+    while (this.contentRoot.children.length) {
+      const c = this.contentRoot.children[0];
+      this.contentRoot.remove(c);
+      disposeObject(c);
     }
     this.entries.length = 0;
     this.originalMaterials = new WeakMap();
