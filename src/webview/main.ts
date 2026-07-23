@@ -843,6 +843,9 @@ function applyViewSettings(settings: InitViewSettings): void {
   envSelect.value = settings.environment;
   upAxisSelect.value = settings.upAxis ?? 'y';
   bgColor.value = normalizeHexColor(settings.backgroundColor);
+
+  // Re-frame when content is already loaded (e.g. remembered Z-up on a later open).
+  viewer.frameAll();
 }
 
 /** Report the current control state to the host so it can remember it for
