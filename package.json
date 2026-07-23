@@ -145,7 +145,12 @@
         "3dMeshViewer.showAxes": {
           "type": "boolean",
           "default": false,
-          "description": "Show axis helper in the viewport."
+          "description": "Show axis helper at the world origin."
+        },
+        "3dMeshViewer.showViewGizmo": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the corner orientation gizmo that tracks camera rotation."
         },
         "3dMeshViewer.autoRotate": {
           "type": "boolean",

@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import type { FilePayload, InitMessage, ViewerConfig, ViewSettings, FromWebviewMessage } from './types';
+import type { FilePayload, InitMessage, ViewerConfig, ViewSettings, InitViewSettings, FromWebviewMessage } from './types';
 
 const TEXT_EXTENSIONS = new Set(['obj', 'gltf', 'dae', 'wrl', 'vrml', 'usda', 'xyz']);
 
@@ -251,6 +251,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       backgroundColor: c.get<string>('backgroundColor', '#1e1e1e'),
       showGrid: c.get<boolean>('showGrid', false),
       showAxes: c.get<boolean>('showAxes', false),
+      showViewGizmo: c.get<boolean>('showViewGizmo', true),
       autoRotate: c.get<boolean>('autoRotate', false),
       shading: c.get<ViewerConfig['shading']>('shading', 'smooth'),
       environment: c.get<ViewerConfig['environment']>('environment', 'studio'),
@@ -263,8 +264,8 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
    * defaults, with the last-remembered settings merged over them when the
    * `rememberViewSettings` setting is enabled.
    */
-  private effectiveViewSettings(): ViewSettings {
-    const defaults: ViewSettings = {
+  private effectiveViewSettings(): InitViewSettings {
+    const defaults: InitViewSettings = {
       ...this.readConfig(),
       showBounds: false,
       showSkeleton: false,
@@ -274,8 +275,13 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       .getConfiguration('3dMeshViewer')
       .get<boolean>('rememberViewSettings', true);
     if (!remember) return defaults;
-    const remembered = this.context.globalState.get<Partial<ViewSettings>>(REMEMBERED_KEY);
-    return remembered ? { ...defaults, ...remembered } : defaults;
+    const remembered = this.context.globalState.get<
+      Partial<ViewSettings> & { showViewGizmo?: boolean }
+    >(REMEMBERED_KEY);
+    if (!remembered) return defaults;
+    // Orientation gizmo is config-only — never override from remembered view settings.
+    const { showViewGizmo: _ignored, ...rest } = remembered;
+    return { ...defaults, ...rest };
   }
 
   private async buildHtml(webview: vscode.Webview, mediaRoot: vscode.Uri): Promise<string> {

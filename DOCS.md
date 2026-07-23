@@ -192,7 +192,8 @@ These live under `3dMeshViewer.*` in your settings:
 | --- | --- | --- |
 | `3dMeshViewer.backgroundColor` | `#1e1e1e` | Default background color (any CSS color). |
 | `3dMeshViewer.showGrid` | `true` | Show ground grid helper on open. |
-| `3dMeshViewer.showAxes` | `true` | Show axis helper on open. |
+| `3dMeshViewer.showAxes` | `false` | Show axis helper at the world origin. |
+| `3dMeshViewer.showViewGizmo` | `true` | Show the corner orientation gizmo that tracks camera rotation. Config-only (not in the View tab); change via Settings. |
 | `3dMeshViewer.autoRotate` | `false` | Auto-rotate camera around model. |
 | `3dMeshViewer.shading` | `smooth` | One of `smooth`, `flat`, `wireframe`, `points`, `normals`. |
 | `3dMeshViewer.environment` | `studio` | IBL environment for PBR materials: `studio`, `neutral`, `none`. |

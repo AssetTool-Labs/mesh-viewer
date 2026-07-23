@@ -4,6 +4,7 @@ import type {
   AddFileMessage,
   FilePayload,
   InitMessage,
+  InitViewSettings,
   ViewSettings,
 } from '../types';
 import { loadAsset, type LoadedAsset } from './loaders';
@@ -817,10 +818,11 @@ function finishPendingImport(requestId: string | undefined): void {
   pending.toastEl?.remove();
 }
 
-function applyViewSettings(settings: ViewSettings): void {
+function applyViewSettings(settings: InitViewSettings): void {
   viewer.setBackground(settings.backgroundColor);
   viewer.setGridVisible(settings.showGrid);
   viewer.setAxesVisible(settings.showAxes);
+  viewer.setViewGizmoVisible(settings.showViewGizmo ?? true);
   viewer.setAutoRotate(settings.autoRotate);
   viewer.setShading(settings.shading);
   viewer.applyEnvironment(settings.environment);

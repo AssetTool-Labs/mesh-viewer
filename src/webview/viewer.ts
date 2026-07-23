@@ -5,6 +5,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutlinePass } from 'three/examples/jsm/postprocessing/OutlinePass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { ViewHelper } from 'three/examples/jsm/helpers/ViewHelper.js';
 import type { LoadedAsset } from './loaders';
 import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
 
@@ -56,6 +57,8 @@ export class Viewer {
 
   private gridHelper: THREE.GridHelper | null = null;
   private axesHelper: THREE.AxesHelper | null = null;
+  /** Corner orientation widget (Blender-style) — always visible, tracks camera. */
+  private readonly viewHelper: ViewHelper;
   private boundsHelper: THREE.Box3Helper | null = null;
   private skeletonHelpers: THREE.SkeletonHelper[] = [];
   private jointMarkers: THREE.Object3D[] = [];
@@ -77,6 +80,7 @@ export class Viewer {
   private showBounds = false;
   private showSkeleton = false;
   private showWireframeOverlay = false;
+  private showViewGizmo = true;
   private upAxis: 'y' | 'z' = 'y';
   private weightMode: WeightMode = 'off';
   private weightBoneIndex = 0;
@@ -126,6 +130,13 @@ export class Viewer {
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
+
+    this.viewHelper = new ViewHelper(this.camera, canvas);
+    this.viewHelper.location.top = 8;
+    this.viewHelper.location.right = 8;
+    this.viewHelper.setLabels('X', 'Y', 'Z');
+    this.viewHelper.setLabelStyle('20px sans-serif', '#ffffff', 12);
+    canvas.addEventListener('pointerdown', this.handleViewHelperPointer);
 
     this.pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     this.pmremGenerator.compileEquirectangularShader();
@@ -215,6 +226,10 @@ export class Viewer {
     }
   }
 
+  setViewGizmoVisible(v: boolean): void {
+    this.showViewGizmo = v;
+  }
+
   /**
    * Switch which axis is treated as "up". Robotics/CAD assets are often
    * exported Z-up, which looks tipped over in this Y-up three.js viewer;
@@ -231,6 +246,7 @@ export class Viewer {
     if (this.axesHelper) {
       this.axesHelper.rotation.x = axis === 'z' ? -Math.PI / 2 : 0;
     }
+    this.viewHelper.rotation.x = axis === 'z' ? -Math.PI / 2 : 0;
     if (this.showBounds) this.rebuildBoundsHelper();
   }
 
@@ -935,6 +951,8 @@ export class Viewer {
 
   destroy(): void {
     this.clearAssets();
+    this.canvas.removeEventListener('pointerdown', this.handleViewHelperPointer);
+    this.viewHelper.dispose();
     window.removeEventListener('resize', this.handleResize);
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
@@ -956,6 +974,15 @@ export class Viewer {
     this.dirLight.position.set(5, 10, 7);
     this.scene.add(this.dirLight);
   }
+
+  /** Snap the camera to an axis when the user clicks the corner gizmo. */
+  private handleViewHelperPointer = (event: PointerEvent): void => {
+    if (!this.showViewGizmo) return;
+    if (this.viewHelper.handleClick(event)) {
+      event.stopPropagation();
+      event.preventDefault();
+    }
+  };
 
   private handleResize = (): void => {
     const w = this.canvas.clientWidth || this.canvas.parentElement?.clientWidth || window.innerWidth;
@@ -987,6 +1014,20 @@ export class Viewer {
       this.updateSkeletonMarkers();
     }
     this.composer.render();
+
+    if (this.showViewGizmo) {
+      this.viewHelper.center.copy(this.controls.target);
+      if (this.viewHelper.animating) {
+        this.viewHelper.update(dt);
+        this.controls.update();
+      }
+      // ViewHelper calls renderer.render(), which auto-clears the full canvas by
+      // default — that would erase the composer output and hide the scene.
+      const autoClear = this.renderer.autoClear;
+      this.renderer.autoClear = false;
+      this.viewHelper.render(this.renderer);
+      this.renderer.autoClear = autoClear;
+    }
 
     if (this.hudCallback) {
       this.fpsSamples.push(dt);
