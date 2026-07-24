@@ -4,22 +4,27 @@ export interface ViewerConfig {
   backgroundColor: string;
   showGrid: boolean;
   showAxes: boolean;
+  /** Corner orientation gizmo (ViewHelper) — on by default. */
+  showViewGizmo: boolean;
   autoRotate: boolean;
   shading: 'smooth' | 'flat' | 'wireframe' | 'points' | 'normals';
   environment: 'studio' | 'neutral' | 'none';
+  upAxis: 'y' | 'z';
 }
 
 /**
- * The full set of view settings the viewer can remember across opened files.
- * Superset of `ViewerConfig`: the extra booleans are not backed by VS Code
- * settings (they default to false) but are still persisted when "remember view
- * settings" is enabled.
+ * View settings the webview can change and optionally remember across opened files.
+ * Config-only fields (e.g. `showViewGizmo`) are omitted — they come from
+ * `ViewerConfig` on init only.
  */
-export interface ViewSettings extends ViewerConfig {
+export interface ViewSettings extends Omit<ViewerConfig, 'showViewGizmo'> {
   showBounds: boolean;
   showSkeleton: boolean;
   showWireframeOverlay: boolean;
 }
+
+/** Full settings payload sent on init, including config-only fields. */
+export type InitViewSettings = ViewSettings & Pick<ViewerConfig, 'showViewGizmo'>;
 
 /** Payload describing one loaded file. Reused by `init` and `addFile`. */
 export interface FilePayload {
@@ -37,7 +42,7 @@ export interface FilePayload {
 /** Message: extension -> webview, sent once when the editor opens. */
 export interface InitMessage extends FilePayload {
   type: 'init';
-  settings: ViewSettings;
+  settings: InitViewSettings;
 }
 
 /** Message: extension -> webview, sent for each additional file imported via drag-and-drop. */

@@ -180,7 +180,7 @@ When the loaded scene has at least one animation clip, a Blender-style timeline 
 | `↑` / `↓` | Jump to next / previous keyframe |
 
 Selecting a clip (sidebar row or timeline dropdown) while paused shows the clip's first frame without starting playback, so you can immediately step through frames; if a clip is already playing, the new clip keeps playing.
-- **View** — shading mode, skeleton overlay, skin-weight display, grid/axes/bounds toggles, auto-rotate, background, environment, reset/frame buttons.
+- **View** — shading mode, skeleton overlay, skin-weight display, grid/axes/bounds toggles, auto-rotate, background, environment, up axis (Y up / Z up), reset/frame buttons.
 
 ---
 
@@ -192,11 +192,13 @@ These live under `3dMeshViewer.*` in your settings:
 | --- | --- | --- |
 | `3dMeshViewer.backgroundColor` | `#1e1e1e` | Default background color (any CSS color). |
 | `3dMeshViewer.showGrid` | `true` | Show ground grid helper on open. |
-| `3dMeshViewer.showAxes` | `true` | Show axis helper on open. |
+| `3dMeshViewer.showAxes` | `false` | Show axis helper at the world origin. |
+| `3dMeshViewer.showViewGizmo` | `true` | Show the corner orientation gizmo that tracks camera rotation. Config-only (not in the View tab); change via Settings. |
 | `3dMeshViewer.autoRotate` | `false` | Auto-rotate camera around model. |
 | `3dMeshViewer.shading` | `smooth` | One of `smooth`, `flat`, `wireframe`, `points`, `normals`. |
 | `3dMeshViewer.environment` | `studio` | IBL environment for PBR materials: `studio`, `neutral`, `none`. |
-| `3dMeshViewer.rememberViewSettings` | `true` | Remember the last view settings you chose (shading, grid, axes, auto-rotate, background, environment, and the bounds/skeleton/wireframe-overlay toggles) and apply them to newly opened viewers. Turn off to always start from the configured defaults above. |
+| `3dMeshViewer.upAxis` | `y` | Which axis is "up" in the viewport: `y` (default) or `z` for robotics/CAD assets exported Z-up, which otherwise appear tipped over. In Z-up mode the asset is rotated to display upright and seated on the ground grid. |
+| `3dMeshViewer.rememberViewSettings` | `true` | Remember the last view settings you chose (shading, grid, axes, auto-rotate, background, environment, up axis, and the bounds/skeleton/wireframe-overlay toggles) and apply them to newly opened viewers. Turn off to always start from the configured defaults above. |
 
 Settings apply to newly opened viewers; existing viewers keep their current state (you can change everything per-viewer in the **View** tab). With `rememberViewSettings` on (the default), the last view settings you picked in any viewer carry over to the next file you open — and persist across restarts — taking precedence over the defaults above.
 

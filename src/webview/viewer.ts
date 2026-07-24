@@ -5,6 +5,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutlinePass } from 'three/examples/jsm/postprocessing/OutlinePass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { ViewHelper } from 'three/examples/jsm/helpers/ViewHelper.js';
 import type { LoadedAsset } from './loaders';
 import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
 
@@ -56,6 +57,8 @@ export class Viewer {
 
   private gridHelper: THREE.GridHelper | null = null;
   private axesHelper: THREE.AxesHelper | null = null;
+  /** Corner orientation widget (Blender-style) — tracks the camera, shows the world frame. */
+  private readonly viewHelper: ViewHelper;
   private boundsHelper: THREE.Box3Helper | null = null;
   private skeletonHelpers: THREE.SkeletonHelper[] = [];
   private jointMarkers: THREE.Object3D[] = [];
@@ -77,6 +80,8 @@ export class Viewer {
   private showBounds = false;
   private showSkeleton = false;
   private showWireframeOverlay = false;
+  private showViewGizmo = true;
+  private upAxis: 'y' | 'z' = 'y';
   private weightMode: WeightMode = 'off';
   private weightBoneIndex = 0;
   /** Debug materials created per SkinnedMesh while weight display is active. */
@@ -125,6 +130,13 @@ export class Viewer {
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
+
+    this.viewHelper = new ViewHelper(this.camera, canvas);
+    this.viewHelper.location.top = 8;
+    this.viewHelper.location.right = 8;
+    this.viewHelper.setLabels('X', 'Y', 'Z');
+    this.viewHelper.setLabelStyle('20px sans-serif', '#ffffff', 12);
+    canvas.addEventListener('pointerdown', this.handleViewHelperPointer);
 
     this.pmremGenerator = new THREE.PMREMGenerator(this.renderer);
     this.pmremGenerator.compileEquirectangularShader();
@@ -202,15 +214,63 @@ export class Viewer {
     }
   }
 
+  /**
+   * Seat loaded content on the world y=0 ground plane (where the grid lies)
+   * after an axis change or new import. The grid is world-space scenery — kept
+   * out of `contentRoot` so this translation never drags it along and framing/
+   * bounds never include its 20-unit extent.
+   */
+  private alignContentToGrid(): void {
+    if (!this.entries.length) return;
+    this.contentRoot.position.y = 0;
+    this.contentRoot.updateMatrixWorld(true);
+    const box = new THREE.Box3();
+    for (const entry of this.entries) {
+      box.expandByObject(entry.wrapper);
+    }
+    if (box.isEmpty()) return;
+    this.contentRoot.position.y = -box.min.y;
+    this.contentRoot.updateMatrixWorld(true);
+  }
+
   setAxesVisible(v: boolean): void {
     if (v && !this.axesHelper) {
       this.axesHelper = new THREE.AxesHelper(1);
+      this.axesHelper.rotation.x = this.upAxis === 'z' ? -Math.PI / 2 : 0;
       this.scene.add(this.axesHelper);
     } else if (!v && this.axesHelper) {
       this.scene.remove(this.axesHelper);
       this.axesHelper.dispose();
       this.axesHelper = null;
     }
+  }
+
+  setViewGizmoVisible(v: boolean): void {
+    this.showViewGizmo = v;
+  }
+
+  /**
+   * Switch which axis is treated as "up". Robotics/CAD assets are often
+   * exported Z-up, which looks tipped over in this Y-up three.js viewer;
+   * rotating `contentRoot` -90° about X maps the asset's Z axis onto the
+   * world's Y (up) axis. Applied about the world origin, so callers that care
+   * about keeping content on-screen should re-frame the camera afterward
+   * (main.ts does this for user-initiated changes; init already frames after
+   * load).
+   */
+  setUpAxis(axis: 'y' | 'z'): void {
+    this.upAxis = axis;
+    this.contentRoot.rotation.x = axis === 'z' ? -Math.PI / 2 : 0;
+    this.contentRoot.updateMatrixWorld(true);
+    this.alignContentToGrid();
+    if (this.axesHelper) {
+      this.axesHelper.rotation.x = axis === 'z' ? -Math.PI / 2 : 0;
+    }
+    // The corner ViewHelper intentionally stays world-aligned: its render()
+    // re-derives its orientation from the camera every frame (any rotation set
+    // here is overwritten), and its click-to-snap targets are hardcoded world
+    // axes — a rotated display would disagree with where clicks snap.
+    if (this.showBounds) this.rebuildBoundsHelper();
   }
 
   setBoundsVisible(v: boolean): void {
@@ -756,6 +816,8 @@ export class Viewer {
     if (this.showWireframeOverlay) this.rebuildWireframeOverlays();
     if (this.weightMode !== 'off') this.rebuildWeightMaterials();
 
+    this.alignContentToGrid();
+
     return entry;
   }
 
@@ -914,6 +976,8 @@ export class Viewer {
 
   destroy(): void {
     this.clearAssets();
+    this.canvas.removeEventListener('pointerdown', this.handleViewHelperPointer);
+    this.viewHelper.dispose();
     window.removeEventListener('resize', this.handleResize);
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
@@ -935,6 +999,15 @@ export class Viewer {
     this.dirLight.position.set(5, 10, 7);
     this.scene.add(this.dirLight);
   }
+
+  /** Snap the camera to an axis when the user clicks the corner gizmo. */
+  private handleViewHelperPointer = (event: PointerEvent): void => {
+    if (!this.showViewGizmo) return;
+    if (this.viewHelper.handleClick(event)) {
+      event.stopPropagation();
+      event.preventDefault();
+    }
+  };
 
   private handleResize = (): void => {
     const w = this.canvas.clientWidth || this.canvas.parentElement?.clientWidth || window.innerWidth;
@@ -966,6 +1039,20 @@ export class Viewer {
       this.updateSkeletonMarkers();
     }
     this.composer.render();
+
+    if (this.showViewGizmo) {
+      this.viewHelper.center.copy(this.controls.target);
+      if (this.viewHelper.animating) {
+        this.viewHelper.update(dt);
+        this.controls.update();
+      }
+      // ViewHelper calls renderer.render(), which auto-clears the full canvas by
+      // default — that would erase the composer output and hide the scene.
+      const autoClear = this.renderer.autoClear;
+      this.renderer.autoClear = false;
+      this.viewHelper.render(this.renderer);
+      this.renderer.autoClear = autoClear;
+    }
 
     if (this.hudCallback) {
       this.fpsSamples.push(dt);

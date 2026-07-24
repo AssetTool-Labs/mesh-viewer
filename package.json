@@ -145,7 +145,12 @@
         "3dMeshViewer.showAxes": {
           "type": "boolean",
           "default": false,
-          "description": "Show axis helper in the viewport."
+          "description": "Show axis helper at the world origin."
+        },
+        "3dMeshViewer.showViewGizmo": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the corner orientation gizmo that tracks camera rotation."
         },
         "3dMeshViewer.autoRotate": {
           "type": "boolean",
@@ -174,10 +179,23 @@
           "default": "studio",
           "description": "Image-based lighting environment for PBR materials."
         },
+        "3dMeshViewer.upAxis": {
+          "type": "string",
+          "enum": [
+            "y",
+            "z"
+          ],
+          "enumDescriptions": [
+            "Y is up (default; standard for three.js, glTF, and most consumer 3D assets).",
+            "Z is up (common for robotics and CAD assets exported with Z as the up axis)."
+          ],
+          "default": "y",
+          "description": "Which axis points \"up\" in the viewport. Use Z up for robotics/CAD models exported with Z as the up axis, which otherwise appear tipped over in this Y-up viewer."
+        },
         "3dMeshViewer.rememberViewSettings": {
           "type": "boolean",
           "default": true,
-          "description": "Remember the last-used view settings (shading, grid, axes, auto-rotate, background, environment, bounds/skeleton/wireframe overlays) and apply them to newly opened viewers. Turn off to always start from the configured defaults."
+          "description": "Remember the last-used view settings (shading, grid, axes, auto-rotate, background, environment, up axis, bounds/skeleton/wireframe overlays) and apply them to newly opened viewers. Turn off to always start from the configured defaults."
         }
       }
     }
