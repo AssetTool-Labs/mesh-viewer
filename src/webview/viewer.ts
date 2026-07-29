@@ -266,11 +266,81 @@ export class Viewer {
     if (this.axesHelper) {
       this.axesHelper.rotation.x = axis === 'z' ? -Math.PI / 2 : 0;
     }
-    // The corner ViewHelper intentionally stays world-aligned: its render()
-    // re-derives its orientation from the camera every frame (any rotation set
-    // here is overwritten), and its click-to-snap targets are hardcoded world
-    // axes — a rotated display would disagree with where clicks snap.
+    // The corner ViewHelper geometry stays world-aligned (render() re-derives
+    // orientation from the camera every frame; click-to-snap targets are
+    // hardcoded world axes). We relabel and recolor the gizmo so its text and
+    // colors match the asset frame under the X=red, Y=green, Z=blue convention.
+    const [lX, lY, lZ] = axis === 'z' ? (['Y', 'Z', 'X'] as const) : (['X', 'Y', 'Z'] as const);
+    this.viewHelper.setLabels(lX, lY, lZ);
+    this.rebuildGizmoColors(lX, lY, lZ);
     if (this.showBounds) this.rebuildBoundsHelper();
+  }
+
+  /**
+   * Axis-color convention: X=red, Y=green, Z=blue.
+   * ViewHelper.setLabels() only changes text — it still bakes the hardcoded
+   * three.js colors (red/green/blue for world X/Y/Z axes). In Z-up mode those
+   * no longer agree with the labels, so we replace every sprite material and
+   * cylinder tint so color always follows the *label*.
+   *
+   * ViewHelper children layout (three.js construction order in source):
+   *   [0] xAxis Mesh  [1] zAxis Mesh  [2] yAxis Mesh
+   *   [3] posX Sprite [4] posY Sprite [5] posZ Sprite
+   *   [6] negX Sprite [7] negY Sprite [8] negZ Sprite
+   */
+  private rebuildGizmoColors(labelX: string, labelY: string, labelZ: string): void {
+    const AXIS_HEX: Record<string, number> = { X: 0xff4466, Y: 0x88ff44, Z: 0x4488ff };
+    const colorOf = (label: string) => new THREE.Color(AXIS_HEX[label] ?? 0x888888);
+    const cx = colorOf(labelX);
+    const cy = colorOf(labelY);
+    const cz = colorOf(labelZ);
+    const ch = this.viewHelper.children;
+
+    // Cylinder axis lines — [0]=world X, [1]=world Z, [2]=world Y
+    if (ch[0] instanceof THREE.Mesh) (ch[0].material as THREE.MeshBasicMaterial).color.copy(cx);
+    if (ch[1] instanceof THREE.Mesh) (ch[1].material as THREE.MeshBasicMaterial).color.copy(cz);
+    if (ch[2] instanceof THREE.Mesh) (ch[2].material as THREE.MeshBasicMaterial).color.copy(cy);
+
+    // Positive-axis sprites (full opacity, with label text)
+    this.replaceGizmoSprite(ch[3], cx, labelX, 1.0);
+    this.replaceGizmoSprite(ch[4], cy, labelY, 1.0);
+    this.replaceGizmoSprite(ch[5], cz, labelZ, 1.0);
+
+    // Negative-axis sprites (same hue, dimmed, no text)
+    this.replaceGizmoSprite(ch[6], cx, null, 0.2);
+    this.replaceGizmoSprite(ch[7], cy, null, 0.2);
+    this.replaceGizmoSprite(ch[8], cz, null, 0.2);
+  }
+
+  /** Replace one ViewHelper sprite's material with a freshly drawn canvas. */
+  private replaceGizmoSprite(
+    obj: THREE.Object3D,
+    color: THREE.Color,
+    label: string | null,
+    opacity: number,
+  ): void {
+    if (!(obj instanceof THREE.Sprite)) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d')!;
+    ctx.beginPath();
+    ctx.arc(32, 32, 12, 0, 2 * Math.PI);
+    ctx.closePath();
+    ctx.fillStyle = `#${color.getHexString()}`;
+    ctx.fill();
+    if (label) {
+      ctx.font = '20px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(label, 32, 41);
+    }
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const oldMat = obj.material as THREE.SpriteMaterial;
+    oldMat.map?.dispose();
+    oldMat.dispose();
+    obj.material = new THREE.SpriteMaterial({ map: texture, toneMapped: false, opacity, transparent: true, alphaTest: 0.01, depthWrite: false });
   }
 
   setBoundsVisible(v: boolean): void {
