@@ -120,6 +120,21 @@ async function loadGLTF(
   const aux = makeManagerForAux(auxFileUris);
   const loader = new GLTFLoader(aux.manager);
 
+  // Wire up DRACO decompression so DRACO-compressed .glb/.gltf files load.
+  // The decoder (wasm + wrapper) is bundled with the extension and its
+  // webview-accessible path is injected into the page as a global.
+  const dracoPath = (globalThis as { __dracoDecoderPath?: string }).__dracoDecoderPath;
+  if (dracoPath) {
+    try {
+      const { DRACOLoader } = await import('three/examples/jsm/loaders/DRACOLoader.js');
+      const dracoLoader = new DRACOLoader(aux.manager);
+      dracoLoader.setDecoderPath(dracoPath);
+      loader.setDRACOLoader(dracoLoader);
+    } catch (err) {
+      console.warn('[3DViewer] Failed to initialize DRACOLoader:', err);
+    }
+  }
+
   const buffer: ArrayBuffer | string = ext === 'glb' ? (data as ArrayBuffer) : (data as string);
 
   return new Promise((resolve, reject) => {

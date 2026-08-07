@@ -290,6 +290,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
 
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'webview.js'));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'webview.css'));
+    const dracoUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'draco'));
     const nonce = makeNonce();
 
     const csp = [
@@ -298,7 +299,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       `media-src ${webview.cspSource} blob: data:`,
       `style-src ${webview.cspSource} 'unsafe-inline'`,
       `font-src ${webview.cspSource}`,
-      `script-src 'nonce-${nonce}'`,
+      `script-src 'nonce-${nonce}' 'wasm-unsafe-eval'`,
       `worker-src blob:`,
       `connect-src ${webview.cspSource} blob: data:`,
     ].join('; ');
@@ -308,6 +309,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       .replaceAll('{{csp}}', csp)
       .replaceAll('{{scriptUri}}', scriptUri.toString())
       .replaceAll('{{styleUri}}', styleUri.toString())
+      .replaceAll('{{dracoUri}}', `${dracoUri.toString()}/`)
       .replaceAll('{{nonce}}', nonce);
   }
 }

@@ -55,6 +55,18 @@ function copyHtml() {
   fs.copyFileSync(src, dst);
 }
 
+// Copy the DRACO decoder (wasm + wrapper) so GLTFLoader can decode
+// DRACO-compressed .glb/.gltf files without reaching out to a CDN.
+function copyDraco() {
+  const src = path.join(__dirname, 'node_modules/three/examples/jsm/libs/draco/gltf');
+  const dst = path.join(outDir, 'draco');
+  fs.mkdirSync(dst, { recursive: true });
+  for (const name of ['draco_decoder.wasm', 'draco_wasm_wrapper.js']) {
+    const from = path.join(src, name);
+    if (fs.existsSync(from)) fs.copyFileSync(from, path.join(dst, name));
+  }
+}
+
 async function run() {
   if (watch) {
     const ctxs = await Promise.all([
@@ -64,6 +76,7 @@ async function run() {
     ]);
     await Promise.all(ctxs.map((c) => c.watch()));
     copyHtml();
+    copyDraco();
     fs.watchFile(path.join(__dirname, 'src/webview/viewer.html'), copyHtml);
     console.log('[esbuild] watching for changes…');
   } else {
@@ -73,6 +86,7 @@ async function run() {
       esbuild.build(cssOpts),
     ]);
     copyHtml();
+    copyDraco();
     console.log('[esbuild] build complete');
   }
 }
