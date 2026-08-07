@@ -12,3 +12,4 @@
 !out/webview.js
 !out/webview.css
 !out/viewer.html
+!out/draco/**
