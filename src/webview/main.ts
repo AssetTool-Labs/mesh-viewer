@@ -287,8 +287,8 @@ shadingFlatBtn.addEventListener('click', () => {
   toggleFlatShading.dispatchEvent(new Event('change'));
 });
 
-/** Reflect the sidebar shading controls in the HUD strip. The debug modes
- *  (points/normals) live only in the dropdown, so no HUD button lights up. */
+/** Reflect the sidebar shading controls in the HUD strip. Points mode lives
+ *  only in the dropdown, so no HUD button lights up for it. */
 function syncShadingHud(): void {
   for (const btn of shadingModeBtns) {
     btn.classList.toggle('active', btn.dataset.mode === shadingSelect.value);

@@ -926,9 +926,20 @@ export class Viewer {
         break;
       case 'normals':
         if (isMesh) {
-          (mesh as THREE.Mesh).material = new THREE.MeshNormalMaterial({
-            flatShading: this.flatShadingOn,
-          });
+          const mat = new THREE.MeshNormalMaterial({ flatShading: this.flatShadingOn });
+          // Carry the asset's normal map over so the view shows what the
+          // shader sees, not just the geometry normals. Multi-material
+          // meshes use the first entry (the whole mesh gets one debug
+          // material anyway).
+          const src = (
+            Array.isArray(backup.material) ? backup.material[0] : backup.material
+          ) as THREE.MeshStandardMaterial;
+          if (src.normalMap) {
+            mat.normalMap = src.normalMap;
+            mat.normalMapType = src.normalMapType;
+            mat.normalScale = src.normalScale;
+          }
+          (mesh as THREE.Mesh).material = mat;
         } else {
           restore();
         }
