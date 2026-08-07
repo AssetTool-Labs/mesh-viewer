@@ -95,6 +95,7 @@ const toggleAutoRotate = $<HTMLInputElement>('toggleAutoRotate');
 const bgColor = $<HTMLInputElement>('bgColor');
 const envSelect = $<HTMLSelectElement>('envSelect');
 const upAxisSelect = $<HTMLSelectElement>('upAxisSelect');
+const hudUpAxisBtn = $<HTMLButtonElement>('hudUpAxis');
 const resetCameraBtn = $<HTMLButtonElement>('resetCamera');
 const frameSelectionBtn = $<HTMLButtonElement>('frameSelection');
 const sidebarToggle = $<HTMLButtonElement>('sidebarToggle');
@@ -327,10 +328,23 @@ toggleAutoRotate.addEventListener('change', () => { viewer.setAutoRotate(toggleA
 bgColor.addEventListener('input', () => viewer.setBackground(bgColor.value));
 bgColor.addEventListener('change', () => pushViewSettings());
 envSelect.addEventListener('change', () => { viewer.applyEnvironment(envSelect.value as EnvironmentMode); pushViewSettings(); });
+/** Keep the viewport up-axis button showing the current axis. */
+function syncUpAxisButton(): void {
+  const axis = upAxisSelect.value as 'y' | 'z';
+  hudUpAxisBtn.textContent = axis === 'z' ? 'Z↑' : 'Y↑';
+  hudUpAxisBtn.title = axis === 'z' ? 'Up axis: Z (click for Y up)' : 'Up axis: Y (click for Z up)';
+}
+syncUpAxisButton();
 upAxisSelect.addEventListener('change', () => {
   viewer.setUpAxis(upAxisSelect.value as 'y' | 'z');
+  syncUpAxisButton();
   viewer.frameAll();
   pushViewSettings();
+});
+hudUpAxisBtn.addEventListener('click', () => {
+  upAxisSelect.value = upAxisSelect.value === 'z' ? 'y' : 'z';
+  // Route through the select's change handler so behavior stays identical.
+  upAxisSelect.dispatchEvent(new Event('change'));
 });
 resetCameraBtn.addEventListener('click', () => viewer.frameAll());
 frameSelectionBtn.addEventListener('click', () => {
@@ -844,6 +858,7 @@ function applyViewSettings(settings: InitViewSettings): void {
   shadingSelect.value = settings.shading;
   envSelect.value = settings.environment;
   upAxisSelect.value = settings.upAxis ?? 'y';
+  syncUpAxisButton();
   bgColor.value = normalizeHexColor(settings.backgroundColor);
 
   // Re-frame when content is already loaded (e.g. remembered Z-up on a later open).
