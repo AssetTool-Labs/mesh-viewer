@@ -89,12 +89,21 @@
           <label class="row">
             <span>Shading</span>
             <select id="shadingSelect">
-              <option value="smooth">Smooth</option>
-              <option value="flat">Flat</option>
+              <option value="solid">Solid</option>
+              <option value="material">Material</option>
+              <option value="rendered">Rendered</option>
               <option value="wireframe">Wireframe</option>
               <option value="points">Points</option>
               <option value="normals">Normals</option>
             </select>
+          </label>
+          <label class="row checkbox">
+            <input type="checkbox" id="toggleXray" />
+            <span>X-ray</span>
+          </label>
+          <label class="row checkbox">
+            <input type="checkbox" id="toggleFlatShading" />
+            <span>Flat shading</span>
           </label>
           <label class="row checkbox">
             <input type="checkbox" id="toggleGrid" />
@@ -186,6 +195,28 @@
           <div id="hudStats"></div>
         </div>
         <button id="hudUpAxis" title="Toggle up axis"></button>
+        <!-- Blender-style shading mode strip, to the left of the corner view gizmo. -->
+        <div id="shadingHud">
+          <button class="shading-btn" data-mode="wireframe" title="Wireframe">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="8" cy="8" r="6.2"/><ellipse cx="8" cy="8" rx="6.2" ry="2.6"/><ellipse cx="8" cy="8" rx="2.6" ry="6.2"/></svg>
+          </button>
+          <button class="shading-btn" data-mode="solid" title="Solid — neutral material">
+            <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="currentColor"/></svg>
+          </button>
+          <button class="shading-btn" data-mode="material" title="Material preview — asset materials, neutral lighting">
+            <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M8 1.8 A6.2 6.2 0 0 1 8 14.2 Z" fill="currentColor"/><path d="M8 1.8 A6.2 6.2 0 0 0 8 14.2" fill="currentColor" opacity="0.35"/></svg>
+          </button>
+          <button class="shading-btn" data-mode="rendered" title="Rendered — asset materials, scene environment">
+            <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="currentColor"/><circle cx="5.8" cy="5.8" r="2" fill="#fff" opacity="0.65"/></svg>
+          </button>
+          <span class="shading-sep"></span>
+          <button id="shadingXray" class="shading-btn" title="X-ray — see through geometry (composes with any mode)">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="2" y="2" width="8.5" height="8.5" rx="1"/><rect x="5.5" y="5.5" width="8.5" height="8.5" rx="1"/></svg>
+          </button>
+          <button id="shadingFlat" class="shading-btn" title="Flat shading — faceted normals (off = authored normals)">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1"><polygon points="8,1.5 13.8,4.8 13.8,11.2 8,14.5 2.2,11.2 2.2,4.8"/><path d="M8 1.5 L8 8 L13.8 11.2 M8 8 L2.2 11.2"/></svg>
+          </button>
+        </div>
         <div id="overlay" class="hidden">
           <div class="overlay-card">
             <div class="spinner"></div>

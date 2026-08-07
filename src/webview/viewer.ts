@@ -12,7 +12,7 @@ import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, ty
 
 export type { WeightMode } from './weightMaterial';
 
-export type ShadingMode = 'smooth' | 'flat' | 'wireframe' | 'points' | 'normals';
+export type ShadingMode = 'solid' | 'material' | 'rendered' | 'wireframe' | 'points' | 'normals';
 export type EnvironmentMode = 'studio' | 'neutral' | 'none';
 
 export interface ObjectStats {
@@ -122,8 +122,18 @@ export class Viewer {
   private animationFinishedCallback: (() => void) | null = null;
 
   private originalMaterials = new WeakMap<THREE.Object3D, MaterialBackup>();
-  private shadingMode: ShadingMode = 'smooth';
+  private shadingMode: ShadingMode = 'material';
+  private flatShadingOn = false;
+  private xrayOn = false;
+  /** Blend/depth state saved per material while x-ray is active. */
+  private xraySaved = new Map<
+    THREE.Material,
+    { transparent: boolean; opacity: number; depthWrite: boolean }
+  >();
+  /** The user's Environment selection; the mode actually applied can differ
+   *  per shading mode (see effectiveEnvironment). */
   private environmentMode: EnvironmentMode = 'studio';
+  private appliedEnvMode: EnvironmentMode | null = null;
   private fpsSamples: number[] = [];
   private hudCallback: ((info: HudInfo) => void) | null = null;
 
@@ -424,12 +434,8 @@ export class Viewer {
     this.weightMode = mode;
     if (mode === 'off') {
       this.clearWeightMaterials();
-      // Restore whatever shading mode is currently selected on every mesh.
-      this.contentRoot.traverse((o) => {
-        if ((o as THREE.Mesh).isMesh || (o as THREE.Points).isPoints) {
-          this.applyShadingToObject(o);
-        }
-      });
+      // Restore the selected shading mode (and x-ray state) on every mesh.
+      this.applyAllShading();
     } else if (wasActive) {
       // Already showing weights — just retarget the live uniforms.
       for (const { entry } of this.weightMats) {
@@ -738,6 +744,24 @@ export class Viewer {
 
   applyEnvironment(mode: EnvironmentMode): void {
     this.environmentMode = mode;
+    this.refreshEnvironment();
+  }
+
+  /**
+   * Material mode pins a fixed neutral environment (a standardized preview,
+   * like Blender's material-preview HDRI); solid mode does the same so the
+   * override material reads consistently. Rendered and the debug modes follow
+   * the user's Environment selection.
+   */
+  private effectiveEnvironment(): EnvironmentMode {
+    if (this.shadingMode === 'material' || this.shadingMode === 'solid') return 'neutral';
+    return this.environmentMode;
+  }
+
+  private refreshEnvironment(): void {
+    const mode = this.effectiveEnvironment();
+    if (mode === this.appliedEnvMode) return;
+    this.appliedEnvMode = mode;
     if (this.envTexture) {
       this.envTexture.dispose();
       this.envTexture = null;
@@ -762,17 +786,68 @@ export class Viewer {
   }
 
   setShading(mode: ShadingMode): void {
-    if (this.entries.length === 0) {
-      this.shadingMode = mode;
-      return;
-    }
     if (this.shadingMode === mode) return;
     this.shadingMode = mode;
+    this.refreshEnvironment();
+    this.applyAllShading();
+  }
+
+  /** Blender's Alt+Z: composes with the current shading mode. */
+  setXray(v: boolean): void {
+    if (this.xrayOn === v) return;
+    this.xrayOn = v;
+    this.applyAllShading();
+  }
+
+  /** Force faceted shading; off means "use the asset's authored normals". */
+  setFlatShading(v: boolean): void {
+    if (this.flatShadingOn === v) return;
+    this.flatShadingOn = v;
+    this.applyAllShading();
+  }
+
+  /** Re-run the active mode plus the x-ray/flat toggles over all content. */
+  private applyAllShading(): void {
+    this.restoreXray();
     this.contentRoot.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh && !(o as THREE.Points).isPoints) return;
       this.applyShadingToObject(o);
     });
+    if (this.xrayOn) this.applyXray();
+  }
+
+  private applyXray(): void {
+    this.contentRoot.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      // Same precedence as shading: leave weight-debug materials alone, and
+      // originalMaterials excludes splats (Spark draws those, not three.js).
+      if (this.weightMode !== 'off' && (mesh as THREE.SkinnedMesh).isSkinnedMesh) return;
+      if (!this.originalMaterials.has(o)) return;
+      forEachMaterial(mesh.material, (m) => {
+        if (this.xraySaved.has(m)) return;
+        this.xraySaved.set(m, {
+          transparent: m.transparent,
+          opacity: m.opacity,
+          depthWrite: m.depthWrite,
+        });
+        m.transparent = true;
+        m.opacity = 0.35;
+        m.depthWrite = false;
+        m.needsUpdate = true;
+      });
+    });
+  }
+
+  private restoreXray(): void {
+    for (const [m, saved] of this.xraySaved) {
+      m.transparent = saved.transparent;
+      m.opacity = saved.opacity;
+      m.depthWrite = saved.depthWrite;
+      m.needsUpdate = true;
+    }
+    this.xraySaved.clear();
   }
 
   /** Dispose a generated shading material (normals/points) without touching the
@@ -783,8 +858,10 @@ export class Viewer {
     if (!backup || !mesh.isMesh) return;
     const current = mesh.material;
     if (current === backup.material) return;
-    if (Array.isArray(current)) current.forEach((m) => m.dispose());
-    else current.dispose();
+    forEachMaterial(current, (m) => {
+      this.xraySaved.delete(m);
+      m.dispose();
+    });
   }
 
   private applyShadingToObject(o: THREE.Object3D): void {
@@ -798,6 +875,9 @@ export class Viewer {
     const isMesh = (mesh as THREE.Mesh).isMesh === true;
     const isPoints = (o as THREE.Points).isPoints === true;
 
+    // The previous mode may have left a generated material behind.
+    this.disposeTransientMaterial(o);
+
     const restore = (): void => {
       (mesh as THREE.Mesh).material = backup.material;
       forEachMaterial(backup.material, (m) => {
@@ -810,19 +890,33 @@ export class Viewer {
     };
 
     switch (mode) {
-      case 'smooth':
+      case 'material':
+      case 'rendered':
         restore();
         forEachMaterial(backup.material, (m) => {
-          if ('flatShading' in m) (m as THREE.MeshStandardMaterial).flatShading = false;
+          if ('flatShading' in m) {
+            // Toggle off = the asset's authored setting, not forced-smooth.
+            (m as THREE.MeshStandardMaterial).flatShading = this.flatShadingOn
+              ? true
+              : (backup.flatShading ?? false);
+          }
           m.needsUpdate = true;
         });
         break;
-      case 'flat':
-        restore();
-        forEachMaterial(backup.material, (m) => {
-          if ('flatShading' in m) (m as THREE.MeshStandardMaterial).flatShading = true;
-          m.needsUpdate = true;
-        });
+      case 'solid':
+        if (isMesh) {
+          const hasVertexColors = !!mesh.geometry?.getAttribute('color');
+          mesh.material = new THREE.MeshStandardMaterial({
+            // White base under vertex colors so they show unmodulated.
+            color: hasVertexColors ? 0xffffff : 0xb8b8b8,
+            roughness: 0.85,
+            metalness: 0.0,
+            flatShading: this.flatShadingOn,
+            vertexColors: hasVertexColors,
+          });
+        } else {
+          restore();
+        }
         break;
       case 'wireframe':
         restore();
@@ -832,7 +926,9 @@ export class Viewer {
         break;
       case 'normals':
         if (isMesh) {
-          (mesh as THREE.Mesh).material = new THREE.MeshNormalMaterial({ flatShading: false });
+          (mesh as THREE.Mesh).material = new THREE.MeshNormalMaterial({
+            flatShading: this.flatShadingOn,
+          });
         } else {
           restore();
         }
@@ -856,6 +952,16 @@ export class Viewer {
     let found = false;
     this.contentRoot.traverse((o) => {
       if (isSplat(o)) found = true;
+    });
+    return found;
+  }
+
+  /** True when any loaded object is a regular mesh, so the UI can grey out
+   *  mesh-only controls (e.g. the shading HUD) in splat-only sessions. */
+  get hasMeshes(): boolean {
+    let found = false;
+    this.contentRoot.traverse((o) => {
+      if (!isSplat(o) && (o as THREE.Mesh).isMesh) found = true;
     });
     return found;
   }
@@ -924,7 +1030,17 @@ export class Viewer {
 
     wrapper.traverse((o) => {
       const mesh = o as THREE.Mesh;
-      if (mesh.isMesh) {
+      if (isSplat(o)) {
+        // No material backup: splats are drawn by Spark, not by a three.js
+        // material, so the shading modes below never apply to them.
+        this.ensureSparkRenderer();
+        this.applySplatOrientation(o);
+      } else if (mesh.isMesh) {
+        // Some formats ship without normals; the normals debug mode and lit
+        // shading both need them, so fill them in once at load time.
+        if (mesh.geometry && !mesh.geometry.getAttribute('normal')) {
+          mesh.geometry.computeVertexNormals();
+        }
         this.originalMaterials.set(o, {
           material: mesh.material,
           flatShading:
@@ -934,11 +1050,6 @@ export class Viewer {
         });
       } else if ((o as THREE.Points).isPoints) {
         this.originalMaterials.set(o, { material: (o as THREE.Points).material });
-      } else if (isSplat(o)) {
-        // No material backup: splats are drawn by Spark, not by a three.js
-        // material, so the shading modes below never apply to them.
-        this.ensureSparkRenderer();
-        this.applySplatOrientation(o);
       }
     });
 
@@ -955,17 +1066,11 @@ export class Viewer {
     const actions = asset.animations.map((clip) => this.mixer!.clipAction(clip, asset.root));
 
     const entry: AssetEntry = { label, wrapper, asset, actions };
-    // Register the entry BEFORE replaying a non-smooth shading mode. setShading
-    // bails out when entries.length === 0 (its "no scene yet" guard), so if we
-    // pushed after, a configured 'wireframe' / 'flat' / etc. would silently
-    // never reach the traversal on initial load.
     this.entries.push(entry);
 
-    if (this.shadingMode !== 'smooth') {
-      const requested = this.shadingMode;
-      this.shadingMode = 'smooth';
-      this.setShading(requested);
-    }
+    // Replay the active mode + x-ray/flat toggles so they cover the new
+    // objects too (the traversal is scene-wide but idempotent).
+    this.applyAllShading();
 
     if (this.showBounds) this.rebuildBoundsHelper();
     if (this.showSkeleton) this.rebuildSkeletonHelpers();

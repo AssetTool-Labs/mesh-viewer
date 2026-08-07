@@ -90,6 +90,12 @@ const weightModeSelect = $<HTMLSelectElement>('weightModeSelect');
 const weightBoneRow = $('weightBoneRow');
 const weightBoneSelect = $<HTMLSelectElement>('weightBoneSelect');
 const weightLegend = $('weightLegend');
+const toggleXray = $<HTMLInputElement>('toggleXray');
+const toggleFlatShading = $<HTMLInputElement>('toggleFlatShading');
+const shadingHud = $('shadingHud');
+const shadingModeBtns = Array.from(shadingHud.querySelectorAll<HTMLButtonElement>('[data-mode]'));
+const shadingXrayBtn = $<HTMLButtonElement>('shadingXray');
+const shadingFlatBtn = $<HTMLButtonElement>('shadingFlat');
 const toggleWireframeOverlay = $<HTMLInputElement>('toggleWireframeOverlay');
 const splatUprightRow = $('splatUprightRow');
 const toggleSplatUpright = $<HTMLInputElement>('toggleSplatUpright');
@@ -259,7 +265,38 @@ document.querySelectorAll<HTMLButtonElement>('.tab').forEach((tab) => {
 // pushViewSettings). Programmatic sync in applyViewSettings assigns
 // .value/.checked directly, which does NOT dispatch 'change', so it never
 // echoes back to the host.
-shadingSelect.addEventListener('change', () => { viewer.setShading(shadingSelect.value as ShadingMode); pushViewSettings(); });
+shadingSelect.addEventListener('change', () => { viewer.setShading(shadingSelect.value as ShadingMode); syncShadingHud(); pushViewSettings(); });
+toggleXray.addEventListener('change', () => { viewer.setXray(toggleXray.checked); syncShadingHud(); pushViewSettings(); });
+toggleFlatShading.addEventListener('change', () => { viewer.setFlatShading(toggleFlatShading.checked); syncShadingHud(); pushViewSettings(); });
+
+// ---- Shading HUD (Blender-style strip next to the view gizmo) ----
+// HUD buttons route through the sidebar controls (select/checkboxes) and their
+// change handlers so behavior stays single-sourced, like hudUpAxis below.
+for (const btn of shadingModeBtns) {
+  btn.addEventListener('click', () => {
+    shadingSelect.value = btn.dataset.mode!;
+    shadingSelect.dispatchEvent(new Event('change'));
+  });
+}
+shadingXrayBtn.addEventListener('click', () => {
+  toggleXray.checked = !toggleXray.checked;
+  toggleXray.dispatchEvent(new Event('change'));
+});
+shadingFlatBtn.addEventListener('click', () => {
+  toggleFlatShading.checked = !toggleFlatShading.checked;
+  toggleFlatShading.dispatchEvent(new Event('change'));
+});
+
+/** Reflect the sidebar shading controls in the HUD strip. The debug modes
+ *  (points/normals) live only in the dropdown, so no HUD button lights up. */
+function syncShadingHud(): void {
+  for (const btn of shadingModeBtns) {
+    btn.classList.toggle('active', btn.dataset.mode === shadingSelect.value);
+  }
+  shadingXrayBtn.classList.toggle('active', toggleXray.checked);
+  shadingFlatBtn.classList.toggle('active', toggleFlatShading.checked);
+}
+syncShadingHud();
 toggleGrid.addEventListener('change', () => { viewer.setGridVisible(toggleGrid.checked); pushViewSettings(); });
 toggleAxes.addEventListener('change', () => { viewer.setAxesVisible(toggleAxes.checked); pushViewSettings(); });
 toggleBounds.addEventListener('change', () => { viewer.setBoundsVisible(toggleBounds.checked); pushViewSettings(); });
@@ -843,12 +880,21 @@ function finishPendingImport(requestId: string | undefined): void {
 }
 
 function applyViewSettings(settings: InitViewSettings): void {
+  // Settings remembered by pre-HUD versions used 'smooth'/'flat' as shading
+  // modes; both map onto 'material', with 'flat' setting the new flat toggle.
+  const legacy = settings.shading as string;
+  const shading = (legacy === 'smooth' || legacy === 'flat' ? 'material' : legacy) as ShadingMode;
+  const flatShading = settings.flatShading ?? legacy === 'flat';
+  const xray = settings.xray ?? false;
+
   viewer.setBackground(settings.backgroundColor);
   viewer.setGridVisible(settings.showGrid);
   viewer.setAxesVisible(settings.showAxes);
   viewer.setViewGizmoVisible(settings.showViewGizmo ?? true);
   viewer.setAutoRotate(settings.autoRotate);
-  viewer.setShading(settings.shading);
+  viewer.setShading(shading);
+  viewer.setFlatShading(flatShading);
+  viewer.setXray(xray);
   viewer.applyEnvironment(settings.environment);
   viewer.setUpAxis(settings.upAxis ?? 'y');
   viewer.setBoundsVisible(settings.showBounds);
@@ -863,7 +909,10 @@ function applyViewSettings(settings: InitViewSettings): void {
   toggleBounds.checked = settings.showBounds;
   toggleSkeleton.checked = settings.showSkeleton;
   toggleWireframeOverlay.checked = settings.showWireframeOverlay;
-  shadingSelect.value = settings.shading;
+  shadingSelect.value = shading;
+  toggleXray.checked = xray;
+  toggleFlatShading.checked = flatShading;
+  syncShadingHud();
   envSelect.value = settings.environment;
   upAxisSelect.value = settings.upAxis ?? 'y';
   syncUpAxisButton();
@@ -882,6 +931,8 @@ function pushViewSettings(): void {
     showAxes: toggleAxes.checked,
     autoRotate: toggleAutoRotate.checked,
     shading: shadingSelect.value as ViewSettings['shading'],
+    xray: toggleXray.checked,
+    flatShading: toggleFlatShading.checked,
     environment: envSelect.value as ViewSettings['environment'],
     upAxis: upAxisSelect.value as ViewSettings['upAxis'],
     showBounds: toggleBounds.checked,
@@ -964,6 +1015,12 @@ function rebuildAllPanels(): void {
   if (toggleWeights.checked && weightModeSelect.value === 'isolate') populateWeightBones();
   splatUprightRow.style.display = viewer.hasSplats ? '' : 'none';
   toggleSplatUpright.checked = viewer.splatsAreUpright;
+  // Shading modes are a no-op on splats (Spark draws them), so grey out the
+  // HUD when the scene has content but no regular meshes.
+  const meshless = viewer.entries.length > 0 && !viewer.hasMeshes;
+  for (const btn of [...shadingModeBtns, shadingXrayBtn, shadingFlatBtn]) {
+    btn.disabled = meshless;
+  }
 }
 
 function refreshSubtitle(): void {

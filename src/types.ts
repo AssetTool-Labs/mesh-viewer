@@ -7,7 +7,7 @@ export interface ViewerConfig {
   /** Corner orientation gizmo (ViewHelper) — on by default. */
   showViewGizmo: boolean;
   autoRotate: boolean;
-  shading: 'smooth' | 'flat' | 'wireframe' | 'points' | 'normals';
+  shading: 'solid' | 'material' | 'rendered' | 'wireframe' | 'points' | 'normals';
   environment: 'studio' | 'neutral' | 'none';
   upAxis: 'y' | 'z';
 }
@@ -21,6 +21,10 @@ export interface ViewSettings extends Omit<ViewerConfig, 'showViewGizmo'> {
   showBounds: boolean;
   showSkeleton: boolean;
   showWireframeOverlay: boolean;
+  /** Blender-style see-through toggle; composes with any shading mode. */
+  xray: boolean;
+  /** Force flat (faceted) shading in solid/material/rendered modes. */
+  flatShading: boolean;
 }
 
 /** Full settings payload sent on init, including config-only fields. */

@@ -273,7 +273,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       showAxes: c.get<boolean>('showAxes', false),
       showViewGizmo: c.get<boolean>('showViewGizmo', true),
       autoRotate: c.get<boolean>('autoRotate', false),
-      shading: c.get<ViewerConfig['shading']>('shading', 'smooth'),
+      shading: c.get<ViewerConfig['shading']>('shading', 'material'),
       environment: c.get<ViewerConfig['environment']>('environment', 'studio'),
       upAxis: c.get<ViewerConfig['upAxis']>('upAxis', 'y'),
     };
@@ -290,6 +290,8 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       showBounds: false,
       showSkeleton: false,
       showWireframeOverlay: false,
+      xray: false,
+      flatShading: false,
     };
     const remember = vscode.workspace
       .getConfiguration('3dMeshViewer')

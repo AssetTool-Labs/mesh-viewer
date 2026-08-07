@@ -532,6 +532,45 @@ button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
 }
 #hudUpAxis:hover { background: var(--button-hover); }
 
+/* Blender-style shading mode strip, vertically centered on the view gizmo
+   (128px square at top/right 8px) and sitting to its left. */
+#shadingHud {
+  position: absolute;
+  top: 57px;
+  right: 144px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--button-bg);
+  border-radius: 15px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+.shading-btn {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--button-fg);
+  cursor: pointer;
+}
+.shading-btn:hover:not(:disabled) { background: var(--button-hover); }
+.shading-btn.active { background: var(--accent); color: #fff; }
+.shading-btn:disabled { opacity: 0.35; cursor: default; }
+.shading-btn svg { width: 15px; height: 15px; display: block; }
+.shading-sep {
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--muted);
+  opacity: 0.5;
+}
+
 /* Overlays */
 #overlay, #errorOverlay {
   position: absolute;
