@@ -17,6 +17,12 @@ export interface LoadedAsset {
   cameras: THREE.Camera[];
   /** Format-specific extras to display in the Info panel. */
   metadata: Record<string, string>;
+  /**
+   * Resolves once background resource loads (sidecar textures) settle. Loaders
+   * whose parse() returns before textures finish decoding (FBX, OBJ, Collada)
+   * set this so the UI can refresh texture previews when images arrive.
+   */
+  resourcesReady?: Promise<void>;
 }
 
 /**
@@ -26,24 +32,46 @@ export interface LoadedAsset {
 function makeManagerForAux(auxFileUris: Record<string, string>): {
   manager: LoadingManager;
   baseUrl: string;
+  /** Resolves when every load started through this manager has settled
+   *  (or immediately if the parse never started one). Call after parse(). */
+  whenReady: () => Promise<void>;
 } {
-  const map = new Map<string, string>();
+  // Aux names are paths relative to the model's directory (e.g.
+  // "textures/diffuse.png"). Index by full relative path, and by bare
+  // filename as a fallback for references whose directory prefix doesn't
+  // match on this machine (e.g. absolute paths baked in by DCC tools).
+  const byPath = new Map<string, string>();
+  const byName = new Map<string, string>();
   for (const [name, uri] of Object.entries(auxFileUris ?? {})) {
-    map.set(name.toLowerCase(), uri);
-    map.set(`./${name.toLowerCase()}`, uri);
+    const norm = name.replace(/\\/g, '/').toLowerCase();
+    byPath.set(norm, uri);
+    const base = norm.split('/').pop() ?? norm;
+    if (!byName.has(base)) byName.set(base, uri);
   }
   const manager = new LoadingManager();
   manager.setURLModifier((url) => {
     try {
-      const u = decodeURIComponent(url).replace(/\\/g, '/');
+      const u = decodeURIComponent(url)
+        .replace(/\\/g, '/')
+        .toLowerCase()
+        .replace(/^\.\//, '');
       const tail = u.split('/').pop() ?? u;
-      const hit = map.get(tail.toLowerCase()) ?? map.get(u.toLowerCase());
-      return hit ?? url;
+      return byPath.get(u) ?? byName.get(tail) ?? url;
     } catch {
       return url;
     }
   });
-  return { manager, baseUrl: '' };
+  // Track whether any load actually started: LoadingManager.onLoad never
+  // fires when nothing was queued, so whenReady() must resolve immediately
+  // in that case.
+  let sawLoads = false;
+  manager.onStart = () => {
+    sawLoads = true;
+  };
+  const allLoaded = new Promise<void>((resolve) => {
+    manager.onLoad = () => resolve();
+  });
+  return { manager, baseUrl: '', whenReady: () => (sawLoads ? allLoaded : Promise.resolve()) };
 }
 
 function emptyAsset(root: THREE.Object3D): LoadedAsset {
@@ -75,7 +103,7 @@ export async function loadAsset(
     case 'obj':
       return loadOBJ(data as string, auxFileUris);
     case 'fbx':
-      return loadFBX(data as ArrayBuffer);
+      return loadFBX(data as ArrayBuffer, auxFileUris);
     case 'stl':
       return loadSTL(data as ArrayBuffer, fileName);
     case 'ply':
@@ -176,6 +204,7 @@ async function loadOBJ(data: string, auxFileUris: Record<string, string>): Promi
   const mtlEntry = Object.entries(auxFileUris).find(([n]) => n.toLowerCase().endsWith('.mtl'));
   let materials: { preload: () => void; getAsArray?: () => unknown } | undefined;
   let mtlFileName: string | undefined;
+  let resourcesReady: Promise<void> | undefined;
   if (mtlEntry) {
     try {
       const { MTLLoader } = await import('three/examples/jsm/loaders/MTLLoader.js');
@@ -185,6 +214,7 @@ async function loadOBJ(data: string, auxFileUris: Record<string, string>): Promi
       const mtlText = await mtlResp.text();
       materials = mtlLoader.parse(mtlText, '');
       materials.preload();
+      resourcesReady = aux.whenReady();
       mtlFileName = mtlEntry[0];
     } catch (err) {
       console.warn('[3DViewer] MTL parse failed:', err);
@@ -196,15 +226,17 @@ async function loadOBJ(data: string, auxFileUris: Record<string, string>): Promi
   const root = loader.parse(data);
   const asset = emptyAsset(root);
   if (mtlFileName) asset.metadata['Material library'] = mtlFileName;
+  asset.resourcesReady = resourcesReady;
   return asset;
 }
 
 // ---------- FBX ----------
 
-async function loadFBX(buf: ArrayBuffer): Promise<LoadedAsset> {
+async function loadFBX(buf: ArrayBuffer, auxFileUris: Record<string, string>): Promise<LoadedAsset> {
   const { FBXLoader } = await import('three/examples/jsm/loaders/FBXLoader.js');
-  const loader = new FBXLoader();
-  const root = loader.parse(buf, '');
+  const aux = makeManagerForAux(auxFileUris);
+  const loader = new FBXLoader(aux.manager);
+  const root = loader.parse(buf, aux.baseUrl);
   const { lights, cameras } = gatherLightsAndCameras(root);
   return {
     root,
@@ -212,6 +244,7 @@ async function loadFBX(buf: ArrayBuffer): Promise<LoadedAsset> {
     lights,
     cameras,
     metadata: {},
+    resourcesReady: aux.whenReady(),
   };
 }
 
@@ -284,6 +317,7 @@ async function loadCollada(text: string, auxFileUris: Record<string, string>): P
     lights,
     cameras,
     metadata: {},
+    resourcesReady: aux.whenReady(),
   };
 }
 

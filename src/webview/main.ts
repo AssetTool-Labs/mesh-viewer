@@ -750,6 +750,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
   auxFileCount = msg.auxFileUris ? Object.keys(msg.auxFileUris).length : 0;
   viewer.loadAsset(asset, msg.fileName);
   rebuildAllPanels();
+  refreshTexturesWhenReady(asset);
   hideOverlay();
 }
 
@@ -773,6 +774,7 @@ async function handleAddFile(msg: AddFileMessage): Promise<void> {
   auxFileCount += msg.auxFileUris ? Object.keys(msg.auxFileUris).length : 0;
   viewer.addAsset(asset, msg.fileName);
   rebuildAllPanels();
+  refreshTexturesWhenReady(asset);
   consumePendingImport(msg.requestId);
   showToast({
     title: 'Imported',
@@ -917,6 +919,18 @@ function showToast(opts: ToastOpts): HTMLDivElement {
 }
 
 // ---- Refresh all panels from current viewer state ----
+
+/**
+ * FBX/OBJ/Collada parse() returns while sidecar textures are still decoding,
+ * so the Textures tab built right after load has no images to preview. Rebuild
+ * it (and the Info panel's texture stats) once the loads settle.
+ */
+function refreshTexturesWhenReady(asset: LoadedAsset): void {
+  void asset.resourcesReady?.then(() => {
+    populateTextures();
+    populateInfo();
+  });
+}
 
 function rebuildAllPanels(): void {
   buildHierarchy();

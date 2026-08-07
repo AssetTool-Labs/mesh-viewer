@@ -21,6 +21,7 @@ function sidecarExtensionsFor(ext: string): Set<string> | null {
     case 'obj':
       return new Set(['mtl', ...TEXTURE_EXTENSIONS]);
     case 'dae':
+    case 'fbx':
       return new Set(TEXTURE_EXTENSIONS);
     default:
       return null;
@@ -195,18 +196,36 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
         const fs = require('fs') as typeof import('fs');
         const dirPath = dir.fsPath;
         const baseName = path.basename(uri.fsPath);
-        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-        for (const entry of entries) {
-          if (!entry.isFile()) continue;
-          if (entry.name === baseName) continue;
-          const lower = entry.name.toLowerCase();
-          const dot = lower.lastIndexOf('.');
-          if (dot < 0) continue;
-          const childExt = lower.slice(dot + 1);
-          if (!sidecarExts.has(childExt)) continue;
-          const childUri = vscode.Uri.joinPath(dir, entry.name);
-          auxFileUris[entry.name] = webview.asWebviewUri(childUri).toString();
-        }
+        // Walk subdirectories too: assets commonly keep textures in e.g.
+        // `textures/` next to the model file. Depth-capped to keep the scan
+        // cheap when a model sits in a large directory tree.
+        const MAX_DEPTH = 3;
+        const walk = (relDir: string, depth: number): void => {
+          const entries = fs.readdirSync(path.join(dirPath, relDir), { withFileTypes: true });
+          for (const entry of entries) {
+            const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+            if (entry.isDirectory()) {
+              if (depth < MAX_DEPTH && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+                try {
+                  walk(rel, depth + 1);
+                } catch {
+                  /* ignore unreadable subdirectory */
+                }
+              }
+              continue;
+            }
+            if (!entry.isFile()) continue;
+            if (rel === baseName) continue;
+            const lower = entry.name.toLowerCase();
+            const dot = lower.lastIndexOf('.');
+            if (dot < 0) continue;
+            const childExt = lower.slice(dot + 1);
+            if (!sidecarExts.has(childExt)) continue;
+            const childUri = vscode.Uri.joinPath(dir, ...rel.split('/'));
+            auxFileUris[rel] = webview.asWebviewUri(childUri).toString();
+          }
+        };
+        walk('', 0);
       } catch {
         /* ignore: no sidecar context available */
       }
