@@ -75,7 +75,7 @@ export async function loadAsset(
     case 'obj':
       return loadOBJ(data as string, auxFileUris);
     case 'fbx':
-      return loadFBX(data as ArrayBuffer);
+      return loadFBX(data as ArrayBuffer, auxFileUris);
     case 'stl':
       return loadSTL(data as ArrayBuffer, fileName);
     case 'ply':
@@ -186,10 +186,11 @@ async function loadOBJ(data: string, auxFileUris: Record<string, string>): Promi
 
 // ---------- FBX ----------
 
-async function loadFBX(buf: ArrayBuffer): Promise<LoadedAsset> {
+async function loadFBX(buf: ArrayBuffer, auxFileUris: Record<string, string>): Promise<LoadedAsset> {
   const { FBXLoader } = await import('three/examples/jsm/loaders/FBXLoader.js');
-  const loader = new FBXLoader();
-  const root = loader.parse(buf, '');
+  const aux = makeManagerForAux(auxFileUris);
+  const loader = new FBXLoader(aux.manager);
+  const root = loader.parse(buf, aux.baseUrl);
   const { lights, cameras } = gatherLightsAndCameras(root);
   return {
     root,

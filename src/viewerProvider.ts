@@ -21,6 +21,7 @@ function sidecarExtensionsFor(ext: string): Set<string> | null {
     case 'obj':
       return new Set(['mtl', ...TEXTURE_EXTENSIONS]);
     case 'dae':
+    case 'fbx':
       return new Set(TEXTURE_EXTENSIONS);
     default:
       return null;
