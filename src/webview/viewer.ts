@@ -887,6 +887,19 @@ export class Viewer {
     this.scene.add(this.sparkRenderer);
   }
 
+  /**
+   * Drop the Spark renderer once nothing needs it. It owns a sorting worker and
+   * a pair of render targets, so leaving it behind after the splats are gone
+   * would hold both for the rest of the session. Its dispose() is instance
+   * scoped, so `ensureSparkRenderer` can build a fresh one later.
+   */
+  private releaseSparkRenderer(): void {
+    if (!this.sparkRenderer) return;
+    this.scene.remove(this.sparkRenderer);
+    this.sparkRenderer.dispose();
+    this.sparkRenderer = null;
+  }
+
   /** Replace any current content with this asset, then frame the camera. */
   loadAsset(asset: LoadedAsset, label: string): AssetEntry {
     this.clearAssets();
@@ -986,6 +999,7 @@ export class Viewer {
     }
     this.entries.length = 0;
     this.originalMaterials = new WeakMap();
+    this.releaseSparkRenderer();
     if (this.boundsHelper) {
       this.scene.remove(this.boundsHelper);
       this.boundsHelper = null;
@@ -1130,11 +1144,6 @@ export class Viewer {
     this.pmremGenerator.dispose();
     this.composer.dispose();
     this.outlinePass.dispose();
-    if (this.sparkRenderer) {
-      this.scene.remove(this.sparkRenderer);
-      this.sparkRenderer.dispose();
-      this.sparkRenderer = null;
-    }
     this.renderer.dispose();
   }
 
