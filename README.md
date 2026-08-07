@@ -28,6 +28,8 @@ Skinned and keyframed assets get a Blender-style dope sheet: pick a clip, scrub 
 
 A shading strip next to the corner view gizmo switches between **Wireframe, Solid, Material, Rendered, and Normals** modes, with composable **X-ray** and **Flat shading** toggles (like Blender's Alt+Z) and the **Y↑/Z↑ up-axis** switch folded into the same strip — each button with instant hover explanations. Material mode previews the asset's materials under a pinned neutral environment; Rendered uses your chosen environment; Normals visualizes shader normals including the material's normal maps.
 
+![Shading HUD in Normals mode with its hover explanation](media/shading-hud.png)
+
 ## More features
 
 - **Wide format support** — GLB/GLTF (including DRACO-compressed), FBX, OBJ, USD/USDA/USDC/USDZ, STL, PLY, DAE (Collada), 3DS, 3MF, VRML, Gaussian splats (SPZ/SPLAT/KSPLAT/SOG/3DGS PLY), and more
