@@ -6,6 +6,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutlinePass } from 'three/examples/jsm/postprocessing/OutlinePass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ViewHelper } from 'three/examples/jsm/helpers/ViewHelper.js';
+import { SparkRenderer } from '@sparkjsdev/spark';
 import type { LoadedAsset } from './loaders';
 import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
 
@@ -20,6 +21,12 @@ export interface ObjectStats {
   triangles: number;
   points: number;
   lines: number;
+  splats: number;
+}
+
+/** Objects tagged by the splat loader; see `loadSplat` in loaders.ts. */
+function isSplat(o: THREE.Object3D): boolean {
+  return o.userData.isSplat === true;
 }
 
 interface MaterialBackup {
@@ -88,6 +95,11 @@ export class Viewer {
   private weightMats: { mesh: THREE.SkinnedMesh; entry: WeightMaterialEntry }[] = [];
   private hemiLight: THREE.HemisphereLight | null = null;
   private dirLight: THREE.DirectionalLight | null = null;
+
+  /** Draws every SplatMesh in the scene. Created on the first splat import so
+   *  mesh-only sessions don't pay for its GPU buffers and sorting worker. */
+  private sparkRenderer: SparkRenderer | null = null;
+  private splatsUpright = true;
 
   /** Post-processing pipeline that draws a Blender-style silhouette around
    *  selected objects without adding anything to the scene graph. */
@@ -836,6 +848,45 @@ export class Viewer {
     }
   }
 
+  // ---- Gaussian splats ----
+
+  /** True once any loaded asset is a Gaussian splat, so the UI can reveal the
+   *  splat-only controls. */
+  get hasSplats(): boolean {
+    let found = false;
+    this.contentRoot.traverse((o) => {
+      if (isSplat(o)) found = true;
+    });
+    return found;
+  }
+
+  /**
+   * 3DGS training pipelines export Y-down, so splats load upside down in this
+   * Y-up viewer; the conventional fix is a half turn about X, which Spark's own
+   * examples apply. Files that already follow a Y-up convention need it off.
+   */
+  setSplatsUpright(v: boolean): void {
+    this.splatsUpright = v;
+    this.contentRoot.traverse((o) => {
+      if (isSplat(o)) this.applySplatOrientation(o);
+    });
+    this.alignContentToGrid();
+  }
+
+  get splatsAreUpright(): boolean {
+    return this.splatsUpright;
+  }
+
+  private applySplatOrientation(o: THREE.Object3D): void {
+    o.rotation.x = this.splatsUpright ? Math.PI : 0;
+  }
+
+  private ensureSparkRenderer(): void {
+    if (this.sparkRenderer) return;
+    this.sparkRenderer = new SparkRenderer({ renderer: this.renderer });
+    this.scene.add(this.sparkRenderer);
+  }
+
   /** Replace any current content with this asset, then frame the camera. */
   loadAsset(asset: LoadedAsset, label: string): AssetEntry {
     this.clearAssets();
@@ -870,6 +921,11 @@ export class Viewer {
         });
       } else if ((o as THREE.Points).isPoints) {
         this.originalMaterials.set(o, { material: (o as THREE.Points).material });
+      } else if (isSplat(o)) {
+        // No material backup: splats are drawn by Spark, not by a three.js
+        // material, so the shading modes below never apply to them.
+        this.ensureSparkRenderer();
+        this.applySplatOrientation(o);
       }
     });
 
@@ -1074,6 +1130,11 @@ export class Viewer {
     this.pmremGenerator.dispose();
     this.composer.dispose();
     this.outlinePass.dispose();
+    if (this.sparkRenderer) {
+      this.scene.remove(this.sparkRenderer);
+      this.sparkRenderer.dispose();
+      this.sparkRenderer = null;
+    }
     this.renderer.dispose();
   }
 
@@ -1177,6 +1238,13 @@ function forEachMaterial(
 function disposeObject(obj: THREE.Object3D): void {
   obj.traverse((node) => {
     const mesh = node as THREE.Mesh;
+    if (isSplat(node)) {
+      // Splats own packed GPU textures and worker state that the mesh branch
+      // below cannot reach; Spark frees all of it from its own dispose().
+      (node as unknown as { dispose(): void }).dispose();
+      (node as unknown as { geometry?: THREE.BufferGeometry }).geometry?.dispose();
+      return;
+    }
     if ((mesh as THREE.Mesh).isMesh || (node as THREE.Points).isPoints) {
       const geom = (mesh as THREE.Mesh).geometry;
       if (geom) geom.dispose();
@@ -1201,9 +1269,13 @@ function disposeMaterial(mat: THREE.Material): void {
 
 /** Compute aggregate counts across an Object3D subtree. */
 export function computeStats(root: THREE.Object3D): ObjectStats {
-  const stats: ObjectStats = { meshes: 0, vertices: 0, triangles: 0, points: 0, lines: 0 };
+  const stats: ObjectStats = { meshes: 0, vertices: 0, triangles: 0, points: 0, lines: 0, splats: 0 };
   root.traverse((o) => {
     const mesh = o as THREE.Mesh;
+    if (isSplat(o)) {
+      stats.splats += (o as unknown as { numSplats: number }).numSplats;
+      return;
+    }
     if (mesh.isMesh && mesh.geometry) {
       stats.meshes++;
       const g = mesh.geometry as THREE.BufferGeometry;

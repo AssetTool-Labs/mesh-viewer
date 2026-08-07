@@ -91,6 +91,8 @@ const weightBoneRow = $('weightBoneRow');
 const weightBoneSelect = $<HTMLSelectElement>('weightBoneSelect');
 const weightLegend = $('weightLegend');
 const toggleWireframeOverlay = $<HTMLInputElement>('toggleWireframeOverlay');
+const splatUprightRow = $('splatUprightRow');
+const toggleSplatUpright = $<HTMLInputElement>('toggleSplatUpright');
 const toggleAutoRotate = $<HTMLInputElement>('toggleAutoRotate');
 const bgColor = $<HTMLInputElement>('bgColor');
 const envSelect = $<HTMLSelectElement>('envSelect');
@@ -322,6 +324,12 @@ function renderWeightLegend(mode: WeightMode): void {
   weightLegend.style.display = html ? '' : 'none';
 }
 toggleWireframeOverlay.addEventListener('change', () => { viewer.setWireframeOverlayVisible(toggleWireframeOverlay.checked); pushViewSettings(); });
+// Splat orientation is session-local, like the weight controls: it describes
+// the file being viewed rather than a viewport preference worth remembering.
+toggleSplatUpright.addEventListener('change', () => {
+  viewer.setSplatsUpright(toggleSplatUpright.checked);
+  viewer.frameAll();
+});
 toggleAutoRotate.addEventListener('change', () => { viewer.setAutoRotate(toggleAutoRotate.checked); pushViewSettings(); });
 // 'input' fires continuously as the color picker is dragged (live preview);
 // 'change' fires once when it closes, so we only persist then.
@@ -954,6 +962,8 @@ function rebuildAllPanels(): void {
   populateAnimations();
   refreshSubtitle();
   if (toggleWeights.checked && weightModeSelect.value === 'isolate') populateWeightBones();
+  splatUprightRow.style.display = viewer.hasSplats ? '' : 'none';
+  toggleSplatUpright.checked = viewer.splatsAreUpright;
 }
 
 function refreshSubtitle(): void {
@@ -1191,6 +1201,7 @@ function fmtDeg(rad: number): string {
 }
 
 function iconFor(obj: THREE.Object3D): string {
+  if (obj.userData.isSplat) return '✳';
   if ((obj as THREE.SkinnedMesh).isSkinnedMesh) return '⛓';
   if ((obj as THREE.Mesh).isMesh) return '◫';
   if ((obj as THREE.Points).isPoints) return '⋯';
@@ -1239,6 +1250,7 @@ function populateInfo(): void {
   sceneTotals.innerHTML = '';
   appendKV(sceneTotals, 'Nodes', nodeCount.toLocaleString());
   appendKV(sceneTotals, 'Meshes', stats.meshes.toLocaleString());
+  if (stats.splats) appendKV(sceneTotals, 'Splats', stats.splats.toLocaleString());
   if (stats.points) appendKV(sceneTotals, 'Point objects', stats.points.toLocaleString());
   if (stats.lines) appendKV(sceneTotals, 'Line segments', Math.round(stats.lines).toLocaleString());
   let totalAnims = 0;

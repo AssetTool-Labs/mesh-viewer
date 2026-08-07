@@ -107,7 +107,19 @@ export async function loadAsset(
     case 'stl':
       return loadSTL(data as ArrayBuffer, fileName);
     case 'ply':
-      return loadPLY(data as ArrayBuffer);
+      // .ply is claimed by both worlds: a triangle mesh / point cloud and the
+      // original 3DGS export format. Only the header tells them apart.
+      return isGaussianSplatPLY(data as ArrayBuffer)
+        ? loadSplat(data as ArrayBuffer, fileName, 'PLY')
+        : loadPLY(data as ArrayBuffer);
+    case 'spz':
+      return loadSplat(data as ArrayBuffer, fileName, 'SPZ');
+    case 'splat':
+      return loadSplat(data as ArrayBuffer, fileName, 'SPLAT');
+    case 'ksplat':
+      return loadSplat(data as ArrayBuffer, fileName, 'KSPLAT');
+    case 'sog':
+      return loadSplat(data as ArrayBuffer, fileName, 'PCSOGSZIP');
     case 'dae':
       return loadCollada(data as string, auxFileUris);
     case '3ds':
@@ -297,6 +309,79 @@ async function loadPLY(buf: ArrayBuffer): Promise<LoadedAsset> {
     root.add(new THREE.Points(geometry, material));
   }
   return emptyAsset(root);
+}
+
+// ---------- Gaussian splats (Spark) ----------
+
+/**
+ * Whether a .ply carries Gaussian splats rather than a triangle mesh or plain
+ * point cloud. Two layouts occur in the wild and neither overlaps with anything
+ * a mesh exporter writes:
+ *  - the original 3DGS export, which names the spherical-harmonic DC term `f_dc_*`
+ *  - the PlayCanvas-compressed variant, which quantizes into a `chunk` element
+ * Per-splat `scale_*` / `rot_*` are deliberately not required, since Spark
+ * substitutes defaults when an export omits them.
+ *
+ * Only the leading ASCII header is inspected; it stays plain text even when the
+ * payload that follows is binary.
+ */
+function isGaussianSplatPLY(buf: ArrayBuffer): boolean {
+  const probe = new Uint8Array(buf, 0, Math.min(buf.byteLength, 4096));
+  const header = new TextDecoder('utf-8', { fatal: false }).decode(probe);
+  const end = header.indexOf('end_header');
+  const text = end >= 0 ? header.slice(0, end) : header;
+  return text.includes('f_dc_0') || /^element\s+chunk\s/m.test(text);
+}
+
+/**
+ * Splats render through Spark's own pipeline rather than as three.js geometry,
+ * so the returned root is a `SplatMesh` instead of a Group of meshes. It is
+ * tagged `userData.isSplat` because Spark exposes no public type guard, and the
+ * viewer needs to recognise it to dispose it, count it, and orient it.
+ */
+async function loadSplat(
+  buf: ArrayBuffer,
+  fileName: string,
+  fileTypeKey: 'PLY' | 'SPZ' | 'SPLAT' | 'KSPLAT' | 'PCSOGSZIP',
+): Promise<LoadedAsset> {
+  const { SplatMesh, SplatFileType } = await import('@sparkjsdev/spark');
+  const mesh = new SplatMesh({
+    fileBytes: buf,
+    fileType: SplatFileType[fileTypeKey],
+    fileName,
+  });
+  // getBoundingBox() throws until the splats are decoded, and the viewer frames
+  // the camera as soon as this resolves.
+  await mesh.initialized;
+  mesh.name = fileName.replace(/\.[^.]+$/, '');
+  mesh.userData.isSplat = true;
+
+  // A SplatMesh holds no three.js geometry, so Box3.setFromObject() would report
+  // it as empty and camera framing, the bounds helper, and grid alignment would
+  // all ignore it. Hanging a geometry off it whose bounding box matches the
+  // splat extent lets the standard traversals see it.
+  const bounds = new THREE.BufferGeometry();
+  bounds.boundingBox = mesh.getBoundingBox();
+  bounds.setAttribute(
+    'position',
+    new THREE.Float32BufferAttribute(boxCorners(bounds.boundingBox), 3),
+  );
+  (mesh as unknown as { geometry: THREE.BufferGeometry }).geometry = bounds;
+
+  const asset = emptyAsset(mesh);
+  asset.metadata['Splats'] = mesh.numSplats.toLocaleString();
+  asset.metadata['Splat format'] = `.${fileTypeKey.toLowerCase()}`;
+  return asset;
+}
+
+function boxCorners(box: THREE.Box3): number[] {
+  const out: number[] = [];
+  for (const x of [box.min.x, box.max.x]) {
+    for (const y of [box.min.y, box.max.y]) {
+      for (const z of [box.min.z, box.max.z]) out.push(x, y, z);
+    }
+  }
+  return out;
 }
 
 // ---------- Collada ----------

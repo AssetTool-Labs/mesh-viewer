@@ -18,6 +18,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 '3ds', '3mf', 'wrl', 'vrml',
                 'usd', 'usda', 'usdc', 'usdz',
                 'vox', 'pcd', 'xyz', 'lwo', 'kmz',
+                'spz', 'splat', 'ksplat', 'sog',
               ],
             },
           })
