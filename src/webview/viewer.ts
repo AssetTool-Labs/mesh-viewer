@@ -270,46 +270,63 @@ export class Viewer {
     // orientation from the camera every frame; click-to-snap targets are
     // hardcoded world axes). We relabel and recolor the gizmo so its text and
     // colors match the asset frame under the X=red, Y=green, Z=blue convention.
-    const [lX, lY, lZ] = axis === 'z' ? (['Y', 'Z', 'X'] as const) : (['X', 'Y', 'Z'] as const);
-    this.viewHelper.setLabels(lX, lY, lZ);
-    this.rebuildGizmoColors(lX, lY, lZ);
+    this.rebuildGizmoAxes(axis);
     if (this.showBounds) this.rebuildBoundsHelper();
   }
 
   /**
    * Axis-color convention: X=red, Y=green, Z=blue.
-   * ViewHelper.setLabels() only changes text — it still bakes the hardcoded
-   * three.js colors (red/green/blue for world X/Y/Z axes). In Z-up mode those
-   * no longer agree with the labels, so we replace every sprite material and
-   * cylinder tint so color always follows the *label*.
+   *
+   * The gizmo geometry stays world-aligned, so each world axis must display
+   * whichever asset axis the contentRoot rotation maps onto it. Y-up is the
+   * identity. Z-up rotates content -90° about X, which sends asset X to
+   * world X, asset Z to world +Y, and asset Y to world *-Z* — so the asset
+   * Y axis (line + labeled ball) is drawn on the negative world-Z side, with
+   * the dimmed ball opposite it.
    *
    * ViewHelper children layout (three.js construction order in source):
    *   [0] xAxis Mesh  [1] zAxis Mesh  [2] yAxis Mesh
    *   [3] posX Sprite [4] posY Sprite [5] posZ Sprite
    *   [6] negX Sprite [7] negY Sprite [8] negZ Sprite
    */
-  private rebuildGizmoColors(labelX: string, labelY: string, labelZ: string): void {
+  private rebuildGizmoAxes(axis: 'y' | 'z'): void {
     const AXIS_HEX: Record<string, number> = { X: 0xff4466, Y: 0x88ff44, Z: 0x4488ff };
-    const colorOf = (label: string) => new THREE.Color(AXIS_HEX[label] ?? 0x888888);
-    const cx = colorOf(labelX);
-    const cy = colorOf(labelY);
-    const cz = colorOf(labelZ);
+    // Per world axis (X, Y, Z order): the asset axis it carries, and whether
+    // that asset axis points along the negative world direction.
+    const mapping =
+      axis === 'z'
+        ? [
+            { label: 'X', negated: false },
+            { label: 'Z', negated: false },
+            { label: 'Y', negated: true },
+          ]
+        : [
+            { label: 'X', negated: false },
+            { label: 'Y', negated: false },
+            { label: 'Z', negated: false },
+          ];
     const ch = this.viewHelper.children;
+    const cylinders = [ch[0], ch[2], ch[1]]; // world X, Y, Z (added in X, Z, Y order)
+    // The cylinder geometry occupies the positive half of its axis; these are
+    // the absolute rotations aiming it along the +/- world direction.
+    const CYL_ROTATION: [THREE.Euler, THREE.Euler][] = [
+      [new THREE.Euler(0, 0, 0), new THREE.Euler(0, Math.PI, 0)],
+      [new THREE.Euler(0, 0, Math.PI / 2), new THREE.Euler(0, 0, -Math.PI / 2)],
+      [new THREE.Euler(0, -Math.PI / 2, 0), new THREE.Euler(0, Math.PI / 2, 0)],
+    ];
 
-    // Cylinder axis lines — [0]=world X, [1]=world Z, [2]=world Y
-    if (ch[0] instanceof THREE.Mesh) (ch[0].material as THREE.MeshBasicMaterial).color.copy(cx);
-    if (ch[1] instanceof THREE.Mesh) (ch[1].material as THREE.MeshBasicMaterial).color.copy(cz);
-    if (ch[2] instanceof THREE.Mesh) (ch[2].material as THREE.MeshBasicMaterial).color.copy(cy);
-
-    // Positive-axis sprites (full opacity, with label text)
-    this.replaceGizmoSprite(ch[3], cx, labelX, 1.0);
-    this.replaceGizmoSprite(ch[4], cy, labelY, 1.0);
-    this.replaceGizmoSprite(ch[5], cz, labelZ, 1.0);
-
-    // Negative-axis sprites (same hue, dimmed, no text)
-    this.replaceGizmoSprite(ch[6], cx, null, 0.2);
-    this.replaceGizmoSprite(ch[7], cy, null, 0.2);
-    this.replaceGizmoSprite(ch[8], cz, null, 0.2);
+    mapping.forEach(({ label, negated }, world) => {
+      const color = new THREE.Color(AXIS_HEX[label] ?? 0x888888);
+      const cylinder = cylinders[world];
+      if (cylinder instanceof THREE.Mesh) {
+        (cylinder.material as THREE.MeshBasicMaterial).color.copy(color);
+        cylinder.rotation.copy(CYL_ROTATION[world][negated ? 1 : 0]);
+      }
+      const labeled = ch[(negated ? 6 : 3) + world];
+      const dimmed = ch[(negated ? 3 : 6) + world];
+      this.replaceGizmoSprite(labeled, color, label, 1.0);
+      this.replaceGizmoSprite(dimmed, color, null, 0.2);
+    });
   }
 
   /** Replace one ViewHelper sprite's material with a freshly drawn canvas. */
