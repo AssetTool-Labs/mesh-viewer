@@ -27,18 +27,27 @@ function makeManagerForAux(auxFileUris: Record<string, string>): {
   manager: LoadingManager;
   baseUrl: string;
 } {
-  const map = new Map<string, string>();
+  // Aux names are paths relative to the model's directory (e.g.
+  // "textures/diffuse.png"). Index by full relative path, and by bare
+  // filename as a fallback for references whose directory prefix doesn't
+  // match on this machine (e.g. absolute paths baked in by DCC tools).
+  const byPath = new Map<string, string>();
+  const byName = new Map<string, string>();
   for (const [name, uri] of Object.entries(auxFileUris ?? {})) {
-    map.set(name.toLowerCase(), uri);
-    map.set(`./${name.toLowerCase()}`, uri);
+    const norm = name.replace(/\\/g, '/').toLowerCase();
+    byPath.set(norm, uri);
+    const base = norm.split('/').pop() ?? norm;
+    if (!byName.has(base)) byName.set(base, uri);
   }
   const manager = new LoadingManager();
   manager.setURLModifier((url) => {
     try {
-      const u = decodeURIComponent(url).replace(/\\/g, '/');
+      const u = decodeURIComponent(url)
+        .replace(/\\/g, '/')
+        .toLowerCase()
+        .replace(/^\.\//, '');
       const tail = u.split('/').pop() ?? u;
-      const hit = map.get(tail.toLowerCase()) ?? map.get(u.toLowerCase());
-      return hit ?? url;
+      return byPath.get(u) ?? byName.get(tail) ?? url;
     } catch {
       return url;
     }
