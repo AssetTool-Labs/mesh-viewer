@@ -297,6 +297,23 @@ function syncShadingHud(): void {
   shadingFlatBtn.classList.toggle('active', toggleFlatShading.checked);
 }
 syncShadingHud();
+
+// Hover explanation under the strip. A styled element instead of title=""
+// tooltips: it appears instantly and right-aligned so it never clips at the
+// viewport edge. data-tip is read on every hover since hudUpAxis rewrites its
+// tip text on each axis change.
+const shadingTip = $('shadingTip');
+for (const btn of shadingHud.querySelectorAll<HTMLButtonElement>('button')) {
+  btn.addEventListener('mouseenter', () => {
+    const tip = btn.dataset.tip;
+    if (!tip) return;
+    shadingTip.textContent = tip;
+    shadingTip.hidden = false;
+  });
+  btn.addEventListener('mouseleave', () => {
+    shadingTip.hidden = true;
+  });
+}
 toggleGrid.addEventListener('change', () => { viewer.setGridVisible(toggleGrid.checked); pushViewSettings(); });
 toggleAxes.addEventListener('change', () => { viewer.setAxesVisible(toggleAxes.checked); pushViewSettings(); });
 toggleBounds.addEventListener('change', () => { viewer.setBoundsVisible(toggleBounds.checked); pushViewSettings(); });
@@ -377,7 +394,8 @@ envSelect.addEventListener('change', () => { viewer.applyEnvironment(envSelect.v
 function syncUpAxisButton(): void {
   const axis = upAxisSelect.value as 'y' | 'z';
   hudUpAxisBtn.textContent = axis === 'z' ? 'Z↑' : 'Y↑';
-  hudUpAxisBtn.title = axis === 'z' ? 'Up axis: Z (click for Y up)' : 'Up axis: Y (click for Z up)';
+  hudUpAxisBtn.dataset.tip =
+    axis === 'z' ? 'Up axis: Z — click to switch to Y up' : 'Up axis: Y — click to switch to Z up';
 }
 syncUpAxisButton();
 upAxisSelect.addEventListener('change', () => {
