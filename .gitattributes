@@ -61,5 +61,5 @@
 
 # Keep the extension icon and README media as normal Git blobs
 # (LFS-stored images don't render on the Marketplace / raw GitHub URLs).
-media/icon.png -filter -diff -merge -text
+media/*.png -filter -diff -merge -text
 media/*.gif -filter -diff -merge -text
