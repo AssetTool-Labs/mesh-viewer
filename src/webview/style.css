@@ -511,6 +511,27 @@ button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
   white-space: pre;
 }
 
+/* Up-axis toggle, centered right below the corner view gizmo
+   (128px square at top/right 8px, so its center is 72px from the edge). */
+#hudUpAxis {
+  position: absolute;
+  top: 140px;
+  right: 72px;
+  transform: translateX(50%);
+  width: auto;
+  padding: 5px 12px;
+  background: var(--button-bg);
+  color: var(--button-fg);
+  border: none;
+  border-radius: 12px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+#hudUpAxis:hover { background: var(--button-hover); }
+
 /* Overlays */
 #overlay, #errorOverlay {
   position: absolute;
