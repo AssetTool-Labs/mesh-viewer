@@ -92,6 +92,11 @@ Bump the `version` in `package.json` (e.g. `0.1.0` → `0.1.1`), then re-run **s
 | LightWave | `.lwo` |
 | MagicaVoxel | `.vox` |
 | Point clouds | `.pcd`, `.xyz` |
+| Gaussian splats | `.spz`, `.splat`, `.ksplat`, `.sog`, `.ply` |
+
+`.ply` covers both worlds. The header decides: an export carrying 3DGS attributes
+(`f_dc_*`) or a PlayCanvas-compressed `chunk` element renders as Gaussian splats,
+anything else renders as a mesh or point cloud as before.
 
 For multi-file formats (`.gltf` + `.bin` + textures, `.obj` + `.mtl` + textures), only files with reference-able extensions (`.bin`, `.mtl`, common image types) in the same directory are loaded automatically. Unrelated files (`.glb` / `.fbx` siblings, etc.) are ignored so opening one model never drags 14 MB of unrelated bytes through the webview channel.
 
@@ -106,6 +111,7 @@ For multi-file formats (`.gltf` + `.bin` + textures, `.obj` + `.mtl` + textures)
 - **File info panel** — format, size, parse time, glTF generator/version, scene totals, geometry totals, unique materials by type, texture count, light/camera summaries. Updates as you import more meshes.
 - **Animation control** — every `AnimationClip` is listed with its duration; play / pause / stop, scrub bar, and a 0–2× speed slider drive a real `THREE.AnimationMixer`. With multiple imports, animations are grouped under their source file and can be swapped on the fly.
 - **Timeline / dope sheet** — a Blender-style, read-only timeline docks under the viewport whenever the scene has animations: frame ruler with a scrubbable playhead, per-node keyframe rows (expandable to position / rotation / scale / morph channels), frame-by-frame stepping, keyframe jumping, auto-detected FPS (overridable), loop toggle, and playback-speed presets. `Space` plays/pauses, `←`/`→` step one frame, `Shift+←`/`→` jump to start/end, `↑`/`↓` jump between keyframes, `Ctrl`+scroll zooms the ruler.
+- **Gaussian splat rendering** — splat files render through [Spark](https://github.com/sparkjsdev/spark) alongside regular meshes in the same scene, with correct depth sorting. Splats are drawn by Spark rather than by a Three.js material, so the shading modes, wireframe overlay, and skeleton tools do not apply to them. Because 3DGS pipelines export Y-down, splats are flipped a half turn about X by default; **Flip splats upright** in the View tab turns that off for files already authored Y-up.
 - **Shading modes** — smooth, flat, wireframe, points, and a normals debug shader.
 - **Skin-weight visualization** — for skinned meshes, *Show skin weights* recolors the surface by its skin weights, with four modes: **all bones** (each bone a palette color, blended per vertex), **isolate bone** (one bone's weight on a blue→red ramp), **influence count** (discrete bands by number of influences per vertex), and **normalization** (flags vertices whose weights don't sum to 1.0). A contextual legend explains the current mode's colors, and the coloring deforms with animation. Pick the isolated bone from the dropdown or by clicking a bone in the hierarchy.
 - **View helpers** — grid, axes, bounding box, auto-rotate, IBL studio/neutral environment, background color picker.
@@ -249,7 +255,7 @@ npx @vscode/vsce package --no-dependencies --allow-missing-repository
 cursor --install-extension mesh-viewer-vscode-0.1.0.vsix --force
 ```
 
-The packaged `.vsix` is intentionally small (~310 KB). Test 3D files dropped into the repo root won't be included — `.vscodeignore` whitelists only the runtime files in `out/`.
+The packaged `.vsix` is ~2 MB, most of it the Spark splat renderer (which inlines its own WebAssembly sorter). Test 3D files dropped into the repo root won't be included — `.vscodeignore` whitelists only the runtime files in `out/`.
 
 ---
 

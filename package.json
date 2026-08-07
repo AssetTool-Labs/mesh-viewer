@@ -1,7 +1,7 @@
 {
   "name": "mesh-viewer-vscode",
   "displayName": "3D Mesh Viewer",
-  "description": "View and inspect 3D meshes (OBJ, FBX, GLB/GLTF, STL, PLY, DAE, 3DS, USD/USDA/USDC/USDZ, 3MF, VRML, and more) directly inside VS Code.",
+  "description": "View and inspect 3D meshes (OBJ, FBX, GLB/GLTF, STL, PLY, DAE, 3DS, USD/USDA/USDC/USDZ, 3MF, VRML, and more) and Gaussian splats (SPZ, SPLAT, KSPLAT, SOG) directly inside VS Code.",
   "version": "0.3.0",
   "publisher": "AssetToolLabs",
   "icon": "media/icon.png",
@@ -34,7 +34,10 @@
     "stl",
     "ply",
     "collada",
-    "three.js"
+    "three.js",
+    "gaussian-splatting",
+    "splat",
+    "spz"
   ],
   "main": "./out/extension.js",
   "activationEvents": [],
@@ -103,6 +106,18 @@
           },
           {
             "filenamePattern": "*.kmz"
+          },
+          {
+            "filenamePattern": "*.spz"
+          },
+          {
+            "filenamePattern": "*.splat"
+          },
+          {
+            "filenamePattern": "*.ksplat"
+          },
+          {
+            "filenamePattern": "*.sog"
           }
         ],
         "priority": "default"
@@ -124,7 +139,7 @@
       "explorer/context": [
         {
           "command": "3dMeshViewer.openWith",
-          "when": "resourceExtname =~ /\\.(obj|fbx|glb|gltf|stl|ply|dae|3ds|3mf|wrl|vrml|usd|usda|usdc|usdz|vox|pcd|xyz|lwo|kmz)$/i",
+          "when": "resourceExtname =~ /\\.(obj|fbx|glb|gltf|stl|ply|dae|3ds|3mf|wrl|vrml|usd|usda|usdc|usdz|vox|pcd|xyz|lwo|kmz|spz|splat|ksplat|sog)$/i",
           "group": "navigation"
         }
       ]
@@ -210,6 +225,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.webview.json"
   },
   "dependencies": {
+    "@sparkjsdev/spark": "^2.1.0",
     "three": "0.184.0"
   },
   "devDependencies": {

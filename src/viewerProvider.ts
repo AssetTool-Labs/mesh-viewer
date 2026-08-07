@@ -102,6 +102,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
                 '3ds', '3mf', 'wrl', 'vrml',
                 'usd', 'usda', 'usdc', 'usdz',
                 'vox', 'pcd', 'xyz', 'lwo', 'kmz',
+                'spz', 'splat', 'ksplat', 'sog',
               ],
             },
           });
@@ -318,6 +319,9 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       `media-src ${webview.cspSource} blob: data:`,
       `style-src ${webview.cspSource} 'unsafe-inline'`,
       `font-src ${webview.cspSource}`,
+      // 'wasm-unsafe-eval' has two dependents: the DRACO decoder and Spark's
+      // Gaussian splat sorter. Removing it breaks compressed glTF and every
+      // splat format.
       `script-src 'nonce-${nonce}' 'wasm-unsafe-eval'`,
       `worker-src blob:`,
       `connect-src ${webview.cspSource} blob: data:`,
