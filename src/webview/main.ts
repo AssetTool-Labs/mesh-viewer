@@ -96,6 +96,7 @@ const shadingHud = $('shadingHud');
 const shadingModeBtns = Array.from(shadingHud.querySelectorAll<HTMLButtonElement>('[data-mode]'));
 const shadingXrayBtn = $<HTMLButtonElement>('shadingXray');
 const shadingFlatBtn = $<HTMLButtonElement>('shadingFlat');
+const shadingCollapseBtn = $<HTMLButtonElement>('shadingCollapse');
 const toggleWireframeOverlay = $<HTMLInputElement>('toggleWireframeOverlay');
 const splatUprightRow = $('splatUprightRow');
 const toggleSplatUpright = $<HTMLInputElement>('toggleSplatUpright');
@@ -285,6 +286,18 @@ shadingXrayBtn.addEventListener('click', () => {
 shadingFlatBtn.addEventListener('click', () => {
   toggleFlatShading.checked = !toggleFlatShading.checked;
   toggleFlatShading.dispatchEvent(new Event('change'));
+});
+
+// Collapse the strip rightward, leaving just the chevron beside the gizmo.
+// Left out of the meshless disable pass below on purpose: the shading buttons
+// grey out on splat-only scenes, but getting the strip out of the way should
+// still work there.
+shadingCollapseBtn.addEventListener('click', () => {
+  const collapsed = shadingHud.classList.toggle('collapsed');
+  shadingCollapseBtn.textContent = collapsed ? '‹' : '›';
+  shadingCollapseBtn.dataset.tip = collapsed
+    ? 'Show the shading controls'
+    : 'Hide the shading controls';
 });
 
 /** Reflect the sidebar shading controls in the HUD strip. Points mode lives
