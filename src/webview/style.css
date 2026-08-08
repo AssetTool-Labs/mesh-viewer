@@ -549,6 +549,21 @@ button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
   background: var(--muted);
   opacity: 0.5;
 }
+/* Collapse chevron at the strip's left end. A glyph rather than an SVG, so it
+   needs the font sizing the icon buttons get from their <svg>. */
+.shading-collapse {
+  font-size: 15px;
+  line-height: 1;
+  /* The guillemet sits slightly high in most fonts; nudge it back to center. */
+  padding-bottom: 1px;
+}
+/* Collapsed: only the chevron survives. The strip is right-anchored, so it
+   shrinks toward the gizmo — that shrink is the "tuck away right" motion.
+   Child combinator keeps the absolutely-positioned #shadingTip out of it. */
+#shadingHud.collapsed > .shading-btn:not(#shadingCollapse),
+#shadingHud.collapsed > .shading-sep {
+  display: none;
+}
 /* Up-axis toggle: same strip, but a text pill (Y↑ / Z↑) instead of an icon. */
 .shading-axis {
   width: auto;
