@@ -108,27 +108,30 @@ format, a setting, or a command. A format needs all of: a `case` in `loadAsset`,
 ### 5. Install the local build
 
 ```bash
-./scripts/dev-install.sh              # typecheck, build, package, install into every editor found
+./scripts/dev-install.sh              # typecheck, build, package, install into every editor installed
 ./scripts/dev-install.sh --dry-run    # show what it would do
 ./scripts/dev-install.sh --target cursor --bump   # one editor, bump the patch version first
 ```
 
-The script resolves the `code` / `cursor` CLI from the macOS app bundle when it is not on `PATH`
-(it usually is not in an agent sandbox). Use `--bump` when the user needs to see the version
-change to be sure the reload took. If no CLI resolves, fall back to telling the user to run
-**Extensions → … → Install from VSIX…** on the `.vsix` the script built.
+The default installs into **both VS Code and Cursor**, and into only the ones the user actually
+has: the script resolves each `code` / `cursor` CLI from `PATH` or the macOS app bundle (`PATH`
+usually misses in an agent sandbox), prints `skip <editor> (not installed)` for one it cannot
+find, and never tries to install into an absent editor. Do not narrow with `--target` unless the
+user asks for one editor — installing into both is what keeps whichever window they happen to
+have open in sync.
 
-Never install into an editor the user did not ask about — check which one already has the
-extension (`ls ~/.cursor/extensions ~/.vscode/extensions | grep mesh-viewer`) and prefer that one.
+Use `--bump` when the user needs to see the version change to be sure the reload took. If neither
+editor resolves, the script exits nonzero and prints the manual route — pass that along
+(**Extensions → … → Install from VSIX…**) rather than retrying.
 
 ### 6. Hand off and wait
 
 You cannot see the render. End your turn with an explicit test script and stop — do not report the
 feature as verified:
 
-> Installed `mesh-viewer-vscode-<version>.vsix` into <editor>.
+> Installed `mesh-viewer-vscode-<version>.vsix` into <the editors the script reported>.
 >
-> 1. `Cmd+Shift+P` → **Developer: Reload Window**
+> 1. In the editor you are testing in: `Cmd+Shift+P` → **Developer: Reload Window**
 > 2. Open `test_data/<repro-asset>` — expect <specific observable>. Before this change it <old behavior>.
 > 3. Open `test_data/<control-asset>` — expect no change from before.
 > 4. Check the webview devtools console (`Cmd+Shift+P` → **Developer: Open Webview Developer Tools**) for `[3DViewer]` warnings.

@@ -68,14 +68,26 @@ CURSOR_CLI="$(find_cli cursor \
   "$HOME/Applications/Cursor.app/Contents/Resources/app/bin/cursor" \
   "/usr/share/cursor/bin/cursor")" || CURSOR_CLI=""
 
+# Every editor that is actually installed gets the build. One whose CLI does not
+# resolve is reported and skipped -- we never try to install into an editor the
+# user does not have.
 CLIS=()
 CLI_NAMES=()
-if [ "$TARGET" = all ] || [ "$TARGET" = code ]; then
-  [ -n "$CODE_CLI" ] && { CLIS+=("$CODE_CLI"); CLI_NAMES+=("VS Code"); }
-fi
-if [ "$TARGET" = all ] || [ "$TARGET" = cursor ]; then
-  [ -n "$CURSOR_CLI" ] && { CLIS+=("$CURSOR_CLI"); CLI_NAMES+=("Cursor"); }
-fi
+SKIPPED=()
+
+consider() {
+  local name="$1" cli="$2" selector="$3"
+  [ "$TARGET" = all ] || [ "$TARGET" = "$selector" ] || return 0
+  if [ -n "$cli" ]; then
+    CLIS+=("$cli")
+    CLI_NAMES+=("$name")
+  else
+    SKIPPED+=("$name")
+  fi
+}
+
+consider "VS Code" "$CODE_CLI" code
+consider "Cursor" "$CURSOR_CLI" cursor
 
 # --- version -----------------------------------------------------------------
 if [ "$BUMP" = 1 ]; then
@@ -112,17 +124,25 @@ run npm run package
 
 # --- install -----------------------------------------------------------------
 if [ "${#CLIS[@]}" -eq 0 ]; then
-  cat >&2 <<EOF
-
-==> No editor CLI found for --target=$TARGET.
-
-Built: $ROOT/$VSIX
-
-Install it by hand: Extensions view -> "..." menu -> "Install from VSIX...".
-To get the CLI on PATH: Command Palette -> "Shell Command: Install 'code' command in PATH"
-(or the Cursor equivalent).
-EOF
+  {
+    echo
+    echo "==> No editor found for --target=$TARGET (looked for VS Code and Cursor on PATH"
+    echo "    and in /Applications)."
+    echo
+    [ "$DRY_RUN" = 1 ] || echo "The build is at $ROOT/$VSIX -- install it by hand:"
+    [ "$DRY_RUN" = 1 ] && echo "Once built, install the .vsix by hand:"
+    echo '  Extensions view -> "..." menu -> "Install from VSIX...".'
+    echo
+    echo "To get the CLI on PATH instead: Command Palette ->"
+    echo "\"Shell Command: Install 'code' command in PATH\" (or the Cursor equivalent)."
+  } >&2
   exit 1
+fi
+
+if [ "${#SKIPPED[@]}" -gt 0 ]; then
+  for name in "${SKIPPED[@]}"; do
+    echo "==> skip $name (not installed)"
+  done
 fi
 
 for i in "${!CLIS[@]}"; do
