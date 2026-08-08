@@ -175,6 +175,18 @@ async function loadGLTF(
     }
   }
 
+  // Wire up meshopt decompression so EXT_meshopt_compression files load. Unlike
+  // DRACO, three ships this decoder as one self-contained module with the wasm
+  // embedded, so it bundles into the webview and needs no sidecar file. Leave
+  // its worker pool off: starting one needs a blob: URL that the webview CSP
+  // forbids, and the decoder already falls back to decoding on this thread.
+  try {
+    const { MeshoptDecoder } = await import('three/examples/jsm/libs/meshopt_decoder.module.js');
+    loader.setMeshoptDecoder(MeshoptDecoder);
+  } catch (err) {
+    console.warn('[3DViewer] Failed to initialize MeshoptDecoder:', err);
+  }
+
   const buffer: ArrayBuffer | string = ext === 'glb' ? (data as ArrayBuffer) : (data as string);
 
   return new Promise((resolve, reject) => {

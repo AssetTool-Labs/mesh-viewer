@@ -263,7 +263,7 @@ The packaged `.vsix` is ~2 MB, most of it the Spark splat renderer (which inline
 
 - **"Open With…" doesn't show 3D Mesh Viewer.** Reload the window (`Developer: Reload Window`). If it still doesn't show, run `cursor --list-extensions | grep mesh` to confirm the extension is installed on the side where the file lives (local vs. remote SSH).
 - **Drop shows VS Code's "Drop to open" card and replaces my viewer.** That's *Drop into Editor* intercepting before the webview sees the drag — see the call-out under [Adding more meshes](#adding-more-meshes-to-an-open-scene). Either disable that setting or use the `+ Import Mesh…` button.
-- **The viewport is black / nothing renders.** Open the webview devtools (`Developer: Open Webview Developer Tools` while the viewer is focused) and check the console. The most common cause is an unsupported variant of a format (e.g. encrypted FBX, Draco-compressed GLB without the decoder, complex USD schemas).
+- **The viewport is black / nothing renders.** Open the webview devtools (`Developer: Open Webview Developer Tools` while the viewer is focused) and check the console. The most common cause is an unsupported variant of a format (e.g. encrypted FBX, complex USD schemas).
 - **GLTF textures / .bin missing.** The extension loads sibling files automatically, but only those in the *same directory* as the `.gltf` and only if their extension is `.bin` or a known image format. Make sure your buffer/texture paths are relative and point next to the `.gltf` file.
 - **Updated the code but Cursor still shows the old version.** Either bump the `version` in `package.json` before re-packaging, or pass `--force` to `--install-extension` (we already do above) and then reload the window.
 
@@ -276,7 +276,7 @@ The packaged `.vsix` is ~2 MB, most of it the Spark splat renderer (which inline
 - The bundled USD loader supports a subset of USD/USDA/USDC/USDZ; complex production assets with custom schemas may not render perfectly.
 - Animation editing/baking is not supported — animations are read-only.
 - Skin-weight *influence count* is capped at 4 per vertex (the GPU skinning limit) — vertices originally bound to more bones can't be distinguished, since the extra influences are dropped at load. The *normalization* mode assumes weights should sum to 1.0; most loaders already deliver normalized weights, so it mainly flags atypical assets. *Isolate bone* builds its picker from the first skinned mesh's skeleton and broadcasts that bone index to every skinned mesh, so merged scenes with multiple independent rigs may highlight mismatched bones.
-- DRACO / Meshopt compressed glTF requires the corresponding decoder; the extension does not yet ship those decoders.
+- Compressed glTF decodes out of the box — DRACO (`KHR_draco_mesh_compression`) and meshopt (both `EXT_meshopt_compression` and the ratified `KHR_meshopt_compression`). Each decoder is bundled, so nothing is fetched from a CDN. Meshopt decodes on the main thread instead of in its worker pool, because starting those workers needs a `blob:` URL the webview CSP forbids; very large compressed assets will therefore hitch briefly while loading.
 - Encrypted or proprietary FBX variants from some pipelines may fail to parse.
 
 ---

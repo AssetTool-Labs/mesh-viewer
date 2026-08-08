@@ -32,7 +32,7 @@ A shading strip next to the corner view gizmo switches between **Wireframe, Soli
 
 ## More features
 
-- **Wide format support** — GLB/GLTF (including DRACO-compressed), FBX, OBJ, USD/USDA/USDC/USDZ, STL, PLY, DAE (Collada), 3DS, 3MF, VRML, Gaussian splats (SPZ/SPLAT/KSPLAT/SOG/3DGS PLY), and more
+- **Wide format support** — GLB/GLTF (including DRACO- and meshopt-compressed), FBX, OBJ, USD/USDA/USDC/USDZ, STL, PLY, DAE (Collada), 3DS, 3MF, VRML, Gaussian splats (SPZ/SPLAT/KSPLAT/SOG/3DGS PLY), and more
 - **Sidecar textures** — FBX/OBJ/DAE files that reference textures by relative path (e.g. a `textures/` folder next to the model) load them automatically, even when the exported absolute paths are stale
 - **Scene hierarchy** — tree view with filtering, per-node visibility (with a one-click bulk show/hide of the filtered set), and selection outlines
 - **Inspector** — object transforms, geometry stats, material and texture details
