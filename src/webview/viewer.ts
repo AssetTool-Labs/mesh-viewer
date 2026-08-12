@@ -59,6 +59,17 @@ export class Viewer {
 
   private readonly canvas: HTMLCanvasElement;
   private readonly clock = new THREE.Clock();
+
+  // Frame-rate cap. setAnimationLoop fires at the display refresh rate (120Hz on
+  // ProMotion, 144Hz on many externals); rendering that fast just burns GPU and
+  // battery for a mostly-static mesh viewer. We gate the render to ~60fps. The
+  // 1ms tolerance keeps a plain 60Hz panel from just missing the 16.67ms budget
+  // and halving to 30fps. Scheduling uses the loop's own timestamp (below);
+  // clock.getDelta() still measures real render-to-render time so animation
+  // playback stays real-time regardless of how many refreshes we skip.
+  private static readonly FRAME_BUDGET_MS = 1000 / 60;
+  private static readonly FRAME_TOLERANCE_MS = 1;
+  private lastFrameTime = 0;
   private readonly pmremGenerator: THREE.PMREMGenerator;
   private envTexture: THREE.Texture | null = null;
 
@@ -1297,7 +1308,15 @@ export class Viewer {
     this.outlinePass.setSize(w * pr, h * pr);
   };
 
-  private tick = (): void => {
+  private tick = (timeMs: number): void => {
+    // Throttle to the target frame rate. Bail out until at least one frame
+    // budget (minus tolerance) has elapsed since the last rendered frame, then
+    // snap lastFrameTime onto the 60Hz grid so refresh rates that aren't a clean
+    // multiple of 60 (e.g. 144Hz) average out to ~60 instead of drifting down.
+    const elapsed = timeMs - this.lastFrameTime;
+    if (elapsed < Viewer.FRAME_BUDGET_MS - Viewer.FRAME_TOLERANCE_MS) return;
+    this.lastFrameTime = timeMs - (elapsed % Viewer.FRAME_BUDGET_MS);
+
     const dt = this.clock.getDelta();
     this.controls.update();
     if (this.mixer && !this.animationPaused) {
