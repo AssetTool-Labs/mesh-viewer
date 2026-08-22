@@ -121,6 +121,7 @@
             <input type="checkbox" id="toggleSkeleton" />
             <span>Show skeleton</span>
           </label>
+          <button type="button" id="resetPose" disabled>Reset Pose</button>
           <label class="row checkbox">
             <input type="checkbox" id="toggleWeights" />
             <span>Show skin weights</span>
@@ -194,6 +195,7 @@
         <div id="hud">
           <div id="hudStats"></div>
         </div>
+        <div id="poseHint" hidden></div>
         <!-- Blender-style shading mode strip, to the left of the corner view gizmo. -->
         <div id="shadingHud">
           <button id="shadingCollapse" class="shading-btn shading-collapse" data-tip="Hide the shading controls">›</button>
