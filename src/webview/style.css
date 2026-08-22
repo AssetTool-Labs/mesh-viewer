@@ -542,6 +542,26 @@ button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
 .shading-btn.active { background: var(--accent); color: #fff; }
 .shading-btn:disabled { opacity: 0.35; cursor: default; }
 .shading-btn svg { width: 15px; height: 15px; display: block; }
+/* `hidden` on a HUD element must win over the strip's flex display. */
+.shading-btn[hidden], .shading-sep[hidden] { display: none; }
+/* Offset-mode link reads as a distinct linked state: hollow accent ring plus a
+   small corner dot, so it's clearly not the solid "aligned" link. */
+.shading-btn.active.link-offset {
+  background: transparent;
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+  position: relative;
+}
+.shading-btn.active.link-offset::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
 .shading-sep {
   width: 1px;
   height: 16px;
