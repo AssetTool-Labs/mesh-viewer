@@ -64,6 +64,53 @@ export interface AddFileErrorMessage {
   message: string;
 }
 
+/** Orbit camera pose shared between viewers when camera linking is on. */
+export interface CameraState {
+  position: [number, number, number];
+  target: [number, number, number];
+}
+
+/** How linked viewers track each other. */
+export type CameraLinkMode = 'aligned' | 'offset';
+
+/**
+ * An incremental orbit change, used by `offset` linking so each viewer keeps its
+ * own framing and only mirrors the *motion*. Angles are additive radians, radius
+ * is a ratio, target pan is a world-space delta scaled by the driver's radius.
+ */
+export interface OrbitDelta {
+  dTheta: number;
+  dPhi: number;
+  rRatio: number;
+  dTarget: [number, number, number];
+  driverRadius: number;
+}
+
+/** Message: extension -> a *different* viewer, relaying a linked camera move. */
+export interface CameraSyncMessage {
+  type: 'cameraSync';
+  state: CameraState;
+}
+
+/** Message: extension -> a *different* viewer, relaying an `offset`-mode orbit delta. */
+export interface CameraOrbitDeltaMessage {
+  type: 'cameraOrbitDelta';
+  delta: OrbitDelta;
+}
+
+/** Message: extension -> a *different* viewer, mirroring the link toggle state. */
+export interface CameraLinkMessage {
+  type: 'cameraLink';
+  enabled: boolean;
+  mode: CameraLinkMode;
+}
+
+/** Message: extension -> webview, how many viewers are currently open. */
+export interface ViewerCountMessage {
+  type: 'viewerCount';
+  count: number;
+}
+
 /** Webview -> extension. */
 export type FromWebviewMessage =
   | { type: 'ready' }
@@ -74,4 +121,12 @@ export type FromWebviewMessage =
   /** Ask the host to show an open-file dialog and import the selected files. */
   | { type: 'pickAndImport'; requestId: string }
   /** Report the current view settings so the host can remember them for future viewers. */
-  | { type: 'viewSettingsChanged'; settings: ViewSettings };
+  | { type: 'viewSettingsChanged'; settings: ViewSettings }
+  /** Aligned-mode: camera moved while linking is on — relay this pose to the other viewers. */
+  | { type: 'cameraSync'; state: CameraState }
+  /** Offset-mode: relay just the incremental orbit change to the other viewers. */
+  | { type: 'cameraOrbitDelta'; delta: OrbitDelta }
+  /** The link toggle was flipped — mirror it (and its mode) to the other viewers. */
+  | { type: 'cameraLinkChanged'; enabled: boolean; mode: CameraLinkMode };
+
+

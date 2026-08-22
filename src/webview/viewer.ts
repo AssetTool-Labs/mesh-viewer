@@ -7,13 +7,21 @@ import { OutlinePass } from 'three/examples/jsm/postprocessing/OutlinePass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ViewHelper } from 'three/examples/jsm/helpers/ViewHelper.js';
 import { SparkRenderer } from '@sparkjsdev/spark';
+import type { CameraState, OrbitDelta } from '../types';
 import type { LoadedAsset } from './loaders';
 import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
-
 export type { WeightMode } from './weightMaterial';
 
 export type ShadingMode = 'solid' | 'material' | 'rendered' | 'wireframe' | 'points' | 'normals';
 export type EnvironmentMode = 'studio' | 'neutral' | 'none';
+
+/** Orbit camera pose in spherical terms about the target (offset-mode linking). */
+export interface OrbitPose {
+  theta: number;
+  phi: number;
+  radius: number;
+  target: [number, number, number];
+}
 
 export interface ObjectStats {
   meshes: number;
@@ -56,6 +64,11 @@ export class Viewer {
   readonly camera: THREE.PerspectiveCamera;
   readonly renderer: THREE.WebGLRenderer;
   readonly controls: OrbitControls;
+
+  /** Fired when the user moves the orbit camera; used to drive linked viewers. */
+  onCameraChange: (() => void) | null = null;
+  /** Guards against re-emitting `onCameraChange` while applying a remote pose. */
+  private suppressCameraChange = false;
 
   private readonly canvas: HTMLCanvasElement;
   private readonly clock = new THREE.Clock();
@@ -163,6 +176,9 @@ export class Viewer {
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
+    this.controls.addEventListener('change', () => {
+      if (!this.suppressCameraChange) this.onCameraChange?.();
+    });
 
     this.viewHelper = new ViewHelper(this.camera, canvas);
     this.viewHelper.location.top = 8;
@@ -731,6 +747,50 @@ export class Viewer {
       if (o.parent) o.parent.remove(o);
     }
     this.wireframeOverlays = [];
+  }
+
+  /** Current orbit pose, for mirroring onto a linked viewer. */
+  getCameraState(): CameraState {
+    return {
+      position: this.camera.position.toArray() as [number, number, number],
+      target: this.controls.target.toArray() as [number, number, number],
+    };
+  }
+
+  /** Apply a pose received from a linked viewer without re-emitting a change. */
+  applyCameraState(state: CameraState): void {
+    this.suppressCameraChange = true;
+    this.camera.position.set(state.position[0], state.position[1], state.position[2]);
+    this.controls.target.set(state.target[0], state.target[1], state.target[2]);
+    this.controls.update();
+    this.suppressCameraChange = false;
+  }
+
+  /** Orbit pose in spherical terms (about the target), for offset-mode deltas. */
+  getOrbitPose(): OrbitPose {
+    const s = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(this.controls.target));
+    return { theta: s.theta, phi: s.phi, radius: s.radius, target: this.controls.target.toArray() as [number, number, number] };
+  }
+
+  /** Apply an incremental orbit change from a linked viewer (offset mode). */
+  applyOrbitDelta(d: OrbitDelta): void {
+    this.suppressCameraChange = true;
+    const s = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(this.controls.target));
+    s.theta += d.dTheta;
+    s.phi += d.dPhi;
+    s.radius *= d.rRatio;
+    s.makeSafe();
+    // Pan proportionally to this viewer's zoom vs the driver's, so equal gestures
+    // feel equal across differently-scaled models.
+    const scale = d.driverRadius > 1e-9 ? s.radius / d.driverRadius : 1;
+    this.controls.target.set(
+      this.controls.target.x + d.dTarget[0] * scale,
+      this.controls.target.y + d.dTarget[1] * scale,
+      this.controls.target.z + d.dTarget[2] * scale,
+    );
+    this.camera.position.copy(this.controls.target).add(new THREE.Vector3().setFromSpherical(s));
+    this.controls.update();
+    this.suppressCameraChange = false;
   }
 
   setAutoRotate(v: boolean): void {

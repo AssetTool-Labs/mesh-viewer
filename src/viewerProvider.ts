@@ -54,6 +54,18 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
     }
   }
 
+  /** Send a message to every open viewer except the one it originated from. */
+  private static broadcastExcept(sender: vscode.Webview, message: unknown): void {
+    for (const wv of MeshViewerProvider.liveWebviews) {
+      if (wv !== sender) wv.postMessage(message);
+    }
+  }
+
+  /** Tell every viewer how many are currently open, so they can show/hide the camera-link toggle. */
+  private static broadcastViewerCount(): void {
+    MeshViewerProvider.broadcast({ type: 'viewerCount', count: MeshViewerProvider.liveWebviews.size });
+  }
+
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   async openCustomDocument(uri: vscode.Uri): Promise<ViewerDocument> {
@@ -76,7 +88,11 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
     webview.html = await this.buildHtml(webview, mediaRoot);
 
     MeshViewerProvider.liveWebviews.add(webview);
-    webviewPanel.onDidDispose(() => MeshViewerProvider.liveWebviews.delete(webview));
+    webviewPanel.onDidDispose(() => {
+      MeshViewerProvider.liveWebviews.delete(webview);
+      MeshViewerProvider.broadcastViewerCount();
+    });
+    MeshViewerProvider.broadcastViewerCount();
 
     const sub = webview.onDidReceiveMessage(async (msg: FromWebviewMessage) => {
       switch (msg.type) {
@@ -85,6 +101,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
             const payload = await this.buildFilePayload(webview, document.uri);
             const init: InitMessage = { type: 'init', settings: this.effectiveViewSettings(), ...payload };
             await webview.postMessage(init);
+            await webview.postMessage({ type: 'viewerCount', count: MeshViewerProvider.liveWebviews.size });
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             await webview.postMessage({ type: 'loadError', message });
@@ -178,6 +195,18 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
           // whether they're re-applied on init (see effectiveViewSettings), so
           // toggling that setting off then on restores the last state.
           void this.context.globalState.update(REMEMBERED_KEY, msg.settings);
+          break;
+        case 'cameraSync':
+          // Relay a linked camera move to the other open viewers.
+          MeshViewerProvider.broadcastExcept(webview, { type: 'cameraSync', state: msg.state });
+          break;
+        case 'cameraOrbitDelta':
+          // Relay an offset-mode orbit delta to the other open viewers.
+          MeshViewerProvider.broadcastExcept(webview, { type: 'cameraOrbitDelta', delta: msg.delta });
+          break;
+        case 'cameraLinkChanged':
+          // One click links/unlinks all viewers: mirror the toggle (and mode) everywhere else.
+          MeshViewerProvider.broadcastExcept(webview, { type: 'cameraLink', enabled: msg.enabled, mode: msg.mode });
           break;
       }
     });

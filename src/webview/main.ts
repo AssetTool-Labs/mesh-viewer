@@ -2,9 +2,11 @@ import * as THREE from 'three';
 import type {
   AddFileErrorMessage,
   AddFileMessage,
+  CameraLinkMode,
   FilePayload,
   InitMessage,
   InitViewSettings,
+  OrbitDelta,
   ViewSettings,
 } from '../types';
 import { loadAsset, type LoadedAsset } from './loaders';
@@ -97,6 +99,8 @@ const shadingModeBtns = Array.from(shadingHud.querySelectorAll<HTMLButtonElement
 const shadingXrayBtn = $<HTMLButtonElement>('shadingXray');
 const shadingFlatBtn = $<HTMLButtonElement>('shadingFlat');
 const shadingCollapseBtn = $<HTMLButtonElement>('shadingCollapse');
+const shadingLinkBtn = $<HTMLButtonElement>('shadingLink');
+const shadingLinkSep = $('shadingLinkSep');
 const toggleWireframeOverlay = $<HTMLInputElement>('toggleWireframeOverlay');
 const splatUprightRow = $('splatUprightRow');
 const toggleSplatUpright = $<HTMLInputElement>('toggleSplatUpright');
@@ -310,6 +314,101 @@ function syncShadingHud(): void {
   shadingFlatBtn.classList.toggle('active', toggleFlatShading.checked);
 }
 syncShadingHud();
+
+// ---- Camera linking (sync orbit across open viewers) ----
+// The toggle only appears when 2+ viewers are open (the host reports the count).
+// Flipping it links/unlinks every viewer at once. Two modes:
+//   • aligned (default, plain click): all viewers share one pose and converge.
+//   • offset  (Alt/Option-click): each viewer keeps its own framing and only the
+//     incremental orbit motion is mirrored.
+// Relaying goes through the host, which excludes the sender so there's no echo.
+let viewerCount = 1;
+let cameraLinkEnabled = false;
+let linkMode: CameraLinkMode = 'aligned';
+let cameraSyncQueued = false;
+// Baseline for offset-mode deltas: the pose as of the last synced state.
+let lastOrbitPose: ReturnType<typeof viewer.getOrbitPose> | null = null;
+
+function updateLinkUi(): void {
+  const show = viewerCount >= 2;
+  shadingLinkBtn.hidden = !show;
+  shadingLinkSep.hidden = !show;
+  shadingLinkBtn.classList.toggle('active', cameraLinkEnabled);
+  shadingLinkBtn.classList.toggle('link-offset', cameraLinkEnabled && linkMode === 'offset');
+  shadingLinkBtn.dataset.tip = cameraLinkEnabled
+    ? (linkMode === 'offset'
+        ? 'Cameras linked (offset) — click to unlink'
+        : 'Cameras linked — click to unlink')
+    : 'Link cameras — move all open viewers together. Alt-click: offset mode (keep each view\u2019s framing)';
+}
+
+/** Difference between two orbit poses, or null if the move is negligible. */
+function orbitDelta(
+  prev: ReturnType<typeof viewer.getOrbitPose>,
+  cur: ReturnType<typeof viewer.getOrbitPose>,
+): OrbitDelta | null {
+  // Wrap azimuth into (-π, π] so crossing the ±π seam doesn't spin the follower.
+  let dTheta = cur.theta - prev.theta;
+  dTheta = Math.atan2(Math.sin(dTheta), Math.cos(dTheta));
+  const dPhi = cur.phi - prev.phi;
+  const rRatio = prev.radius > 1e-9 ? cur.radius / prev.radius : 1;
+  const dTarget: [number, number, number] = [
+    cur.target[0] - prev.target[0],
+    cur.target[1] - prev.target[1],
+    cur.target[2] - prev.target[2],
+  ];
+  const moved =
+    Math.abs(dTheta) > 1e-5 ||
+    Math.abs(dPhi) > 1e-5 ||
+    Math.abs(rRatio - 1) > 1e-5 ||
+    Math.hypot(dTarget[0], dTarget[1], dTarget[2]) > 1e-6;
+  return moved ? { dTheta, dPhi, rRatio, dTarget, driverRadius: cur.radius } : null;
+}
+
+/** Coalesce the flurry of orbit 'change' events into one message per frame. */
+function scheduleCameraSync(): void {
+  if (cameraSyncQueued) return;
+  cameraSyncQueued = true;
+  requestAnimationFrame(() => {
+    cameraSyncQueued = false;
+    if (!cameraLinkEnabled) return;
+    if (linkMode === 'aligned') {
+      vscode.postMessage({ type: 'cameraSync', state: viewer.getCameraState() });
+    } else {
+      const cur = viewer.getOrbitPose();
+      if (lastOrbitPose) {
+        const delta = orbitDelta(lastOrbitPose, cur);
+        if (delta) vscode.postMessage({ type: 'cameraOrbitDelta', delta });
+      }
+      lastOrbitPose = cur;
+    }
+  });
+}
+
+viewer.onCameraChange = () => {
+  if (cameraLinkEnabled) scheduleCameraSync();
+};
+
+function setCameraLink(enabled: boolean, mode: CameraLinkMode): void {
+  cameraLinkEnabled = enabled;
+  linkMode = mode;
+  // Offset mode measures motion from the moment of linking.
+  lastOrbitPose = enabled && mode === 'offset' ? viewer.getOrbitPose() : null;
+  updateLinkUi();
+}
+
+shadingLinkBtn.addEventListener('click', (ev) => {
+  if (cameraLinkEnabled) {
+    setCameraLink(false, linkMode);
+  } else {
+    setCameraLink(true, ev.altKey ? 'offset' : 'aligned');
+  }
+  vscode.postMessage({ type: 'cameraLinkChanged', enabled: cameraLinkEnabled, mode: linkMode });
+  // Aligned mode snaps the others onto this view the moment they link.
+  if (cameraLinkEnabled && linkMode === 'aligned') {
+    vscode.postMessage({ type: 'cameraSync', state: viewer.getCameraState() });
+  }
+});
 
 // Hover explanation under the strip. A styled element instead of title=""
 // tooltips: it appears instantly and right-aligned so it never clips at the
@@ -806,6 +905,21 @@ window.addEventListener('message', (ev) => {
     showError(String(msg.message));
   } else if (msg.type === 'command' && msg.command === 'resetCamera') {
     viewer.frameAll();
+  } else if (msg.type === 'viewerCount') {
+    viewerCount = Number(msg.count) || 1;
+    // Nobody left to sync with — drop the link so it can't silently stay on.
+    if (viewerCount < 2 && cameraLinkEnabled) cameraLinkEnabled = false;
+    updateLinkUi();
+  } else if (msg.type === 'cameraLink') {
+    setCameraLink(Boolean(msg.enabled), msg.mode === 'offset' ? 'offset' : 'aligned');
+  } else if (msg.type === 'cameraSync') {
+    if (cameraLinkEnabled && linkMode === 'aligned') viewer.applyCameraState(msg.state);
+  } else if (msg.type === 'cameraOrbitDelta') {
+    if (cameraLinkEnabled && linkMode === 'offset') {
+      viewer.applyOrbitDelta(msg.delta);
+      // Re-baseline so this viewer's own next move is measured from here.
+      lastOrbitPose = viewer.getOrbitPose();
+    }
   }
 });
 
