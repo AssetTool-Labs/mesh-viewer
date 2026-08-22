@@ -461,7 +461,7 @@ html, body {
 .weight-legend .wl-item { display: flex; align-items: center; gap: 4px; }
 .weight-legend .wl-chip { width: 12px; height: 12px; border-radius: 2px; flex-shrink: 0; }
 
-button.primary, #frameSelection {
+button.primary, #frameSelection, #resetPose {
   margin-top: 6px;
   background: var(--button-bg);
   color: var(--button-fg);
@@ -472,8 +472,43 @@ button.primary, #frameSelection {
   font-size: 12px;
 }
 button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
-#frameSelection { background: transparent; color: var(--fg); border: 1px solid var(--panel-border); }
-#frameSelection:hover { background: var(--hover); }
+#frameSelection, #resetPose { background: transparent; color: var(--fg); border: 1px solid var(--panel-border); }
+#frameSelection:hover, #resetPose:hover { background: var(--hover); }
+#resetPose:disabled, .kv-action button:disabled { opacity: 0.45; cursor: default; }
+.kv-action button {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--panel-border);
+  border-radius: 2px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.kv-action button:hover { background: var(--hover); }
+
+.kv-rot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+}
+.kv-rot label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.kv-rot input[type="number"] {
+  width: 4.6em;
+  background: var(--input-bg);
+  color: var(--input-fg);
+  border: 1px solid var(--input-border);
+  border-radius: 2px;
+  padding: 2px 4px;
+  font-variant-numeric: tabular-nums;
+}
+.kv-list .kv-action { grid-column: 1 / -1; }
 
 /* Viewport */
 #mainCol {
@@ -495,6 +530,19 @@ button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
   width: 100%;
   height: 100%;
   outline: none;
+}
+#poseHint {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.55);
+  color: #eee;
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 #hud {
   position: absolute;

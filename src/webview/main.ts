@@ -52,6 +52,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
 
 const canvas = $<HTMLCanvasElement>('canvas');
 const viewport = $('viewport');
+const poseHint = $('poseHint');
 const viewer = new Viewer(canvas);
 
 const treeContainer = $<HTMLDivElement>('treeContainer');
@@ -110,6 +111,7 @@ const envSelect = $<HTMLSelectElement>('envSelect');
 const upAxisSelect = $<HTMLSelectElement>('upAxisSelect');
 const hudUpAxisBtn = $<HTMLButtonElement>('hudUpAxis');
 const resetCameraBtn = $<HTMLButtonElement>('resetCamera');
+const resetPoseBtn = $<HTMLButtonElement>('resetPose');
 const frameSelectionBtn = $<HTMLButtonElement>('frameSelection');
 const sidebarToggle = $<HTMLButtonElement>('sidebarToggle');
 const importMeshBtn = $<HTMLButtonElement>('importMeshBtn');
@@ -430,6 +432,7 @@ toggleGrid.addEventListener('change', () => { viewer.setGridVisible(toggleGrid.c
 toggleAxes.addEventListener('change', () => { viewer.setAxesVisible(toggleAxes.checked); pushViewSettings(); });
 toggleBounds.addEventListener('change', () => { viewer.setBoundsVisible(toggleBounds.checked); pushViewSettings(); });
 toggleSkeleton.addEventListener('change', () => { viewer.setSkeletonVisible(toggleSkeleton.checked); pushViewSettings(); });
+resetPoseBtn.addEventListener('click', () => resetPose());
 // "Show skin weights" drives on/off; the mode + bone rows below it appear only
 // while it's checked. Toggling off keeps the dropdown values so re-checking
 // returns to the last mode/bone within the session. Weight display is session-
@@ -625,13 +628,76 @@ toggleVisBtn.addEventListener('click', () => {
 // otherwise produce a "˙" character instead of "h". Ignored while typing in an
 // input/textarea so the filter box keeps accepting the letter "h".
 document.addEventListener('keydown', (ev) => {
-  if (ev.code !== 'KeyH' && ev.key !== 'h' && ev.key !== 'H') return;
-  if (ev.ctrlKey || ev.metaKey) return;
   const target = ev.target as HTMLElement | null;
-  if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+  const typing = !!(target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)));
+  if (typing) return;
+
+  if ((ev.ctrlKey || ev.metaKey) && (ev.code === 'KeyZ' || ev.key === 'z' || ev.key === 'Z')) {
+    ev.preventDefault();
+    if (ev.shiftKey) viewer.redoPose();
+    else viewer.undoPose();
+    syncBoneRotationFields();
+    refreshPoseHint();
+    return;
+  }
+  if (ev.ctrlKey || ev.metaKey) return;
+
+  if (viewer.isRotateModalActive()) {
+    if (ev.code === 'Escape' || ev.key === 'Escape') {
+      ev.preventDefault();
+      viewer.cancelRotateModal();
+      refreshPoseHint();
+      return;
+    }
+    if (ev.code === 'Enter') {
+      ev.preventDefault();
+      viewer.confirmRotateModal();
+      refreshPoseHint();
+      return;
+    }
+    if (ev.code === 'KeyR' || ev.key === 'r' || ev.key === 'R') {
+      ev.preventDefault();
+      viewer.startRotateModal(lastPointerX, lastPointerY);
+      refreshPoseHint();
+      return;
+    }
+    if (ev.code === 'KeyX') { ev.preventDefault(); viewer.setRotateModalAxis('x'); refreshPoseHint(); return; }
+    if (ev.code === 'KeyY') { ev.preventDefault(); viewer.setRotateModalAxis('y'); refreshPoseHint(); return; }
+    if (ev.code === 'KeyZ') { ev.preventDefault(); viewer.setRotateModalAxis('z'); refreshPoseHint(); return; }
+    return;
+  }
+
+  if (ev.code === 'KeyR' || ev.key === 'r' || ev.key === 'R') {
+    if (!viewer.getPoseBone()) return;
+    ev.preventDefault();
+    viewer.startRotateModal(lastPointerX, lastPointerY);
+    refreshPoseHint();
+    return;
+  }
+
+  if (ev.code !== 'KeyH' && ev.key !== 'h' && ev.key !== 'H') return;
   ev.preventDefault();
   setFilteredVisibility(ev.shiftKey || ev.altKey);
 });
+
+let lastPointerX = 0;
+let lastPointerY = 0;
+canvas.addEventListener('pointermove', (ev) => {
+  lastPointerX = ev.clientX;
+  lastPointerY = ev.clientY;
+});
+
+function refreshPoseHint(): void {
+  if (!viewer.isRotateModalActive()) {
+    poseHint.hidden = true;
+    return;
+  }
+  const axis = viewer.rotateModalAxis ?? 'view';
+  const axisLabel = axis === 'view' ? 'view' : axis === 'trackball' ? 'trackball' : axis.toUpperCase();
+  const extra = axis === 'trackball' ? 'R view' : 'R trackball';
+  poseHint.hidden = false;
+  poseHint.textContent = `Rotate (${axisLabel})  ${extra}  X/Y/Z axis  LMB/Enter confirm  Esc cancel`;
+}
 
 // ---- Animation transport ----
 animPlay.addEventListener('click', () => {
@@ -704,6 +770,12 @@ viewer.setAnimationFinishedCallback(() => {
   timeline.refresh();
 });
 
+viewer.onPoseEdit = () => {
+  timeline.setPlaying(false);
+  syncBoneRotationFields();
+  refreshPoseHint();
+};
+
 // ---- Picking ----
 // We must distinguish a "click" from a camera "drag" (OrbitControls eats the
 // same left button to rotate). If we picked on every pointerdown, every drag
@@ -712,15 +784,22 @@ viewer.setAnimationFinishedCallback(() => {
 const PICK_MOVE_PX = 5;
 const PICK_MAX_MS = 400;
 let pressStart: { x: number; y: number; t: number; button: number } | null = null;
+/** Set when pointerdown hits the pose gizmo so the matching pointerup does not pick. */
+let skipNextPick = false;
 
 canvas.addEventListener('pointerdown', (ev) => {
   if (ev.button !== 0) return; // left button only; middle/right are pan/orbit
+  skipNextPick = viewer.isPoseGizmoBusy();
   pressStart = { x: ev.clientX, y: ev.clientY, t: performance.now(), button: ev.button };
 });
 
 canvas.addEventListener('pointerup', (ev) => {
   const start = pressStart;
   pressStart = null;
+  if (skipNextPick) {
+    skipNextPick = false;
+    return;
+  }
   if (!start || ev.button !== start.button) return;
   const dx = ev.clientX - start.x;
   const dy = ev.clientY - start.y;
@@ -735,6 +814,7 @@ canvas.addEventListener('pointercancel', () => {
 
 function pickAt(ev: PointerEvent): void {
   if (!viewer.entries.length) return;
+  if (viewer.isPoseGizmoBusy()) return;
   const rect = canvas.getBoundingClientRect();
   const ndc = new THREE.Vector2(
     ((ev.clientX - rect.left) / rect.width) * 2 - 1,
@@ -749,6 +829,12 @@ function pickAt(ev: PointerEvent): void {
   const r = Math.max(dist * 0.005, 1e-4);
   ray.params.Points = { threshold: r };
   ray.params.Line = { threshold: r };
+
+  const joint = viewer.pickSkeletonJoint(ray);
+  if (joint) {
+    selectObject(joint);
+    return;
+  }
 
   const hits = ray.intersectObject(viewer.contentRoot, true);
   // Skip hits on invisible nodes (their ancestors may be toggled off via the eye)
@@ -1166,6 +1252,7 @@ function rebuildAllPanels(): void {
   for (const btn of [...shadingModeBtns, shadingXrayBtn, shadingFlatBtn]) {
     btn.disabled = meshless;
   }
+  refreshResetPoseButton();
 }
 
 function refreshSubtitle(): void {
@@ -1274,6 +1361,13 @@ function setObjectVisibility(obj: THREE.Object3D, visible: boolean): void {
 
 function selectObject(obj: THREE.Object3D): void {
   selectedObject = obj;
+  // Selecting a bone is the start of posing — show the overlay so the joint
+  // and rotate gizmo have something to sit on.
+  if ((obj as THREE.Bone).isBone && !toggleSkeleton.checked) {
+    toggleSkeleton.checked = true;
+    viewer.setSkeletonVisible(true);
+    pushViewSettings();
+  }
   // 1) Highlight the matching row in the in-extension scene explorer.
   for (const v of nodeViews.values()) v.row.classList.toggle('selected', v.object === obj);
   let parent = obj.parent;
@@ -1337,8 +1431,12 @@ function renderSelectionDetails(obj: THREE.Object3D): void {
   kv('Visible', obj.visible ? 'yes' : 'no');
   const pos = obj.position;
   kv('Position', `${fmt(pos.x)}, ${fmt(pos.y)}, ${fmt(pos.z)}`);
-  const rotEuler = obj.rotation;
-  kv('Rotation', `${fmtDeg(rotEuler.x)}°, ${fmtDeg(rotEuler.y)}°, ${fmtDeg(rotEuler.z)}°`);
+  if ((obj as THREE.Bone).isBone) {
+    appendBoneRotationFields(obj as THREE.Bone);
+  } else {
+    const rotEuler = obj.rotation;
+    kv('Rotation', `${fmtDeg(rotEuler.x)}°, ${fmtDeg(rotEuler.y)}°, ${fmtDeg(rotEuler.z)}°`);
+  }
   const scale = obj.scale;
   kv('Scale', `${fmt(scale.x)}, ${fmt(scale.y)}, ${fmt(scale.z)}`);
   kv('Children', String(obj.children.length));
@@ -1392,6 +1490,75 @@ function renderSelectionDetails(obj: THREE.Object3D): void {
     if ('fov' in cam) kv('FOV', `${fmt(cam.fov)}°`);
     if ('near' in cam) kv('Near / Far', `${fmt(cam.near)} / ${fmt(cam.far)}`);
   }
+}
+
+function resetPose(): void {
+  if (!viewer.hasBindPose) return;
+  viewer.resetBindPose();
+  timeline.setPlaying(viewer.isAnimationPlaying);
+  syncBoneRotationFields();
+}
+
+function refreshResetPoseButton(): void {
+  resetPoseBtn.disabled = !viewer.hasBindPose;
+}
+
+function appendBoneRotationFields(bone: THREE.Bone): void {
+  const target = viewer.getPoseBone() ?? bone;
+  const key = document.createElement('div');
+  key.className = 'kv-key';
+  key.textContent = `Rotation (${target.rotation.order})`;
+  const val = document.createElement('div');
+  val.className = 'kv-val kv-rot';
+  let started = false;
+  for (const axis of ['x', 'y', 'z'] as const) {
+    const lab = document.createElement('label');
+    lab.textContent = axis.toUpperCase();
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.step = '0.1';
+    input.id = `poseRot${axis.toUpperCase()}`;
+    input.value = fmtDeg(target.rotation[axis]);
+    input.addEventListener('focus', () => { started = false; });
+    input.addEventListener('input', () => {
+      if (!started) {
+        viewer.beginPoseNumericEdit();
+        started = true;
+      }
+      const x = Number(($<HTMLInputElement>('poseRotX')).value);
+      const y = Number(($<HTMLInputElement>('poseRotY')).value);
+      const z = Number(($<HTMLInputElement>('poseRotZ')).value);
+      if (![x, y, z].every(Number.isFinite)) return;
+      viewer.setBoneRotationDegrees(target, x, y, z);
+    });
+    lab.append(input);
+    val.append(lab);
+  }
+  selectionDetails.append(key, val);
+  const action = document.createElement('div');
+  action.className = 'kv-action';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = 'Reset Pose';
+  btn.disabled = !viewer.hasBindPose;
+  btn.addEventListener('click', () => resetPose());
+  action.append(btn);
+  selectionDetails.append(action);
+}
+
+function syncBoneRotationFields(): void {
+  const bone = viewer.getPoseBone();
+  if (!bone) return;
+  const x = document.getElementById('poseRotX') as HTMLInputElement | null;
+  const y = document.getElementById('poseRotY') as HTMLInputElement | null;
+  const z = document.getElementById('poseRotZ') as HTMLInputElement | null;
+  if (!x || !y || !z) return;
+  if (document.activeElement === x || document.activeElement === y || document.activeElement === z) {
+    return;
+  }
+  x.value = fmtDeg(bone.rotation.x);
+  y.value = fmtDeg(bone.rotation.y);
+  z.value = fmtDeg(bone.rotation.z);
 }
 
 function fmt(n: number): string {

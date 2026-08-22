@@ -6,6 +6,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { OutlinePass } from 'three/examples/jsm/postprocessing/OutlinePass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ViewHelper } from 'three/examples/jsm/helpers/ViewHelper.js';
+import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { SparkRenderer } from '@sparkjsdev/spark';
 import type { CameraState, OrbitDelta } from '../types';
 import type { LoadedAsset } from './loaders';
@@ -37,9 +38,31 @@ function isSplat(o: THREE.Object3D): boolean {
   return o.userData.isSplat === true;
 }
 
+/**
+ * Mixamo / many FBX rigs put a same-named leaf Bone under the real joint
+ * (the leaf is what `skeleton.bones` holds for skinning). Rotating that leaf
+ * does not move the next limb — those children hang off the parent. Pose the
+ * parent when we see that pattern so FK works.
+ */
+function resolvePoseBone(bone: THREE.Bone): THREE.Bone {
+  const parent = bone.parent;
+  if (parent && (parent as THREE.Bone).isBone && parent.name === bone.name) {
+    return parent as THREE.Bone;
+  }
+  return bone;
+}
+
 interface MaterialBackup {
   material: THREE.Material | THREE.Material[];
   flatShading?: boolean;
+}
+
+/** Local TRS of one bone at load time (bind / rest pose). */
+interface BindPose {
+  bone: THREE.Bone;
+  position: THREE.Vector3;
+  quaternion: THREE.Quaternion;
+  scale: THREE.Vector3;
 }
 
 /** One imported asset under `contentRoot`. The first entry is the file the editor
@@ -67,6 +90,8 @@ export class Viewer {
 
   /** Fired when the user moves the orbit camera; used to drive linked viewers. */
   onCameraChange: (() => void) | null = null;
+  /** Fired after a pose edit (gizmo drag or inspector) so the UI can pause the timeline. */
+  onPoseEdit: (() => void) | null = null;
   /** Guards against re-emitting `onCameraChange` while applying a remote pose. */
   private suppressCameraChange = false;
 
@@ -137,6 +162,23 @@ export class Viewer {
   readonly contentRoot = new THREE.Group();
   readonly entries: AssetEntry[] = [];
   private mixer: THREE.AnimationMixer | null = null;
+  private readonly poseControls: TransformControls;
+  private bindPoses: BindPose[] = [];
+  /** The bone TransformControls / R-rotate actually edit (may be a Mixamo parent). */
+  private poseBone: THREE.Bone | null = null;
+  private poseUndo: BindPose[][] = [];
+  private poseRedo: BindPose[][] = [];
+  private rotateModal: {
+    startQuat: THREE.Quaternion;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    pivotX: number;
+    pivotY: number;
+    startAngle: number;
+    axis: 'view' | 'trackball' | 'x' | 'y' | 'z';
+  } | null = null;
   private activeAction: THREE.AnimationAction | null = null;
   private currentClip: THREE.AnimationClip | null = null;
   private animationSpeed = 1;
@@ -179,6 +221,27 @@ export class Viewer {
     this.controls.addEventListener('change', () => {
       if (!this.suppressCameraChange) this.onCameraChange?.();
     });
+
+    // Rotate-only local gizmo for posing a selected bone. The helper lives on
+    // the scene (not contentRoot) so framing / bounds ignore it. Orbit is
+    // disabled while the gizmo is dragged so the two left-button tools don't
+    // fight. objectChange pauses the mixer — otherwise the next tick overwrites
+    // the bone.
+    this.poseControls = new TransformControls(this.camera, canvas);
+    this.poseControls.mode = 'rotate';
+    this.poseControls.space = 'local';
+    this.poseControls.detach();
+    this.scene.add(this.poseControls.getHelper());
+    this.poseControls.addEventListener('dragging-changed', (e) => {
+      this.controls.enabled = !e.value;
+      if (e.value) this.pushPoseUndo();
+    });
+    this.poseControls.addEventListener('objectChange', () => {
+      this.pauseForPose();
+    });
+    canvas.addEventListener('pointermove', this.handleRotateModalMove);
+    canvas.addEventListener('pointerdown', this.handleRotateModalPointer);
+    canvas.addEventListener('contextmenu', this.handleRotateModalContextMenu);
 
     this.viewHelper = new ViewHelper(this.camera, canvas);
     this.viewHelper.location.top = 8;
@@ -603,7 +666,6 @@ export class Viewer {
     const instances = new THREE.InstancedMesh(geo, mat, allBones.length);
     instances.frustumCulled = false;
     instances.renderOrder = 1000;
-    instances.raycast = () => {};
     instances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.scene.add(instances);
     this.jointMarkers.push(instances);
@@ -614,12 +676,17 @@ export class Viewer {
     this.updateSkeletonHighlight();
   }
 
-  /** Tint the isolated bone's joint (and the segment leading into it) in the
-   *  skeleton overlay. Only highlights while weight display is in 'isolate'
-   *  mode; every other joint/bone renders in its base color. */
+  /** Tint the isolated / selected bone's joint (and the segment leading into
+   *  it) in the skeleton overlay. Isolate-weights wins when both apply; otherwise
+   *  the currently selected bone is highlighted so a posed joint is obvious. */
   private updateSkeletonHighlight(): void {
     if (!this.jointInstances) return;
-    const target = this.weightMode === 'isolate' ? this.resolveWeightBone() : null;
+    const isolate = this.weightMode === 'isolate' ? this.resolveWeightBone() : null;
+    const selected =
+      this.selectedObj && (this.selectedObj as THREE.Bone).isBone
+        ? (this.selectedObj as THREE.Bone)
+        : null;
+    const target = isolate ?? selected;
     this.highlightBone = target;
     const hi = new THREE.Color(Viewer.JOINT_HIGHLIGHT);
     // While a bone is isolated, dim every other joint so the white one pops by
@@ -809,9 +876,290 @@ export class Viewer {
    */
   setSelected(obj: THREE.Object3D | null): void {
     if (this.selectedObj === obj) return;
+    this.cancelRotateModal();
     this.selectedObj = obj;
     this.outlinePass.selectedObjects = obj ? [obj] : [];
+    const bone = obj && (obj as THREE.Bone).isBone ? (obj as THREE.Bone) : null;
+    this.poseBone = bone ? resolvePoseBone(bone) : null;
+    if (this.poseBone) this.poseControls.attach(this.poseBone);
+    else this.poseControls.detach();
+    if (this.showSkeleton) this.updateSkeletonHighlight();
   }
+
+  /** Bone the gizmo / inspector / R-rotate edit. */
+  getPoseBone(): THREE.Bone | null {
+    return this.poseBone;
+  }
+
+  get hasBindPose(): boolean {
+    return this.bindPoses.length > 0;
+  }
+
+  /** True while the rotate gizmo or R-modal is active — skip viewport picks. */
+  isPoseGizmoBusy(): boolean {
+    return this.rotateModal !== null || this.poseControls.dragging || this.poseControls.axis !== null;
+  }
+
+  /** Map a ray to a skeleton-overlay joint, or null if none was hit. */
+  pickSkeletonJoint(raycaster: THREE.Raycaster): THREE.Bone | null {
+    if (!this.showSkeleton || !this.jointInstances) return null;
+    const hits = raycaster.intersectObject(this.jointInstances, false);
+    const hit = hits[0];
+    if (!hit || hit.instanceId === undefined) return null;
+    return this.skeletonBones[hit.instanceId] ?? null;
+  }
+
+  /**
+   * Write a bone's local Euler rotation (degrees, in that bone's existing
+   * order) and pause playback so the mixer does not overwrite it.
+   */
+  setBoneRotationDegrees(bone: THREE.Bone, xDeg: number, yDeg: number, zDeg: number): void {
+    const target = resolvePoseBone(bone);
+    target.rotation.set(
+      THREE.MathUtils.degToRad(xDeg),
+      THREE.MathUtils.degToRad(yDeg),
+      THREE.MathUtils.degToRad(zDeg),
+      target.rotation.order,
+    );
+    this.pauseForPose();
+  }
+
+  beginPoseNumericEdit(): void {
+    this.pushPoseUndo();
+  }
+
+  /** Restore every snapshotted bone to its load-time local TRS. */
+  resetBindPose(): void {
+    this.cancelRotateModal();
+    this.pushPoseUndo();
+    for (const pose of this.bindPoses) {
+      pose.bone.position.copy(pose.position);
+      pose.bone.quaternion.copy(pose.quaternion);
+      pose.bone.scale.copy(pose.scale);
+    }
+    this.contentRoot.updateMatrixWorld(true);
+    if (this.showSkeleton) this.updateSkeletonMarkers();
+    this.pauseForPose();
+  }
+
+  /**
+   * Pause the mixer (if a clip is playing) so a manual bone edit sticks, then
+   * notify the UI. No-op on the mixer when already paused or nothing is active.
+   */
+  pauseForPose(): void {
+    if (this.activeAction && !this.animationPaused) this.pauseAnimation();
+    this.applyPoseToSkin();
+    this.onPoseEdit?.();
+  }
+
+  /**
+   * Record local TRS for every Bone under `root`, including Mixamo FK parents
+   * that are not in `skeleton.bones`. Shared bones are stored once.
+   */
+  private snapshotBindPoses(root: THREE.Object3D): void {
+    const seen = new Set<THREE.Bone>(this.bindPoses.map((p) => p.bone));
+    root.traverse((o) => {
+      const bone = o as THREE.Bone;
+      if (!bone.isBone || seen.has(bone)) return;
+      seen.add(bone);
+      this.bindPoses.push({
+        bone,
+        position: bone.position.clone(),
+        quaternion: bone.quaternion.clone(),
+        scale: bone.scale.clone(),
+      });
+    });
+  }
+
+  private capturePoseSnapshot(): BindPose[] {
+    return this.bindPoses.map((p) => ({
+      bone: p.bone,
+      position: p.bone.position.clone(),
+      quaternion: p.bone.quaternion.clone(),
+      scale: p.bone.scale.clone(),
+    }));
+  }
+
+  private restorePoseSnapshot(snapshot: BindPose[]): void {
+    for (const pose of snapshot) {
+      pose.bone.position.copy(pose.position);
+      pose.bone.quaternion.copy(pose.quaternion);
+      pose.bone.scale.copy(pose.scale);
+    }
+    this.applyPoseToSkin();
+  }
+
+  private applyPoseToSkin(): void {
+    this.contentRoot.updateMatrixWorld(true);
+    this.contentRoot.traverse((o) => {
+      const skinned = o as THREE.SkinnedMesh;
+      if (skinned.isSkinnedMesh && skinned.skeleton) skinned.skeleton.update();
+    });
+    if (this.showSkeleton) this.updateSkeletonMarkers();
+  }
+
+  pushPoseUndo(): void {
+    if (this.bindPoses.length === 0) return;
+    this.poseUndo.push(this.capturePoseSnapshot());
+    this.poseRedo = [];
+  }
+
+  undoPose(): boolean {
+    if (this.rotateModal) {
+      this.cancelRotateModal();
+      return true;
+    }
+    const prev = this.poseUndo.pop();
+    if (!prev) return false;
+    this.poseRedo.push(this.capturePoseSnapshot());
+    this.restorePoseSnapshot(prev);
+    this.pauseForPose();
+    return true;
+  }
+
+  redoPose(): boolean {
+    const next = this.poseRedo.pop();
+    if (!next) return false;
+    this.cancelRotateModal();
+    this.poseUndo.push(this.capturePoseSnapshot());
+    this.restorePoseSnapshot(next);
+    this.pauseForPose();
+    return true;
+  }
+
+  isRotateModalActive(): boolean {
+    return this.rotateModal !== null;
+  }
+
+  /**
+   * Blender-style rotate: first R is view-axis (angle of the mouse around the
+   * joint on screen). R again is trackball (mouse X/Y tumble). X/Y/Z lock a
+   * local axis. LMB/Enter confirms, RMB/Esc cancels.
+   */
+  startRotateModal(startX: number, startY: number): boolean {
+    if (!this.poseBone) return false;
+    if (this.rotateModal) {
+      const next = this.rotateModal.axis === 'view' ? 'trackball' : 'view';
+      this.setRotateModalAxis(next);
+      return true;
+    }
+    this.pushPoseUndo();
+    const pivot = this.projectBoneToClient(this.poseBone);
+    this.rotateModal = {
+      startQuat: this.poseBone.quaternion.clone(),
+      startX,
+      startY,
+      lastX: startX,
+      lastY: startY,
+      pivotX: pivot.x,
+      pivotY: pivot.y,
+      startAngle: Math.atan2(startY - pivot.y, startX - pivot.x),
+      axis: 'view',
+    };
+    this.controls.enabled = false;
+    this.poseControls.enabled = false;
+    this.canvas.style.cursor = 'crosshair';
+    return true;
+  }
+
+  setRotateModalAxis(axis: 'view' | 'trackball' | 'x' | 'y' | 'z'): void {
+    if (!this.rotateModal || !this.poseBone) return;
+    this.rotateModal.axis = axis;
+    this.rotateModal.startQuat.copy(this.poseBone.quaternion);
+    this.rotateModal.startX = this.rotateModal.lastX;
+    this.rotateModal.startY = this.rotateModal.lastY;
+    this.rotateModal.startAngle = Math.atan2(
+      this.rotateModal.lastY - this.rotateModal.pivotY,
+      this.rotateModal.lastX - this.rotateModal.pivotX,
+    );
+  }
+
+  confirmRotateModal(): void {
+    if (!this.rotateModal) return;
+    this.rotateModal = null;
+    this.controls.enabled = true;
+    this.poseControls.enabled = true;
+    this.canvas.style.cursor = '';
+    this.pauseForPose();
+  }
+
+  cancelRotateModal(): void {
+    if (!this.rotateModal || !this.poseBone) {
+      this.rotateModal = null;
+      return;
+    }
+    this.poseBone.quaternion.copy(this.rotateModal.startQuat);
+    this.rotateModal = null;
+    this.controls.enabled = true;
+    this.poseControls.enabled = true;
+    this.canvas.style.cursor = '';
+    // Drop the undo entry we pushed at start — cancel should leave history unchanged.
+    this.poseUndo.pop();
+    this.pauseForPose();
+  }
+
+  get rotateModalAxis(): 'view' | 'trackball' | 'x' | 'y' | 'z' | null {
+    return this.rotateModal?.axis ?? null;
+  }
+
+  private projectBoneToClient(bone: THREE.Bone): { x: number; y: number } {
+    const v = new THREE.Vector3();
+    bone.getWorldPosition(v);
+    v.project(this.camera);
+    const rect = this.canvas.getBoundingClientRect();
+    return {
+      x: rect.left + (v.x * 0.5 + 0.5) * rect.width,
+      y: rect.top + (-v.y * 0.5 + 0.5) * rect.height,
+    };
+  }
+
+  private handleRotateModalMove = (ev: PointerEvent): void => {
+    if (!this.rotateModal || !this.poseBone) return;
+    this.rotateModal.lastX = ev.clientX;
+    this.rotateModal.lastY = ev.clientY;
+    this.poseBone.quaternion.copy(this.rotateModal.startQuat);
+    if (this.rotateModal.axis === 'trackball') {
+      const rect = this.canvas.getBoundingClientRect();
+      const scale = (2 * Math.PI) / Math.max(rect.width, 400);
+      const dx = ev.clientX - this.rotateModal.startX;
+      const dy = ev.clientY - this.rotateModal.startY;
+      const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
+      const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion);
+      this.poseBone.rotateOnWorldAxis(camRight, dy * scale);
+      this.poseBone.rotateOnWorldAxis(camUp, dx * scale);
+    } else {
+      const angle = Math.atan2(
+        ev.clientY - this.rotateModal.pivotY,
+        ev.clientX - this.rotateModal.pivotX,
+      ) - this.rotateModal.startAngle;
+      if (this.rotateModal.axis === 'view') {
+        const axis = new THREE.Vector3();
+        this.camera.getWorldDirection(axis);
+        this.poseBone.rotateOnWorldAxis(axis, angle);
+      } else {
+        const local = new THREE.Vector3(
+          this.rotateModal.axis === 'x' ? 1 : 0,
+          this.rotateModal.axis === 'y' ? 1 : 0,
+          this.rotateModal.axis === 'z' ? 1 : 0,
+        );
+        this.poseBone.rotateOnAxis(local, angle);
+      }
+    }
+    this.pauseForPose();
+  };
+
+  private handleRotateModalPointer = (ev: PointerEvent): void => {
+    if (!this.rotateModal) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (ev.button === 0) this.confirmRotateModal();
+    else if (ev.button === 2) this.cancelRotateModal();
+  };
+
+  private handleRotateModalContextMenu = (ev: MouseEvent): void => {
+    if (!this.rotateModal) return;
+    ev.preventDefault();
+  };
 
   applyEnvironment(mode: EnvironmentMode): void {
     this.environmentMode = mode;
@@ -1160,6 +1508,7 @@ export class Viewer {
     if (this.weightMode !== 'off') this.rebuildWeightMaterials();
 
     this.alignContentToGrid();
+    this.snapshotBindPoses(wrapper);
 
     return entry;
   }
@@ -1176,6 +1525,12 @@ export class Viewer {
       this.mixer.stopAllAction();
       this.mixer = null;
     }
+    this.cancelRotateModal();
+    this.poseControls.detach();
+    this.bindPoses = [];
+    this.poseUndo = [];
+    this.poseRedo = [];
+    this.poseBone = null;
     this.clearSkeletonHelpers();
     this.clearWireframeOverlays();
     this.clearWeightMaterials();
@@ -1326,6 +1681,11 @@ export class Viewer {
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.renderer.setAnimationLoop(null);
+    this.canvas.removeEventListener('pointermove', this.handleRotateModalMove);
+    this.canvas.removeEventListener('pointerdown', this.handleRotateModalPointer);
+    this.canvas.removeEventListener('contextmenu', this.handleRotateModalContextMenu);
+    this.scene.remove(this.poseControls.getHelper());
+    this.poseControls.dispose();
     this.controls.dispose();
     if (this.envTexture) this.envTexture.dispose();
     this.pmremGenerator.dispose();
