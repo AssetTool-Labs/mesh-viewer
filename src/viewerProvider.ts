@@ -82,7 +82,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       switch (msg.type) {
         case 'ready':
           try {
-            const payload = this.buildFilePayload(webview, document.uri);
+            const payload = await this.buildFilePayload(webview, document.uri);
             const init: InitMessage = { type: 'init', settings: this.effectiveViewSettings(), ...payload };
             await webview.postMessage(init);
           } catch (err) {
@@ -118,7 +118,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
           for (const pickedUri of picks) {
             try {
               this.expandResourceRoots(webview, mediaRoot, fileDir, pickedUri);
-              const payload = this.buildFilePayload(webview, pickedUri);
+              const payload = await this.buildFilePayload(webview, pickedUri);
               await webview.postMessage({ type: 'addFile', requestId: msg.requestId, ...payload });
             } catch (err) {
               await webview.postMessage({
@@ -151,7 +151,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
             }
             try {
               this.expandResourceRoots(webview, mediaRoot, fileDir, uri);
-              const payload = this.buildFilePayload(webview, uri);
+              const payload = await this.buildFilePayload(webview, uri);
               await webview.postMessage({ type: 'addFile', requestId: msg.requestId, ...payload });
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err);
@@ -184,9 +184,29 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
     webviewPanel.onDidDispose(() => sub.dispose());
   }
 
-  private buildFilePayload(webview: vscode.Webview, uri: vscode.Uri): FilePayload {
+  private async buildFilePayload(webview: vscode.Webview, uri: vscode.Uri): Promise<FilePayload> {
     const ext = path.extname(uri.fsPath).slice(1).toLowerCase();
     const isText = TEXT_EXTENSIONS.has(ext);
+
+    // Virtual documents (e.g. the left pane of a git diff, scheme `git:`) aren't
+    // real files on disk, so `asWebviewUri` produces a resource URI the webview
+    // can't fetch and directory scanning has no path to walk. Read the bytes for
+    // that ref (see readVirtualResource) and inline them as a data: URI (allowed
+    // by the CSP's `connect-src data:`); the webview fetch path is unchanged.
+    // Sidecars/textures aren't resolved for these — geometry only.
+    if (uri.scheme !== 'file') {
+      const bytes = await this.readVirtualResource(uri);
+      const dataUri = `data:application/octet-stream;base64,${Buffer.from(bytes).toString('base64')}`;
+      return {
+        fileName: path.basename(uri.fsPath),
+        fileExtension: ext,
+        fileSizeBytes: bytes.byteLength,
+        fileUri: dataUri,
+        isText,
+        auxFileUris: {},
+      };
+    }
+
     const fileUri = webview.asWebviewUri(uri).toString();
 
     const auxFileUris: Record<string, string> = {};
@@ -249,6 +269,75 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
     } catch {
       return 0;
     }
+  }
+
+  /**
+   * Read a non-`file` document (e.g. the `git:` original side of a diff) as raw
+   * bytes. Two strategies are tried in order:
+   *   1. `workspace.fs.readFile` — works when a filesystem provider is registered
+   *      for the scheme and the resource is wired into it.
+   *   2. `git show <ref>:<path>` — a direct fallback for `git:` resources, which
+   *      is needed because the diff "original" encodes `ref: "~"` (git's token
+   *      for the index/base) that the provider can't always resolve, and because
+   *      repositories nested under an ignored folder may not be in the Git model.
+   */
+  private async readVirtualResource(uri: vscode.Uri): Promise<Uint8Array> {
+    let gitParams: { path: string; ref: string } | undefined;
+    const attempts: vscode.Uri[] = [uri];
+    if (uri.scheme === 'git') {
+      try {
+        gitParams = JSON.parse(uri.query) as { path: string; ref: string };
+        for (const ref of ['HEAD', '']) {
+          if (gitParams.ref !== ref) {
+            attempts.push(uri.with({ query: JSON.stringify({ ...gitParams, ref }) }));
+          }
+        }
+      } catch {
+        /* query isn't the expected JSON — fall back to the URI as-is */
+      }
+    }
+
+    let lastError: unknown;
+    for (const attempt of attempts) {
+      try {
+        const bytes = await vscode.workspace.fs.readFile(attempt);
+        if (bytes.byteLength > 0) return bytes;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    if (gitParams?.path) {
+      try {
+        return await this.readGitBlob(gitParams.path, gitParams.ref);
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    const detail = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new Error(`Could not read ${uri.scheme}: resource: ${detail || 'unknown error'}`);
+  }
+
+  /** Read a file blob from git via the CLI, resolving the diff's `~`/`''` refs to the index. */
+  private readGitBlob(filePath: string, ref: string): Promise<Uint8Array> {
+    const cp = require('child_process') as typeof import('child_process');
+    const dir = path.dirname(filePath);
+    const base = path.basename(filePath);
+    // `~` and empty are the git extension's tokens for the index/base; `:file`
+    // reads the staged blob (== HEAD for an unstaged change).
+    const object = ref && ref !== '~' ? `${ref}:./${base}` : `:./${base}`;
+    return new Promise((resolve, reject) => {
+      cp.execFile(
+        'git',
+        ['-C', dir, 'show', object],
+        { encoding: 'buffer', maxBuffer: 512 * 1024 * 1024 },
+        (err, stdout) => {
+          if (err) reject(err);
+          else resolve(new Uint8Array(stdout));
+        },
+      );
+    });
   }
 
   private expandResourceRoots(
