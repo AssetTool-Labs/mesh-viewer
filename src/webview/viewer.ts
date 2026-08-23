@@ -380,6 +380,104 @@ export class Viewer {
     this.showViewGizmo = v;
   }
 
+  // ---- Measurement ----
+
+  private measurePoints: THREE.Vector3[] = [];
+  private measureLine: THREE.Line | null = null;
+  private measureMarkers: THREE.Points | null = null;
+  private measureModeOn = false;
+
+  /** World units spanned by one CSS pixel at the orbit target's depth, for the
+   *  on-screen scale bar. Perspective, so it's exact only at the target plane. */
+  worldUnitsPerPixel(): number {
+    const dist = this.camera.position.distanceTo(this.controls.target);
+    const worldHeight = 2 * dist * Math.tan((this.camera.fov * Math.PI) / 360);
+    return worldHeight / (this.canvas.clientHeight || 1);
+  }
+
+  get measuring(): boolean {
+    return this.measureModeOn;
+  }
+
+  setMeasureMode(on: boolean): void {
+    this.measureModeOn = on;
+    if (!on) this.clearMeasure();
+  }
+
+  /** Raycast an NDC point against loaded meshes and drop a measure point at the
+   *  hit; a third click starts a fresh segment. Returns true if one was placed. */
+  addMeasurePointAt(ndc: THREE.Vector2): boolean {
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, this.camera);
+    const dist = this.camera.position.distanceTo(this.controls.target);
+    const r = Math.max(dist * 0.005, 1e-4);
+    ray.params.Points = { threshold: r };
+    ray.params.Line = { threshold: r };
+    const hits = ray.intersectObject(this.contentRoot, true);
+    const hit = hits.find((h) => {
+      for (let o: THREE.Object3D | null = h.object; o; o = o.parent) if (o.visible === false) return false;
+      return true;
+    });
+    if (!hit) return false;
+    if (this.measurePoints.length >= 2) this.measurePoints = [];
+    this.measurePoints.push(hit.point.clone());
+    this.rebuildMeasureOverlay();
+    return true;
+  }
+
+  private clearMeasure(): void {
+    this.measurePoints = [];
+    this.rebuildMeasureOverlay();
+  }
+
+  private rebuildMeasureOverlay(): void {
+    if (this.measureLine) {
+      this.scene.remove(this.measureLine);
+      this.measureLine.geometry.dispose();
+      (this.measureLine.material as THREE.Material).dispose();
+      this.measureLine = null;
+    }
+    if (this.measureMarkers) {
+      this.scene.remove(this.measureMarkers);
+      this.measureMarkers.geometry.dispose();
+      (this.measureMarkers.material as THREE.Material).dispose();
+      this.measureMarkers = null;
+    }
+    if (this.measurePoints.length === 0) return;
+    // Markers and line render on top (depthTest off) so the measurement is
+    // always visible through the geometry.
+    const markerGeo = new THREE.BufferGeometry().setFromPoints(this.measurePoints);
+    this.measureMarkers = new THREE.Points(
+      markerGeo,
+      new THREE.PointsMaterial({ color: 0xffcc00, size: 9, sizeAttenuation: false, depthTest: false, depthWrite: false }),
+    );
+    this.measureMarkers.renderOrder = 999;
+    this.scene.add(this.measureMarkers);
+    if (this.measurePoints.length === 2) {
+      const lineGeo = new THREE.BufferGeometry().setFromPoints(this.measurePoints);
+      this.measureLine = new THREE.Line(
+        lineGeo,
+        new THREE.LineBasicMaterial({ color: 0xffcc00, depthTest: false, depthWrite: false }),
+      );
+      this.measureLine.renderOrder = 999;
+      this.scene.add(this.measureLine);
+    }
+  }
+
+  /** The current measurement's distance and the label's canvas-local position,
+   *  or null when fewer than two points are placed. */
+  getMeasurement(): { distance: number; x: number; y: number } | null {
+    if (this.measurePoints.length < 2) return null;
+    const [a, b] = this.measurePoints;
+    const mid = a.clone().add(b).multiplyScalar(0.5).project(this.camera);
+    const rect = this.canvas.getBoundingClientRect();
+    return {
+      distance: a.distanceTo(b),
+      x: (mid.x * 0.5 + 0.5) * rect.width,
+      y: (-mid.y * 0.5 + 0.5) * rect.height,
+    };
+  }
+
   /**
    * Render one frame of the scene (via the composer, so it matches the viewport
    * but omits the corner nav gizmo) and return it as a PNG data URL. Grid, axes
