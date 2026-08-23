@@ -116,13 +116,23 @@
               <span class="fold-caret">▾</span><span>Shading options</span>
             </button>
             <div id="mapTogglesBody">
-              <div class="sub-label">Texture maps</div>
-              <label class="row checkbox"><input type="checkbox" id="mapBaseColor" checked /><span>Base Color</span></label>
-              <label class="row checkbox"><input type="checkbox" id="mapNormal" checked /><span>Normal</span></label>
-              <label class="row checkbox"><input type="checkbox" id="mapMetalness" checked /><span>Metalness</span></label>
-              <label class="row checkbox"><input type="checkbox" id="mapRoughness" checked /><span>Roughness</span></label>
-              <label class="row checkbox"><input type="checkbox" id="mapAo" checked /><span>AO</span></label>
-              <label class="row checkbox"><input type="checkbox" id="mapEmissive" checked /><span>Emissive</span></label>
+              <div id="optTextureMaps">
+                <div class="sub-label">Texture maps</div>
+                <label class="row checkbox"><input type="checkbox" id="mapBaseColor" checked /><span>Base Color</span></label>
+                <label class="row checkbox"><input type="checkbox" id="mapNormal" checked /><span>Normal</span></label>
+                <label class="row checkbox"><input type="checkbox" id="mapMetalness" checked /><span>Metalness</span></label>
+                <label class="row checkbox"><input type="checkbox" id="mapRoughness" checked /><span>Roughness</span></label>
+                <label class="row checkbox"><input type="checkbox" id="mapAo" checked /><span>AO</span></label>
+                <label class="row checkbox"><input type="checkbox" id="mapEmissive" checked /><span>Emissive</span></label>
+              </div>
+              <label class="row" id="optPointSize" style="display:none">
+                <span>Point size</span>
+                <input type="range" id="pointSizeInput" min="1" max="10" step="1" value="3" />
+              </label>
+              <label class="row" id="optWireColor" style="display:none">
+                <span>Wireframe color</span>
+                <input type="color" id="wireColorInput" value="#dddddd" />
+              </label>
             </div>
           </div>
           <div class="group-title">Display</div>
