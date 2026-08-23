@@ -2406,8 +2406,11 @@ function drawUVOverlay(
   // up at the BOTTOM-LEFT of the displayed image. With flipY=false (GLTF), UV
   // (0, 0) is at TOP-LEFT.
   const flipped = tex.flipY !== false;
-  const ux = (u: number) => u * w;
-  const uy = (v: number) => (flipped ? (1 - v) * h : v * h);
+  // Textures repeat, and some meshes place UVs in a non-zero tile (e.g. V in
+  // [1,2]); wrap into [0,1) so the layout lands on the previewed tile.
+  const fract = (x: number) => x - Math.floor(x);
+  const ux = (u: number) => fract(u) * w;
+  const uy = (v: number) => { const fv = fract(v); return flipped ? (1 - fv) * h : fv * h; };
 
   ctx.strokeStyle = 'rgba(76, 195, 247, 0.85)';
   ctx.lineWidth = 0.6;
