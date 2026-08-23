@@ -138,6 +138,11 @@
         "command": "3dMeshViewer.saveSnapshot",
         "title": "Save Snapshot as PNG",
         "category": "3D Mesh Viewer"
+      },
+      {
+        "command": "3dMeshViewer.saveSnapshotTransparent",
+        "title": "Save Snapshot as PNG (Transparent Background)",
+        "category": "3D Mesh Viewer"
       }
     ],
     "menus": {

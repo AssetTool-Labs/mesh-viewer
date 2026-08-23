@@ -223,7 +223,7 @@ export class Viewer {
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, preserveDrawingBuffer: true });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -384,9 +384,23 @@ export class Viewer {
    * Render one frame of the scene (via the composer, so it matches the viewport
    * but omits the corner nav gizmo) and return it as a PNG data URL. Grid, axes
    * and other scene overlays are captured as shown; toggle them off first for a
-   * clean shot. Relies on the renderer's `preserveDrawingBuffer`.
+   * clean shot. With `transparent`, the background is punched out via a direct
+   * cleared-alpha render (also omitting the selection outline).
+   * Relies on the renderer's `alpha` + `preserveDrawingBuffer`.
    */
-  capturePNG(): string {
+  capturePNG(opts: { transparent?: boolean } = {}): string {
+    if (opts.transparent) {
+      const bg = this.scene.background;
+      const prevAlpha = this.renderer.getClearAlpha();
+      this.scene.background = null;
+      this.renderer.setClearAlpha(0);
+      this.renderer.clear();
+      this.renderer.render(this.scene, this.camera);
+      const url = this.renderer.domElement.toDataURL('image/png');
+      this.scene.background = bg;
+      this.renderer.setClearAlpha(prevAlpha);
+      return url;
+    }
     this.composer.render();
     return this.renderer.domElement.toDataURL('image/png');
   }

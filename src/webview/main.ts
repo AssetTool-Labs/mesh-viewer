@@ -325,11 +325,16 @@ function syncShadingHud(): void {
 syncShadingHud();
 
 // Export the current view as a PNG; the host shows a Save dialog and writes it.
-function saveSnapshot(): void {
+function saveSnapshot(transparent = false): void {
   const base = (primaryFile?.name ?? 'snapshot').replace(/\.[^.]+$/, '');
-  vscode.postMessage({ type: 'savePng', dataUrl: viewer.capturePNG(), suggestedName: `${base}.png` });
+  const suffix = transparent ? '-transparent' : '';
+  vscode.postMessage({
+    type: 'savePng',
+    dataUrl: viewer.capturePNG({ transparent }),
+    suggestedName: `${base}${suffix}.png`,
+  });
 }
-shadingSnapshotBtn.addEventListener('click', saveSnapshot);
+shadingSnapshotBtn.addEventListener('click', (ev) => saveSnapshot(ev.altKey));
 
 // ---- Camera linking (sync orbit across open viewers) ----
 // The toggle only appears when 2+ viewers are open (the host reports the count).
@@ -1013,6 +1018,8 @@ window.addEventListener('message', (ev) => {
     viewer.frameAll();
   } else if (msg.type === 'command' && msg.command === 'saveSnapshot') {
     saveSnapshot();
+  } else if (msg.type === 'command' && msg.command === 'saveSnapshotTransparent') {
+    saveSnapshot(true);
   } else if (msg.type === 'viewerCount') {
     viewerCount = Number(msg.count) || 1;
     // Nobody left to sync with — drop the link so it can't silently stay on.
