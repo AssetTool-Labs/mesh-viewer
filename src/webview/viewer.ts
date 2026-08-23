@@ -504,6 +504,79 @@ export class Viewer {
   }
 
   /**
+   * Render any texture — including GPU-compressed KTX2/Basis, which the CPU
+   * can't read — into a 2D canvas via a render-target read-back, so the
+   * Textures panel can preview it. sRGB textures are gamma-encoded back for
+   * display; linear maps are shown raw. Returns null if the size is unknown.
+   */
+  renderTextureToCanvas(tex: THREE.Texture, maxSize: number): HTMLCanvasElement | null {
+    const mip = (tex as THREE.CompressedTexture).mipmaps?.[0];
+    const srcW = (tex.image as { width?: number } | undefined)?.width ?? mip?.width;
+    const srcH = (tex.image as { height?: number } | undefined)?.height ?? mip?.height;
+    if (!srcW || !srcH) return null;
+
+    const aspect = srcW / srcH;
+    let w = srcW;
+    let h = srcH;
+    if (w > maxSize || h > maxSize) {
+      if (aspect >= 1) { w = maxSize; h = Math.round(maxSize / aspect); }
+      else { h = maxSize; w = Math.round(maxSize * aspect); }
+    }
+    w = Math.max(1, w);
+    h = Math.max(1, h);
+
+    const rt = new THREE.WebGLRenderTarget(w, h);
+    const scene = new THREE.Scene();
+    const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const mat = new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, depthTest: false, depthWrite: false });
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+    scene.add(quad);
+
+    const prevTarget = this.renderer.getRenderTarget();
+    const prevClear = this.renderer.getClearColor(new THREE.Color());
+    const prevAlpha = this.renderer.getClearAlpha();
+    this.renderer.setRenderTarget(rt);
+    this.renderer.setClearColor(0x000000, 0);
+    this.renderer.clear();
+    this.renderer.render(scene, cam);
+    const buf = new Uint8Array(w * h * 4);
+    this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, buf);
+    this.renderer.setRenderTarget(prevTarget);
+    this.renderer.setClearColor(prevClear, prevAlpha);
+
+    rt.dispose();
+    quad.geometry.dispose();
+    mat.dispose();
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    const out = ctx.createImageData(w, h);
+    const srgb = tex.colorSpace === THREE.SRGBColorSpace;
+    const enc = (c: number): number => {
+      if (!srgb) return c;
+      const l = c / 255;
+      const s = l <= 0.0031308 ? l * 12.92 : 1.055 * Math.pow(l, 1 / 2.4) - 0.055;
+      return Math.round(Math.min(1, Math.max(0, s)) * 255);
+    };
+    for (let y = 0; y < h; y++) {
+      const sy = h - 1 - y; // GL read-back origin is bottom-left
+      for (let x = 0; x < w; x++) {
+        const s = (sy * w + x) * 4;
+        const d = (y * w + x) * 4;
+        out.data[d] = enc(buf[s]);
+        out.data[d + 1] = enc(buf[s + 1]);
+        out.data[d + 2] = enc(buf[s + 2]);
+        out.data[d + 3] = buf[s + 3];
+      }
+    }
+    ctx.putImageData(out, 0, 0);
+    return canvas;
+  }
+
+  /**
    * Switch which axis is treated as "up". Robotics/CAD assets are often
    * exported Z-up, which looks tipped over in this Y-up three.js viewer;
    * rotating `contentRoot` -90° about X maps the asset's Z axis onto the
