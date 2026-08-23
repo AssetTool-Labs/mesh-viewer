@@ -18,6 +18,7 @@ import {
   type ShadingMode,
   type EnvironmentMode,
   type WeightMode,
+  type MorphMeshInfo,
   type HudInfo,
 } from './viewer';
 import { TimelinePanel, type TimelineClip } from './timeline';
@@ -115,6 +116,11 @@ const resetPoseBtn = $<HTMLButtonElement>('resetPose');
 const frameSelectionBtn = $<HTMLButtonElement>('frameSelection');
 const sidebarToggle = $<HTMLButtonElement>('sidebarToggle');
 const importMeshBtn = $<HTMLButtonElement>('importMeshBtn');
+const blendshapesTab = $<HTMLButtonElement>('blendshapesTab');
+const blendshapeList = $('blendshapeList');
+const bsResetBtn = $<HTMLButtonElement>('bsReset');
+const bsCombine = $<HTMLInputElement>('bsCombine');
+const bsCombineRow = $('bsCombineRow');
 const app = $('app');
 const textureView = $('textureView');
 const textureSummary = $('textureSummary');
@@ -255,15 +261,15 @@ let activeUVCanvas: HTMLCanvasElement | null = null;
 let showUV = false;
 
 // ---- Tabs ----
-document.querySelectorAll<HTMLButtonElement>('.tab').forEach((tab) => {
-  tab.addEventListener('click', () => {
-    const which = tab.dataset.tab;
-    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
-    document.querySelectorAll('.tab-panel').forEach((p) => {
-      const el = p as HTMLElement;
-      el.classList.toggle('active', el.dataset.tab === which);
-    });
+function selectTab(which: string): void {
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', (t as HTMLElement).dataset.tab === which));
+  document.querySelectorAll('.tab-panel').forEach((p) => {
+    const el = p as HTMLElement;
+    el.classList.toggle('active', el.dataset.tab === which);
   });
+}
+document.querySelectorAll<HTMLButtonElement>('.tab').forEach((tab) => {
+  tab.addEventListener('click', () => { if (tab.dataset.tab) selectTab(tab.dataset.tab); });
 });
 
 // ---- View settings ----
@@ -433,6 +439,11 @@ toggleAxes.addEventListener('change', () => { viewer.setAxesVisible(toggleAxes.c
 toggleBounds.addEventListener('change', () => { viewer.setBoundsVisible(toggleBounds.checked); pushViewSettings(); });
 toggleSkeleton.addEventListener('change', () => { viewer.setSkeletonVisible(toggleSkeleton.checked); pushViewSettings(); });
 resetPoseBtn.addEventListener('click', () => resetPose());
+bsCombine.addEventListener('change', populateBlendshapes);
+bsResetBtn.addEventListener('click', () => {
+  viewer.resetMorphs();
+  for (const s of bsSliders) { s.input.value = '0'; s.val.textContent = '0.00'; }
+});
 // "Show skin weights" drives on/off; the mode + bone rows below it appear only
 // while it's checked. Toggling off keeps the dropdown values so re-checking
 // returns to the last mode/bone within the session. Weight display is session-
@@ -762,6 +773,7 @@ viewer.setAnimationCallback((time, duration) => {
   if (scrubLocked || duration <= 0) return;
   animScrub.value = String(Math.round((time / duration) * 1000));
   animCurrent.textContent = `${time.toFixed(2)}s`;
+  syncBlendshapeSliders();
   timeline.refresh();
 });
 
@@ -1242,6 +1254,7 @@ function rebuildAllPanels(): void {
   populateTextures();
   populateInfo();
   populateAnimations();
+  populateBlendshapes();
   refreshSubtitle();
   if (toggleWeights.checked && weightModeSelect.value === 'isolate') populateWeightBones();
   splatUprightRow.style.display = viewer.hasSplats ? '' : 'none';
@@ -1469,6 +1482,8 @@ function renderSelectionDetails(obj: THREE.Object3D): void {
       const skinned = mesh as THREE.SkinnedMesh;
       kv('Bones', String(skinned.skeleton?.bones.length ?? 0));
     }
+    const morphCount = mesh.morphTargetInfluences?.length ?? 0;
+    if (morphCount) kv('Blendshapes', String(morphCount));
   } else if ((obj as THREE.Points).isPoints) {
     const g = (obj as THREE.Points).geometry as THREE.BufferGeometry;
     const posAttr = g.getAttribute('position');
@@ -1696,6 +1711,110 @@ function formatBytes(n: number): string {
     i++;
   }
   return `${v.toFixed(v >= 10 || i === 0 ? 0 : 2)} ${units[i]}`;
+}
+
+// ---- Blendshapes (morph targets) ----
+// One slider per morph target (or per shared name when "combine by name" is on).
+// Each slider is registered so animation playback can push live influence values
+// back into the UI without the user having to touch it.
+interface BsSlider {
+  input: HTMLInputElement;
+  val: HTMLElement;
+  /** (mesh uuid, target index) pairs this slider drives — one, or many when merged by name. */
+  targets: { uuid: string; index: number }[];
+}
+const bsSliders: BsSlider[] = [];
+/** The slider under active pointer drag, so live-sync doesn't fight the user. */
+let bsDragging: BsSlider | null = null;
+
+const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+function populateBlendshapes(): void {
+  const meshes = viewer.getMorphMeshes();
+  blendshapesTab.style.display = meshes.length ? '' : 'none';
+  // If the panel vanished while it was the active tab, fall back to Hierarchy.
+  if (!meshes.length && blendshapesTab.classList.contains('active')) selectTab('hierarchy');
+  blendshapeList.innerHTML = '';
+  bsSliders.length = 0;
+  bsDragging = null;
+  if (!meshes.length) {
+    bsCombineRow.style.display = 'none';
+    blendshapeList.innerHTML = '<div class="kv-empty">No blendshapes in this scene.</div>';
+    return;
+  }
+  // "Combine by name" only makes sense across multiple morph meshes (e.g. a
+  // multi-submesh ARKit face rig sharing shape names like "jawOpen").
+  bsCombineRow.style.display = meshes.length > 1 ? '' : 'none';
+  if (meshes.length > 1 && bsCombine.checked) buildCombinedBlendshapes(meshes);
+  else buildPerMeshBlendshapes(meshes);
+}
+
+function buildPerMeshBlendshapes(meshes: MorphMeshInfo[]): void {
+  for (const mesh of meshes) {
+    if (meshes.length > 1) {
+      const title = document.createElement('div');
+      title.className = 'section-title bs-mesh-title';
+      title.textContent = mesh.meshName;
+      blendshapeList.appendChild(title);
+    }
+    for (const t of mesh.targets) makeBsRow(t.name, [{ uuid: mesh.uuid, index: t.index }]);
+  }
+}
+
+function buildCombinedBlendshapes(meshes: MorphMeshInfo[]): void {
+  const byName = new Map<string, { uuid: string; index: number }[]>();
+  const order: string[] = [];
+  for (const mesh of meshes) {
+    for (const t of mesh.targets) {
+      let list = byName.get(t.name);
+      if (!list) { list = []; byName.set(t.name, list); order.push(t.name); }
+      list.push({ uuid: mesh.uuid, index: t.index });
+    }
+  }
+  for (const name of order) makeBsRow(name, byName.get(name)!);
+}
+
+function makeBsRow(label: string, targets: { uuid: string; index: number }[]): void {
+  const row = document.createElement('div');
+  row.className = 'bs-row';
+  const name = document.createElement('div');
+  name.className = 'bs-name';
+  name.textContent = label;
+  name.title = label;
+  const input = document.createElement('input');
+  input.type = 'range';
+  input.min = '0';
+  input.max = '100';
+  input.step = '1';
+  const init = viewer.getMorphInfluence(targets[0].uuid, targets[0].index);
+  input.value = String(Math.round(clamp01(init) * 100));
+  const val = document.createElement('div');
+  val.className = 'bs-val';
+  val.textContent = init.toFixed(2);
+  const slider: BsSlider = { input, val, targets };
+  input.addEventListener('pointerdown', () => { bsDragging = slider; });
+  const endDrag = (): void => { if (bsDragging === slider) bsDragging = null; };
+  input.addEventListener('pointerup', endDrag);
+  input.addEventListener('pointercancel', endDrag);
+  input.addEventListener('input', () => {
+    const v = Number(input.value) / 100;
+    for (const t of targets) viewer.setMorphInfluence(t.uuid, t.index, v);
+    val.textContent = v.toFixed(2);
+  });
+  row.append(name, input, val);
+  blendshapeList.appendChild(row);
+  bsSliders.push(slider);
+}
+
+/** Push current (possibly animation-driven) influences back into the sliders. */
+function syncBlendshapeSliders(): void {
+  if (!bsSliders.length || blendshapesTab.style.display === 'none') return;
+  for (const s of bsSliders) {
+    if (s === bsDragging) continue;
+    const v = viewer.getMorphInfluence(s.targets[0].uuid, s.targets[0].index);
+    const iv = String(Math.round(clamp01(v) * 100));
+    if (s.input.value !== iv) { s.input.value = iv; s.val.textContent = v.toFixed(2); }
+  }
 }
 
 // ---- Animations ----
