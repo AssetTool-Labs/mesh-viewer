@@ -35,7 +35,7 @@ A shading strip next to the corner view gizmo switches between **Wireframe, Soli
 - **Wide format support** — GLB/GLTF (including DRACO- and meshopt-compressed, and KTX2/Basis textures), FBX, OBJ, USD/USDA/USDC/USDZ, STL, PLY, DAE (Collada), 3DS, 3MF, VRML, Gaussian splats (SPZ/SPLAT/KSPLAT/SOG/3DGS PLY), and more
 - **Sidecar textures** — FBX/OBJ/DAE files that reference textures by relative path (e.g. a `textures/` folder next to the model) load them automatically, even when the exported absolute paths are stale
 - **Scene hierarchy** — tree view with filtering, per-node visibility (with a one-click bulk show/hide of the filtered set), and selection outlines
-- **Inspector** — object transforms, geometry stats, material and texture details
+- **Inspector** — object transforms, geometry stats, material and texture details, with clickable texture previews (including GPU-compressed KTX2) that enlarge for close inspection
 - **Skin-weight visualization** — recolor a skinned mesh by its bone weights, with modes for all bones, a single isolated bone, influence count, and weight normalization; the coloring deforms with the animation
 - **Texture-map toggles** — in Material/Rendered shading, switch each PBR map (base color, normal, metalness, roughness, AO, emissive) on or off in the lit render to isolate what each contributes
 - **Blendshape controls** — a Blendshapes tab (shown only when a scene has morph targets) with a slider per shape, grouped by mesh and optionally combined by name for ARKit face rigs; sliders track animated shapes live and let you pose them by hand

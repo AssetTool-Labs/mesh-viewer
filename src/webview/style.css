@@ -488,12 +488,47 @@ button.group-title:hover { color: var(--fg); }
 }
 .tex-canvas-stack > canvas.tex-uv { pointer-events: none; }
 .tex-canvas-stack > canvas.tex-uv.hidden { display: none; }
+/* The preview is clickable to open the enlarged modal. */
+.tex-canvas-stack { cursor: zoom-in; }
 .tex-card-preview.empty {
   color: var(--muted);
   font-size: 11px;
   padding: 14px;
   font-style: italic;
   text-align: center;
+}
+
+/* Enlarged texture modal (click a preview to open; click anywhere to close). */
+#texModal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.82);
+  cursor: zoom-out;
+}
+#texModal.hidden { display: none; }
+#texModalBody {
+  max-width: 92vw;
+  max-height: 84vh;
+  background: repeating-conic-gradient(#2a2a2a 0% 25%, #1f1f1f 0% 50%) 0 0 / 20px 20px;
+  box-shadow: 0 6px 30px rgba(0, 0, 0, 0.6);
+}
+#texModalBody canvas {
+  display: block;
+  max-width: 92vw;
+  max-height: 84vh;
+  object-fit: contain;
+}
+#texModalCaption {
+  color: #ddd;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 .tex-card-meta {
   display: grid;

@@ -142,6 +142,28 @@ const textureView = $('textureView');
 const textureSummary = $('textureSummary');
 const textureSelect = $<HTMLSelectElement>('textureSelect');
 const toggleShowUV = $<HTMLInputElement>('toggleShowUV');
+const texModal = $('texModal');
+const texModalBody = $('texModalBody');
+const texModalCaption = $('texModalCaption');
+
+// Enlarged texture preview: clone the (up-to-1024px) card canvas into a modal.
+function openTextureModal(source: HTMLCanvasElement, caption: string): void {
+  const big = document.createElement('canvas');
+  big.width = source.width;
+  big.height = source.height;
+  big.getContext('2d')?.drawImage(source, 0, 0);
+  texModalBody.replaceChildren(big);
+  texModalCaption.textContent = caption;
+  texModal.classList.remove('hidden');
+}
+function closeTextureModal(): void {
+  texModal.classList.add('hidden');
+  texModalBody.replaceChildren();
+}
+texModal.addEventListener('click', closeTextureModal);
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && !texModal.classList.contains('hidden')) closeTextureModal();
+});
 
 importMeshBtn.addEventListener('click', () => requestPickAndImport());
 
@@ -2184,6 +2206,9 @@ function renderActiveTexture(): void {
     uvCanvas.height = imgCanvas.height;
     stack.append(imgCanvas, uvCanvas);
     preview.appendChild(stack);
+    stack.addEventListener('click', () =>
+      openTextureModal(imgCanvas, roleBadge.textContent ? `${nameText} · ${roleBadge.textContent}` : nameText),
+    );
     activeImgCanvas = imgCanvas;
     activeUVCanvas = uvCanvas;
   }
@@ -2273,6 +2298,18 @@ function filterName(f: THREE.TextureFilter | THREE.MagnificationTextureFilter | 
   }
 }
 
+/** Fill the canvas with the texture's image, trying a CPU drawImage first and
+ *  falling back to a GPU read-back for compressed (KTX2) / GPU-only textures. */
+function drawTextureToCanvas(tex: THREE.Texture, canvas: HTMLCanvasElement): boolean {
+  if (drawTextureCPU(tex, canvas)) return true;
+  const rendered = viewer.renderTextureToCanvas(tex, TEXTURE_CANVAS_MAX);
+  if (!rendered) return false;
+  canvas.width = rendered.width;
+  canvas.height = rendered.height;
+  canvas.getContext('2d')?.drawImage(rendered, 0, 0);
+  return true;
+}
+
 /**
  * Render the texture's source image into the canvas's internal pixel buffer at
  * up to TEXTURE_CANVAS_MAX on the longest side. Display size is governed by
@@ -2280,7 +2317,7 @@ function filterName(f: THREE.TextureFilter | THREE.MagnificationTextureFilter | 
  * canvas.style here — that's what makes the UV overlay stay aligned when the
  * user resizes the panel.
  */
-function drawTextureToCanvas(tex: THREE.Texture, canvas: HTMLCanvasElement): boolean {
+function drawTextureCPU(tex: THREE.Texture, canvas: HTMLCanvasElement): boolean {
   const img = tex.image;
   if (!img) return false;
   const dims = imageDims(img);
