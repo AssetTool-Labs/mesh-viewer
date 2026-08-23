@@ -146,12 +146,15 @@ const texModal = $('texModal');
 const texModalBody = $('texModalBody');
 const texModalCaption = $('texModalCaption');
 
-// Enlarged texture preview: clone the (up-to-1024px) card canvas into a modal.
-function openTextureModal(source: HTMLCanvasElement, caption: string): void {
+// Enlarged texture preview: clone the (up-to-1024px) card canvas into a modal,
+// compositing the UV overlay on top when it's currently shown.
+function openTextureModal(img: HTMLCanvasElement, uv: HTMLCanvasElement | null, caption: string): void {
   const big = document.createElement('canvas');
-  big.width = source.width;
-  big.height = source.height;
-  big.getContext('2d')?.drawImage(source, 0, 0);
+  big.width = img.width;
+  big.height = img.height;
+  const ctx = big.getContext('2d');
+  ctx?.drawImage(img, 0, 0);
+  if (ctx && uv && !uv.classList.contains('hidden')) ctx.drawImage(uv, 0, 0);
   texModalBody.replaceChildren(big);
   texModalCaption.textContent = caption;
   texModal.classList.remove('hidden');
@@ -2207,7 +2210,7 @@ function renderActiveTexture(): void {
     stack.append(imgCanvas, uvCanvas);
     preview.appendChild(stack);
     stack.addEventListener('click', () =>
-      openTextureModal(imgCanvas, roleBadge.textContent ? `${nameText} · ${roleBadge.textContent}` : nameText),
+      openTextureModal(imgCanvas, uvCanvas, roleBadge.textContent ? `${nameText} · ${roleBadge.textContent}` : nameText),
     );
     activeImgCanvas = imgCanvas;
     activeUVCanvas = uvCanvas;
