@@ -37,6 +37,7 @@ A shading strip next to the corner view gizmo switches between **Wireframe, Soli
 - **Scene hierarchy** — tree view with filtering, per-node visibility (with a one-click bulk show/hide of the filtered set), and selection outlines
 - **Inspector** — object transforms, geometry stats, material and texture details
 - **Skin-weight visualization** — recolor a skinned mesh by its bone weights, with modes for all bones, a single isolated bone, influence count, and weight normalization; the coloring deforms with the animation
+- **Blendshape controls** — a Blendshapes tab (shown only when a scene has morph targets) with a slider per shape, grouped by mesh and optionally combined by name for ARKit face rigs; sliders track animated shapes live and let you pose them by hand
 - **View options** — wireframe overlay, skeleton overlay, grid/axes helpers, bounds, environment lighting, and a Y-up / Z-up axis toggle for CAD/robotics assets exported Z-up (also one click away in the shading HUD)
 - **Drag & drop import** — merge extra meshes into the current scene
 - **Remembers your view settings** — shading, grid, background, and other view toggles carry over to the next file you open, and persist across restarts

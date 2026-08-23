@@ -316,6 +316,45 @@ html, body {
 .anim-time input[type="range"] { width: 100%; }
 .anim-time-labels { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
 
+/* Blendshape (morph target) panel */
+.bs-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--panel-border);
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.bs-toolbar .row { flex: 1; margin: 0; }
+.bs-toolbar button {
+  background: var(--button-bg);
+  color: var(--button-fg);
+  border: none;
+  border-radius: 2px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.bs-toolbar button:hover { background: var(--button-hover); }
+.bs-list { display: flex; flex-direction: column; gap: 2px; }
+.bs-mesh-title { padding: 6px 2px 2px; }
+.bs-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.bs-row .bs-name {
+  flex: 0 0 38%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bs-row input[type="range"] { flex: 1; min-width: 0; }
+.bs-row .bs-val {
+  flex: 0 0 30px;
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
 /* Texture panel */
 .tex-toolbar {
   display: flex;

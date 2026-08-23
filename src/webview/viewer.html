@@ -24,6 +24,7 @@
           <button class="tab active" data-tab="hierarchy" role="tab">Hierarchy</button>
           <button class="tab" data-tab="textures" role="tab">Textures</button>
           <button class="tab" data-tab="animations" role="tab">Animations</button>
+          <button class="tab" data-tab="blendshapes" role="tab" id="blendshapesTab" style="display:none">Blendshapes</button>
           <button class="tab" data-tab="settings" role="tab">View</button>
           <button class="tab" data-tab="info" role="tab">Info</button>
         </nav>
@@ -83,6 +84,19 @@
             <input id="animSpeed" type="range" min="0" max="200" value="100" />
             <span id="animSpeedLabel">1.00×</span>
           </label>
+        </section>
+
+        <section class="tab-panel" data-tab="blendshapes">
+          <div class="bs-toolbar">
+            <label class="row checkbox" id="bsCombineRow" style="display:none">
+              <input type="checkbox" id="bsCombine" checked />
+              <span>Combine by name</span>
+            </label>
+            <button type="button" id="bsReset">Reset all</button>
+          </div>
+          <div id="blendshapeList" class="bs-list">
+            <div class="kv-empty">No blendshapes in this scene.</div>
+          </div>
         </section>
 
         <section class="tab-panel" data-tab="settings">

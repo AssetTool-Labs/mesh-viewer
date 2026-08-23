@@ -38,6 +38,13 @@ function isSplat(o: THREE.Object3D): boolean {
   return o.userData.isSplat === true;
 }
 
+/** The mesh's morph influence array if it has any morph targets, else null. */
+function morphInfluencesOf(o: THREE.Object3D): number[] | null {
+  const mesh = o as THREE.Mesh;
+  const inf = mesh.isMesh ? mesh.morphTargetInfluences : undefined;
+  return inf && inf.length > 0 ? inf : null;
+}
+
 /**
  * Mixamo / many FBX rigs put a same-named leaf Bone under the real joint
  * (the leaf is what `skeleton.bones` holds for skinning). Rotating that leaf
@@ -76,6 +83,14 @@ export interface AssetEntry {
   asset: LoadedAsset;
   /** Animation actions, parallel to `asset.animations`. */
   actions: THREE.AnimationAction[];
+}
+
+/** One morph-carrying mesh and its named targets, for the Blendshapes panel. */
+export interface MorphMeshInfo {
+  /** Mesh uuid; pass back to `setMorphInfluence` to drive one target. */
+  uuid: string;
+  meshName: string;
+  targets: { name: string; index: number }[];
 }
 
 /**
@@ -142,6 +157,8 @@ export class Viewer {
   private weightBoneIndex = 0;
   /** Debug materials created per SkinnedMesh while weight display is active. */
   private weightMats: { mesh: THREE.SkinnedMesh; entry: WeightMaterialEntry }[] = [];
+  /** uuid → morph mesh, rebuilt by getMorphMeshes() so slider writes are O(1). */
+  private readonly morphMeshCache = new Map<string, THREE.Mesh>();
   private hemiLight: THREE.HemisphereLight | null = null;
   private dirLight: THREE.DirectionalLight | null = null;
 
@@ -570,6 +587,48 @@ export class Viewer {
       }
     });
     return found;
+  }
+
+  /**
+   * Enumerate every mesh with morph targets, resolving each target's name from
+   * `morphTargetDictionary` (falling back to `Morph N`). Also refreshes the
+   * uuid→mesh cache that `setMorphInfluence` / `resetMorphs` rely on.
+   */
+  getMorphMeshes(): MorphMeshInfo[] {
+    this.morphMeshCache.clear();
+    const out: MorphMeshInfo[] = [];
+    this.contentRoot.traverse((o) => {
+      const influences = morphInfluencesOf(o);
+      if (!influences) return;
+      const mesh = o as THREE.Mesh;
+      this.morphMeshCache.set(mesh.uuid, mesh);
+      const byIndex: string[] = [];
+      const dict = mesh.morphTargetDictionary;
+      if (dict) for (const name in dict) byIndex[dict[name]] = name;
+      const targets = influences.map((_, i) => ({ name: byIndex[i] ?? `Morph ${i}`, index: i }));
+      out.push({ uuid: mesh.uuid, meshName: mesh.name || '(mesh)', targets });
+    });
+    return out;
+  }
+
+  /** Set one morph target's influence on a specific mesh (by uuid). */
+  setMorphInfluence(meshUuid: string, index: number, value: number): void {
+    const inf = this.morphMeshCache.get(meshUuid)?.morphTargetInfluences;
+    if (inf && index < inf.length) inf[index] = value;
+  }
+
+  /** Current influence of one morph target, for syncing sliders to animation. */
+  getMorphInfluence(meshUuid: string, index: number): number {
+    const inf = this.morphMeshCache.get(meshUuid)?.morphTargetInfluences;
+    return inf && index < inf.length ? inf[index] : 0;
+  }
+
+  /** Zero every morph influence on every morph mesh. */
+  resetMorphs(): void {
+    for (const mesh of this.morphMeshCache.values()) {
+      const inf = mesh.morphTargetInfluences;
+      if (inf) inf.fill(0);
+    }
   }
 
   private rebuildWeightMaterials(): void {
