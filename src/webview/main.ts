@@ -819,20 +819,26 @@ function updateScaleBar(): void {
   const n = raw / pow;
   const nice = (n >= 5 ? 5 : n >= 2 ? 2 : 1) * pow;
   scaleBar.style.width = `${Math.round(nice / upp)}px`;
-  scaleBarLabel.textContent = formatLength(nice);
+  scaleBarLabel.textContent = formatLength(nice) + lengthUnit();
   scaleBar.hidden = false;
 }
 
 function updateMeasureLabel(): void {
   const m = viewer.getMeasurement();
   if (!m) { measureLabel.hidden = true; return; }
-  measureLabel.textContent = formatLength(m.distance);
+  measureLabel.textContent = formatLength(m.distance) + lengthUnit();
   measureLabel.style.left = `${m.x}px`;
   measureLabel.style.top = `${m.y}px`;
   measureLabel.hidden = false;
 }
 
-/** Format a world length with adaptive precision; units are asset-dependent so none is shown. */
+/** glTF/GLB coordinates are metres per spec; other formats are unitless. */
+function lengthUnit(): string {
+  const e = primaryFile?.ext?.toLowerCase();
+  return e === 'glb' || e === 'gltf' ? ' m' : '';
+}
+
+/** Format a world length with adaptive precision; the unit (if any) is appended by the caller. */
 function formatLength(v: number): string {
   const abs = Math.abs(v);
   let s: string;
