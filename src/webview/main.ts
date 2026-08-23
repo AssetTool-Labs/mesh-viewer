@@ -103,6 +103,10 @@ const shadingFlatBtn = $<HTMLButtonElement>('shadingFlat');
 const shadingCollapseBtn = $<HTMLButtonElement>('shadingCollapse');
 const shadingLinkBtn = $<HTMLButtonElement>('shadingLink');
 const shadingSnapshotBtn = $<HTMLButtonElement>('shadingSnapshot');
+const shadingMeasureBtn = $<HTMLButtonElement>('shadingMeasure');
+const scaleBar = $('scaleBar');
+const scaleBarLabel = $('scaleBarLabel');
+const measureLabel = $('measureLabel');
 const shadingLinkSep = $('shadingLinkSep');
 const toggleWireframeOverlay = $<HTMLInputElement>('toggleWireframeOverlay');
 const splatUprightRow = $('splatUprightRow');
@@ -780,7 +784,64 @@ viewer.setHudCallback((info: HudInfo) => {
     `tris ${info.triangles.toLocaleString()}\n` +
     `calls ${info.drawCalls}\n` +
     `geom ${info.geometries}  tex ${info.textures}`;
+  updateScaleBar();
+  updateMeasureLabel();
 });
+
+// ---- Measurement (scale bar + ruler) ----
+shadingMeasureBtn.addEventListener('click', () => setMeasureMode(!viewer.measuring));
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && viewer.measuring) setMeasureMode(false);
+});
+
+function setMeasureMode(on: boolean): void {
+  viewer.setMeasureMode(on);
+  shadingMeasureBtn.classList.toggle('active', on);
+  canvas.style.cursor = on ? 'crosshair' : '';
+  if (!on) measureLabel.hidden = true;
+}
+
+function measureAt(ev: PointerEvent): void {
+  const rect = canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+    -(((ev.clientY - rect.top) / rect.height) * 2 - 1),
+  );
+  viewer.addMeasurePointAt(ndc);
+}
+
+function updateScaleBar(): void {
+  if (!viewer.entries.length) { scaleBar.hidden = true; return; }
+  const upp = viewer.worldUnitsPerPixel();
+  if (!isFinite(upp) || upp <= 0) { scaleBar.hidden = true; return; }
+  const raw = upp * 90; // aim for a ~90px bar
+  const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const n = raw / pow;
+  const nice = (n >= 5 ? 5 : n >= 2 ? 2 : 1) * pow;
+  scaleBar.style.width = `${Math.round(nice / upp)}px`;
+  scaleBarLabel.textContent = formatLength(nice);
+  scaleBar.hidden = false;
+}
+
+function updateMeasureLabel(): void {
+  const m = viewer.getMeasurement();
+  if (!m) { measureLabel.hidden = true; return; }
+  measureLabel.textContent = formatLength(m.distance);
+  measureLabel.style.left = `${m.x}px`;
+  measureLabel.style.top = `${m.y}px`;
+  measureLabel.hidden = false;
+}
+
+/** Format a world length with adaptive precision; units are asset-dependent so none is shown. */
+function formatLength(v: number): string {
+  const abs = Math.abs(v);
+  let s: string;
+  if (abs >= 100) s = v.toFixed(0);
+  else if (abs >= 10) s = v.toFixed(1);
+  else if (abs >= 1) s = v.toFixed(2);
+  else s = v.toPrecision(2);
+  return s.includes('.') ? s.replace(/\.?0+$/, '') : s;
+}
 
 viewer.setAnimationCallback((time, duration) => {
   if (scrubLocked || duration <= 0) return;
@@ -830,7 +891,8 @@ canvas.addEventListener('pointerup', (ev) => {
   const dy = ev.clientY - start.y;
   if (Math.hypot(dx, dy) > PICK_MOVE_PX) return; // it was a drag-orbit
   if (performance.now() - start.t > PICK_MAX_MS) return; // long-press, not a click
-  pickAt(ev);
+  if (viewer.measuring) measureAt(ev);
+  else pickAt(ev);
 });
 
 canvas.addEventListener('pointercancel', () => {
