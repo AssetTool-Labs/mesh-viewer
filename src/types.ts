@@ -127,6 +127,8 @@ export type FromWebviewMessage =
   /** Offset-mode: relay just the incremental orbit change to the other viewers. */
   | { type: 'cameraOrbitDelta'; delta: OrbitDelta }
   /** The link toggle was flipped — mirror it (and its mode) to the other viewers. */
-  | { type: 'cameraLinkChanged'; enabled: boolean; mode: CameraLinkMode };
+  | { type: 'cameraLinkChanged'; enabled: boolean; mode: CameraLinkMode }
+  /** Ask the host to write the given PNG data URL to a file the user picks. */
+  | { type: 'savePng'; dataUrl: string; suggestedName: string };
 
 

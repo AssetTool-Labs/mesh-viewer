@@ -208,6 +208,18 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
           // One click links/unlinks all viewers: mirror the toggle (and mode) everywhere else.
           MeshViewerProvider.broadcastExcept(webview, { type: 'cameraLink', enabled: msg.enabled, mode: msg.mode });
           break;
+        case 'savePng': {
+          const match = /^data:image\/png;base64,(.+)$/s.exec(msg.dataUrl);
+          if (!match) break;
+          const defaultUri = vscode.Uri.joinPath(fileDir, msg.suggestedName);
+          const target = await vscode.window.showSaveDialog({
+            defaultUri,
+            filters: { 'PNG image': ['png'] },
+          });
+          if (!target) break;
+          await vscode.workspace.fs.writeFile(target, Buffer.from(match[1], 'base64'));
+          break;
+        }
       }
     });
     webviewPanel.onDidDispose(() => sub.dispose());

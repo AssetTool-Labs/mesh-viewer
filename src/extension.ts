@@ -37,6 +37,18 @@ export function activate(context: vscode.ExtensionContext): void {
       MeshViewerProvider.broadcast({ type: 'command', command: 'resetCamera' });
     }),
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('3dMeshViewer.saveSnapshot', () => {
+      MeshViewerProvider.broadcast({ type: 'command', command: 'saveSnapshot' });
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('3dMeshViewer.saveSnapshotTransparent', () => {
+      MeshViewerProvider.broadcast({ type: 'command', command: 'saveSnapshotTransparent' });
+    }),
+  );
 }
 
 export function deactivate(): void {}
