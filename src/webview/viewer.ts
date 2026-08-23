@@ -568,8 +568,11 @@ export class Viewer {
       const s = l <= 0.0031308 ? l * 12.92 : 1.055 * Math.pow(l, 1 / 2.4) - 0.055;
       return Math.round(Math.min(1, Math.max(0, s)) * 255);
     };
+    // GL read-back is bottom-up; textures with flipY=false (glTF/KTX2) sample
+    // top-down, so their read-back must not add the extra vertical flip.
+    const flipRead = tex.flipY !== false;
     for (let y = 0; y < h; y++) {
-      const sy = h - 1 - y; // GL read-back origin is bottom-left
+      const sy = flipRead ? h - 1 - y : y;
       for (let x = 0; x < w; x++) {
         const s = (sy * w + x) * 4;
         const d = (y * w + x) * 4;
