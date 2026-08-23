@@ -102,6 +102,7 @@ const shadingXrayBtn = $<HTMLButtonElement>('shadingXray');
 const shadingFlatBtn = $<HTMLButtonElement>('shadingFlat');
 const shadingCollapseBtn = $<HTMLButtonElement>('shadingCollapse');
 const shadingLinkBtn = $<HTMLButtonElement>('shadingLink');
+const shadingSnapshotBtn = $<HTMLButtonElement>('shadingSnapshot');
 const shadingLinkSep = $('shadingLinkSep');
 const toggleWireframeOverlay = $<HTMLInputElement>('toggleWireframeOverlay');
 const splatUprightRow = $('splatUprightRow');
@@ -322,6 +323,13 @@ function syncShadingHud(): void {
   shadingFlatBtn.classList.toggle('active', toggleFlatShading.checked);
 }
 syncShadingHud();
+
+// Export the current view as a PNG; the host shows a Save dialog and writes it.
+function saveSnapshot(): void {
+  const base = (primaryFile?.name ?? 'snapshot').replace(/\.[^.]+$/, '');
+  vscode.postMessage({ type: 'savePng', dataUrl: viewer.capturePNG(), suggestedName: `${base}.png` });
+}
+shadingSnapshotBtn.addEventListener('click', saveSnapshot);
 
 // ---- Camera linking (sync orbit across open viewers) ----
 // The toggle only appears when 2+ viewers are open (the host reports the count).
@@ -1003,6 +1011,8 @@ window.addEventListener('message', (ev) => {
     showError(String(msg.message));
   } else if (msg.type === 'command' && msg.command === 'resetCamera') {
     viewer.frameAll();
+  } else if (msg.type === 'command' && msg.command === 'saveSnapshot') {
+    saveSnapshot();
   } else if (msg.type === 'viewerCount') {
     viewerCount = Number(msg.count) || 1;
     // Nobody left to sync with — drop the link so it can't silently stay on.

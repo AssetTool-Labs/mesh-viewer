@@ -40,6 +40,7 @@ A shading strip next to the corner view gizmo switches between **Wireframe, Soli
 - **Blendshape controls** — a Blendshapes tab (shown only when a scene has morph targets) with a slider per shape, grouped by mesh and optionally combined by name for ARKit face rigs; sliders track animated shapes live and let you pose them by hand
 - **View options** — wireframe overlay, skeleton overlay, grid/axes helpers, bounds, environment lighting, and a Y-up / Z-up axis toggle for CAD/robotics assets exported Z-up (also one click away in the shading HUD)
 - **Drag & drop import** — merge extra meshes into the current scene
+- **Snapshot** — export the current view to a PNG (camera button in the shading HUD, or a command)
 - **Remembers your view settings** — shading, grid, background, and other view toggles carry over to the next file you open, and persist across restarts
 - **Performance HUD** — FPS, triangle count, draw calls, memory
 

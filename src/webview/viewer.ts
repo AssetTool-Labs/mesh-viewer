@@ -223,7 +223,7 @@ export class Viewer {
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -378,6 +378,17 @@ export class Viewer {
 
   setViewGizmoVisible(v: boolean): void {
     this.showViewGizmo = v;
+  }
+
+  /**
+   * Render one frame of the scene (via the composer, so it matches the viewport
+   * but omits the corner nav gizmo) and return it as a PNG data URL. Grid, axes
+   * and other scene overlays are captured as shown; toggle them off first for a
+   * clean shot. Relies on the renderer's `preserveDrawingBuffer`.
+   */
+  capturePNG(): string {
+    this.composer.render();
+    return this.renderer.domElement.toDataURL('image/png');
   }
 
   /**
