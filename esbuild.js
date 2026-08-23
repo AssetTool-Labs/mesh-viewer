@@ -67,6 +67,18 @@ function copyDraco() {
   }
 }
 
+// Copy the Basis Universal transcoder (wasm + js) so GLTFLoader can decode
+// KTX2 textures (KHR_texture_basisu) without reaching out to a CDN.
+function copyBasis() {
+  const src = path.join(__dirname, 'node_modules/three/examples/jsm/libs/basis');
+  const dst = path.join(outDir, 'basis');
+  fs.mkdirSync(dst, { recursive: true });
+  for (const name of ['basis_transcoder.wasm', 'basis_transcoder.js']) {
+    const from = path.join(src, name);
+    if (fs.existsSync(from)) fs.copyFileSync(from, path.join(dst, name));
+  }
+}
+
 async function run() {
   if (watch) {
     const ctxs = await Promise.all([
@@ -77,6 +89,7 @@ async function run() {
     await Promise.all(ctxs.map((c) => c.watch()));
     copyHtml();
     copyDraco();
+    copyBasis();
     fs.watchFile(path.join(__dirname, 'src/webview/viewer.html'), copyHtml);
     console.log('[esbuild] watching for changes…');
   } else {
@@ -87,6 +100,7 @@ async function run() {
     ]);
     copyHtml();
     copyDraco();
+    copyBasis();
     console.log('[esbuild] build complete');
   }
 }

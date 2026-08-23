@@ -431,6 +431,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'webview.js'));
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'webview.css'));
     const dracoUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'draco'));
+    const basisUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'basis'));
     const nonce = makeNonce();
 
     const csp = [
@@ -441,8 +442,11 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       `font-src ${webview.cspSource}`,
       // 'wasm-unsafe-eval' has two dependents: the DRACO decoder and Spark's
       // Gaussian splat sorter. Removing it breaks compressed glTF and every
-      // splat format.
-      `script-src 'nonce-${nonce}' 'wasm-unsafe-eval'`,
+      // splat format. 'unsafe-eval' is required by the Basis/KTX2 transcoder:
+      // its Emscripten embind glue builds its bindings with new Function(),
+      // which the CSP blocks otherwise. Contained here because the webview has
+      // default-src 'none', loads no remote scripts, and only reads local files.
+      `script-src 'nonce-${nonce}' 'wasm-unsafe-eval' 'unsafe-eval'`,
       `worker-src blob:`,
       `connect-src ${webview.cspSource} blob: data:`,
     ].join('; ');
@@ -453,6 +457,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       .replaceAll('{{scriptUri}}', scriptUri.toString())
       .replaceAll('{{styleUri}}', styleUri.toString())
       .replaceAll('{{dracoUri}}', `${dracoUri.toString()}/`)
+      .replaceAll('{{basisUri}}', `${basisUri.toString()}/`)
       .replaceAll('{{nonce}}', nonce);
   }
 }

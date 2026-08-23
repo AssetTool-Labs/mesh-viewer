@@ -6,6 +6,15 @@
 import * as THREE from 'three';
 import { LoadingManager } from 'three';
 
+/**
+ * The viewer's WebGLRenderer, shared so KTX2Loader.detectSupport() can query the
+ * GPU's supported compressed-texture formats. Set once when the viewer boots.
+ */
+let sharedRenderer: THREE.WebGLRenderer | null = null;
+export function setViewerRenderer(renderer: THREE.WebGLRenderer): void {
+  sharedRenderer = renderer;
+}
+
 export interface LoadedAsset {
   /** The root group containing everything loaded from the file. */
   root: THREE.Object3D;
@@ -151,6 +160,24 @@ export async function loadAsset(
 
 // ---------- GLTF / GLB ----------
 
+/** Cheap check for KHR_texture_basisu (KTX2) without a full parse: read the glb
+ *  JSON chunk (or the raw .gltf text) and look for the extension name. */
+function gltfUsesKtx2(ext: string, data: ArrayBuffer | string): boolean {
+  try {
+    let json: string;
+    if (ext === 'glb') {
+      const view = new DataView(data as ArrayBuffer);
+      const jsonLen = view.getUint32(12, true);
+      json = new TextDecoder().decode(new Uint8Array(data as ArrayBuffer, 20, jsonLen));
+    } else {
+      json = data as string;
+    }
+    return json.includes('KHR_texture_basisu');
+  } catch {
+    return false;
+  }
+}
+
 async function loadGLTF(
   ext: string,
   data: ArrayBuffer | string,
@@ -187,13 +214,54 @@ async function loadGLTF(
     console.warn('[3DViewer] Failed to initialize MeshoptDecoder:', err);
   }
 
+  // Wire up KTX2 / Basis Universal so KHR_texture_basisu textures load. The
+  // transcoder (wasm + js) is bundled like DRACO and its webview path injected
+  // as a global; detectSupport() needs the live renderer to pick a GPU format.
+  // The Basis transcoder's embind glue needs 'unsafe-eval' (see the CSP note in
+  // viewerProvider.ts). Only wired when the asset actually references the
+  // extension, so normal glTF never constructs it — and so we can arm a
+  // watchdog on the load below.
+  const usesKtx2 = gltfUsesKtx2(ext, data);
+  const ktx2Path = (globalThis as { __ktx2TranscoderPath?: string }).__ktx2TranscoderPath;
+  if (usesKtx2 && ktx2Path && sharedRenderer) {
+    try {
+      const { KTX2Loader } = await import('three/examples/jsm/loaders/KTX2Loader.js');
+      const ktx2Loader = new KTX2Loader(aux.manager);
+      ktx2Loader.setTranscoderPath(ktx2Path);
+      ktx2Loader.detectSupport(sharedRenderer);
+      loader.setKTX2Loader(ktx2Loader);
+    } catch (err) {
+      console.warn('[3DViewer] Failed to initialize KTX2Loader:', err);
+    }
+  } else if (usesKtx2 && !sharedRenderer) {
+    console.warn('[3DViewer] KTX2 asset opened before the renderer was ready; textures may be missing.');
+  }
+
   const buffer: ArrayBuffer | string = ext === 'glb' ? (data as ArrayBuffer) : (data as string);
 
   return new Promise((resolve, reject) => {
+    // KTX2 transcoding runs in a Worker whose failures three's WorkerPool does
+    // not surface (it listens for 'message' only), so a stalled transcode would
+    // otherwise leave the parse pending forever and spin the UI. This watchdog
+    // is a safety net; the generous timeout avoids tripping a slow-but-valid
+    // transcode of many/large textures.
+    let settled = false;
+    const watchdog = usesKtx2
+      ? setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          reject(new Error(
+            'KTX2 texture transcoding did not complete in time — see the webview console for details.',
+          ));
+        }, 30000)
+      : undefined;
     loader.parse(
       buffer,
       aux.baseUrl,
       (gltf) => {
+        if (settled) return;
+        settled = true;
+        if (watchdog) clearTimeout(watchdog);
         const meta: Record<string, string> = {};
         const asset = (gltf as unknown as { asset?: Record<string, unknown> }).asset;
         if (asset) {
@@ -214,6 +282,9 @@ async function loadGLTF(
         });
       },
       (err) => {
+        if (settled) return;
+        settled = true;
+        if (watchdog) clearTimeout(watchdog);
         reject(err instanceof Error ? err : new Error(String(err)));
       },
     );
