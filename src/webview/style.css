@@ -414,6 +414,18 @@ button.group-title:hover { color: var(--fg); }
   color: var(--muted);
   font-size: 11px;
 }
+/* Jump from the 2D preview to the matching Inspect mode in the viewport. */
+#texIsolate {
+  align-self: flex-start;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--panel-border);
+  border-radius: 2px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+#texIsolate:hover:not(:disabled) { background: var(--hover); }
+#texIsolate:disabled { opacity: 0.45; cursor: default; }
 .tex-view {
   flex: 1 1 auto;
   display: flex;
@@ -717,6 +729,38 @@ button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
   white-space: nowrap;
 }
 #measureLabel[hidden] { display: none; }
+
+/* Status chip for the active special view, tucked under the shading strip so
+   it reads as part of the same cluster (strip is 30px tall at top 57px). */
+#viewStateChip {
+  position: absolute;
+  top: 92px;
+  right: 144px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 10px;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+#viewStateChip[hidden] { display: none; }
+#viewStateChip button {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+#viewStateChip button:hover { background: rgba(255, 255, 255, 0.4); }
 
 /* Blender-style shading mode strip, vertically centered on the view gizmo
    (128px square at top/right 8px) and sitting to its left. */

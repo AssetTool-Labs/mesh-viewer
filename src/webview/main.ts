@@ -19,6 +19,9 @@ import {
   type EnvironmentMode,
   type WeightMode,
   type MapChannel,
+  type InspectMode,
+  isInspectMode,
+  INSPECT_LABELS,
   type MorphMeshInfo,
   type HudInfo,
 } from './viewer';
@@ -145,6 +148,10 @@ const toggleShowUV = $<HTMLInputElement>('toggleShowUV');
 const texModal = $('texModal');
 const texModalBody = $('texModalBody');
 const texModalCaption = $('texModalCaption');
+const texIsolateBtn = $<HTMLButtonElement>('texIsolate');
+const viewStateChip = $('viewStateChip');
+const viewStateChipLabel = $('viewStateChipLabel');
+const viewStateChipClose = $<HTMLButtonElement>('viewStateChipClose');
 
 // Enlarged texture preview: clone the (up-to-1024px) card canvas into a modal,
 // compositing the UV overlay on top when it's currently shown.
@@ -319,7 +326,15 @@ document.querySelectorAll<HTMLButtonElement>('.tab').forEach((tab) => {
 // pushViewSettings). Programmatic sync in applyViewSettings assigns
 // .value/.checked directly, which does NOT dispatch 'change', so it never
 // echoes back to the host.
-shadingSelect.addEventListener('change', () => { viewer.setShading(shadingSelect.value as ShadingMode); syncShadingHud(); pushViewSettings(); });
+/** Last non-Inspect shading choice, so the status chip's ✕ can return to it. */
+let lastShadedMode: ShadingMode = 'material';
+shadingSelect.addEventListener('change', () => {
+  const mode = shadingSelect.value as ShadingMode;
+  if (!isInspectMode(mode)) lastShadedMode = mode;
+  viewer.setShading(mode);
+  syncShadingHud();
+  pushViewSettings();
+});
 for (const { el, channel } of mapToggleInputs) {
   el.addEventListener('change', () => viewer.setMapEnabled(channel, el.checked));
 }
@@ -371,8 +386,37 @@ function syncShadingHud(): void {
   // Map toggles only affect the asset's materials, so show them only there.
   const shaded = shadingSelect.value === 'material' || shadingSelect.value === 'rendered';
   mapToggles.style.display = shaded ? '' : 'none';
+  updateViewStateChip();
 }
 syncShadingHud();
+
+/** Viewport chip naming the active special view — skin weights or an Inspect
+ *  channel — so the shading strip never silently disagrees with what is drawn
+ *  (Inspect modes have no strip button, and weights override the dropdown on
+ *  skinned meshes). Weights win when both are on, matching the precedence in
+ *  Viewer.applyShadingToObject. */
+function updateViewStateChip(): void {
+  let text = '';
+  if (toggleWeights.checked) {
+    const label = weightModeSelect.selectedOptions[0]?.textContent ?? weightModeSelect.value;
+    text = `Skin weights: ${label}`;
+  } else if (isInspectMode(shadingSelect.value)) {
+    text = `Inspect: ${INSPECT_LABELS[shadingSelect.value]}`;
+  }
+  viewStateChip.hidden = text === '';
+  viewStateChipLabel.textContent = text;
+}
+// The ✕ routes through the sidebar controls, like the HUD buttons, so exiting
+// stays single-sourced with the dropdown/checkbox handlers.
+viewStateChipClose.addEventListener('click', () => {
+  if (toggleWeights.checked) {
+    toggleWeights.checked = false;
+    toggleWeights.dispatchEvent(new Event('change'));
+  } else {
+    shadingSelect.value = lastShadedMode;
+    shadingSelect.dispatchEvent(new Event('change'));
+  }
+});
 
 // Export the current view as a PNG; the host shows a Save dialog and writes it.
 function saveSnapshot(transparent = false): void {
@@ -521,6 +565,7 @@ toggleWeights.addEventListener('change', () => {
     weightBoneRow.style.display = 'none';
     weightLegend.style.display = 'none';
   }
+  updateViewStateChip();
 });
 weightModeSelect.addEventListener('change', applyWeightMode);
 weightBoneSelect.addEventListener('change', () => viewer.setWeightBone(Number(weightBoneSelect.value)));
@@ -534,6 +579,7 @@ function applyWeightMode(): void {
   weightBoneRow.style.display = mode === 'isolate' ? '' : 'none';
   if (mode === 'isolate') populateWeightBones();
   renderWeightLegend(mode);
+  updateViewStateChip();
 }
 
 /** Swap the legend under the mode dropdown to explain the current mode's colors.
@@ -1257,7 +1303,10 @@ function applyViewSettings(settings: InitViewSettings): void {
   // Settings remembered by pre-HUD versions used 'smooth'/'flat' as shading
   // modes; both map onto 'material', with 'flat' setting the new flat toggle.
   const legacy = settings.shading as string;
-  const shading = (legacy === 'smooth' || legacy === 'flat' ? 'material' : legacy) as ShadingMode;
+  // Unknown values (e.g. a mode this build does not have) fall back to
+  // 'material' instead of leaving the dropdown blank.
+  const known = Array.from(shadingSelect.options).some((o) => o.value === legacy);
+  const shading = (legacy === 'smooth' || legacy === 'flat' || !known ? 'material' : legacy) as ShadingMode;
   const flatShading = settings.flatShading ?? legacy === 'flat';
   const xray = settings.xray ?? false;
 
@@ -1284,6 +1333,7 @@ function applyViewSettings(settings: InitViewSettings): void {
   toggleSkeleton.checked = settings.showSkeleton;
   toggleWireframeOverlay.checked = settings.showWireframeOverlay;
   shadingSelect.value = shading;
+  if (!isInspectMode(shading)) lastShadedMode = shading;
   toggleXray.checked = xray;
   toggleFlatShading.checked = flatShading;
   syncShadingHud();
@@ -2113,6 +2163,7 @@ function populateTextures(): void {
     textureSummary.textContent = '';
     textureSelect.disabled = true;
     toggleShowUV.disabled = true;
+    texIsolateBtn.disabled = true;
     textureView.innerHTML = '<div class="kv-empty">No textures in this scene.</div>';
     return;
   }
@@ -2236,8 +2287,45 @@ function renderActiveTexture(): void {
 
   textureView.appendChild(card);
 
+  syncTexIsolateButton(entry);
   refreshUVOverlay();
 }
+
+/** Material slot → Inspect mode, for the Textures tab's "Isolate on model". */
+const SLOT_TO_INSPECT: Record<string, InspectMode> = {
+  map: 'baseColor',
+  normalMap: 'normalMap',
+  metalnessMap: 'metalness',
+  roughnessMap: 'roughness',
+  aoMap: 'ao',
+  emissiveMap: 'emissive',
+};
+
+function inspectModeForEntry(entry: TextureEntry): InspectMode | null {
+  for (const u of entry.usages) {
+    const mode = SLOT_TO_INSPECT[u.slot];
+    if (mode) return mode;
+  }
+  return null;
+}
+
+function syncTexIsolateButton(entry: TextureEntry): void {
+  const mode = inspectModeForEntry(entry);
+  texIsolateBtn.disabled = !mode;
+  texIsolateBtn.title = mode
+    ? `Show the ${INSPECT_LABELS[mode]} channel unlit on the model (Shading → Inspect)`
+    : 'Only the standard PBR slots (base color, normal, metalness, roughness, AO, emissive) can be isolated';
+}
+
+// Jumps to the matching Inspect mode through the dropdown so the HUD, chip,
+// and remembered view settings all follow the one change handler.
+texIsolateBtn.addEventListener('click', () => {
+  const entry = textureEntries[activeTextureIdx];
+  const mode = entry ? inspectModeForEntry(entry) : null;
+  if (!mode) return;
+  shadingSelect.value = mode;
+  shadingSelect.dispatchEvent(new Event('change'));
+});
 
 function displayTextureName(tex: THREE.Texture, usages: TextureUsage[]): string {
   if (tex.name) return tex.name;

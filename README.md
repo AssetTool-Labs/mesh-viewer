@@ -38,6 +38,7 @@ A shading strip next to the corner view gizmo switches between **Wireframe, Soli
 - **Inspector** — object transforms, geometry stats, material and texture details, with clickable texture previews (including GPU-compressed KTX2) that enlarge for close inspection
 - **Skin-weight visualization** — recolor a skinned mesh by its bone weights, with modes for all bones, a single isolated bone, influence count, and weight normalization; the coloring deforms with the animation
 - **Texture-map toggles** — in Material/Rendered shading, switch each PBR map (base color, normal, metalness, roughness, AO, emissive) on or off in the lit render to isolate what each contributes
+- **Inspect modes** — show one PBR channel (base color, normal map, metalness, roughness, AO, emissive) unlit on the geometry from the Shading dropdown, or jump there from a texture in the Textures tab; a viewport chip names the active special view with one-click exit
 - **Blendshape controls** — a Blendshapes tab (shown only when a scene has morph targets) with a slider per shape, grouped by mesh and optionally combined by name for ARKit face rigs; sliders track animated shapes live and let you pose them by hand
 - **View options** — wireframe overlay, skeleton overlay, grid/axes helpers, bounds, environment lighting, and a Y-up / Z-up axis toggle for CAD/robotics assets exported Z-up (also one click away in the shading HUD)
 - **Measurement** — a bottom-left scale bar for the current zoom, plus a ruler tool to click two points and read the distance

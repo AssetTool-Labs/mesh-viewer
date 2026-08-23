@@ -2,7 +2,7 @@
   "name": "mesh-viewer-vscode",
   "displayName": "3D Mesh Viewer",
   "description": "View and inspect 3D meshes (OBJ, FBX, GLB/GLTF, STL, PLY, DAE, 3DS, USD/USDA/USDC/USDZ, 3MF, VRML, and more) and Gaussian splats (SPZ, SPLAT, KSPLAT, SOG) directly inside VS Code.",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "publisher": "AssetToolLabs",
   "icon": "media/icon.png",
   "license": "MIT",
@@ -190,7 +190,13 @@
             "rendered",
             "wireframe",
             "points",
-            "normals"
+            "normals",
+            "baseColor",
+            "normalMap",
+            "metalness",
+            "roughness",
+            "ao",
+            "emissive"
           ],
           "enumDescriptions": [
             "Neutral gray override material (shows vertex colors when present).",
@@ -198,7 +204,13 @@
             "The asset's materials under the configured environment.",
             "Wireframe edges only.",
             "Vertices as points (debug).",
-            "Vertex normals as colors (debug)."
+            "Vertex normals as colors (debug).",
+            "Inspect: base color map (or factor), unlit.",
+            "Inspect: normal map, unlit.",
+            "Inspect: metalness map (or factor), unlit.",
+            "Inspect: roughness map (or factor), unlit.",
+            "Inspect: ambient-occlusion map, unlit.",
+            "Inspect: emissive map (or color), unlit."
           ],
           "default": "material",
           "description": "Default shading mode. Legacy values \"smooth\"/\"flat\" map to \"material\" (with flat shading for \"flat\")."

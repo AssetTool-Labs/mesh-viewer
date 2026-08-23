@@ -13,7 +13,25 @@ import { setViewerRenderer, type LoadedAsset } from './loaders';
 import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
 export type { WeightMode } from './weightMaterial';
 
-export type ShadingMode = 'solid' | 'material' | 'rendered' | 'wireframe' | 'points' | 'normals';
+/** Inspect modes show one PBR channel unlit on the geometry: the slot's
+ *  texture, or the material's scalar factor as a flat color when it has no
+ *  map. They live in the Shading dropdown next to the normals debug mode. */
+export type InspectMode = 'baseColor' | 'normalMap' | 'metalness' | 'roughness' | 'ao' | 'emissive';
+export type ShadingMode =
+  | 'solid' | 'material' | 'rendered' | 'wireframe' | 'points' | 'normals'
+  | InspectMode;
+
+export const INSPECT_LABELS: Record<InspectMode, string> = {
+  baseColor: 'Base Color',
+  normalMap: 'Normal Map',
+  metalness: 'Metalness',
+  roughness: 'Roughness',
+  ao: 'AO',
+  emissive: 'Emissive',
+};
+export function isInspectMode(mode: string): mode is InspectMode {
+  return Object.prototype.hasOwnProperty.call(INSPECT_LABELS, mode);
+}
 
 /** PBR texture maps that can be toggled on/off in Material/Rendered shading. */
 export type MapChannel = 'baseColor' | 'normal' | 'metalness' | 'roughness' | 'ao' | 'emissive';
@@ -1684,6 +1702,20 @@ export class Viewer {
           restore();
         }
         break;
+      case 'baseColor':
+      case 'normalMap':
+      case 'metalness':
+      case 'roughness':
+      case 'ao':
+      case 'emissive':
+        // Map toggles never leak in here: applyAllShading restores every
+        // nulled slot before re-applying, so Inspect always sees the real maps.
+        if (isMesh) {
+          (mesh as THREE.Mesh).material = buildChannelMaterial(backup.material, mode);
+        } else {
+          restore();
+        }
+        break;
     }
   }
 
@@ -2113,6 +2145,58 @@ const MAP_SLOTS: Record<MapChannel, string> = {
   ao: 'aoMap',
   emissive: 'emissiveMap',
 };
+
+/** Unlit material isolating one PBR channel of a source material, for the
+ *  Inspect modes. Shows the slot's texture, or the scalar factor as a flat
+ *  color when there is no map. Packed maps (e.g. a single ORM texture) show all
+ *  their components — v1 displays the map rather than extracting one channel.
+ *  Multi-material meshes use the first entry, like the normals mode. */
+function buildChannelMaterial(
+  src: THREE.Material | THREE.Material[],
+  mode: InspectMode,
+): THREE.MeshBasicMaterial {
+  const std = (Array.isArray(src) ? src[0] : src) as THREE.MeshStandardMaterial;
+  const gray = (v: number): THREE.Color => new THREE.Color(v, v, v);
+  // toneMapped off so the raw texel / scalar isn't reshaped by tone mapping.
+  const base = { toneMapped: false };
+  switch (mode) {
+    case 'baseColor':
+      return new THREE.MeshBasicMaterial({
+        ...base,
+        map: std?.map ?? null,
+        color: std?.color?.clone() ?? new THREE.Color(0xffffff),
+      });
+    case 'normalMap':
+      // Flat tangent-space "up" (0.5, 0.5, 1) when the material has no map.
+      return std?.normalMap
+        ? new THREE.MeshBasicMaterial({ ...base, map: std.normalMap })
+        : new THREE.MeshBasicMaterial({ ...base, color: new THREE.Color(0x8080ff) });
+    case 'metalness':
+      return std?.metalnessMap
+        ? new THREE.MeshBasicMaterial({ ...base, map: std.metalnessMap })
+        : new THREE.MeshBasicMaterial({ ...base, color: gray(std?.metalness ?? 0) });
+    case 'roughness':
+      return std?.roughnessMap
+        ? new THREE.MeshBasicMaterial({ ...base, map: std.roughnessMap })
+        : new THREE.MeshBasicMaterial({ ...base, color: gray(std?.roughness ?? 1) });
+    case 'ao':
+      // Shown through the primary UV set; no occlusion map means "fully lit".
+      return std?.aoMap
+        ? new THREE.MeshBasicMaterial({ ...base, map: std.aoMap })
+        : new THREE.MeshBasicMaterial({ ...base, color: new THREE.Color(0xffffff) });
+    case 'emissive':
+      return std?.emissiveMap
+        ? new THREE.MeshBasicMaterial({
+            ...base,
+            map: std.emissiveMap,
+            color: std.emissive?.clone() ?? new THREE.Color(0xffffff),
+          })
+        : new THREE.MeshBasicMaterial({
+            ...base,
+            color: std?.emissive?.clone() ?? new THREE.Color(0x000000),
+          });
+  }
+}
 
 function forEachMaterial(
   m: THREE.Material | THREE.Material[],

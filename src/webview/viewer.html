@@ -55,6 +55,7 @@
               <input type="checkbox" id="toggleShowUV" />
               <span>Show UV map overlay</span>
             </label>
+            <button type="button" id="texIsolate" disabled>Isolate on model</button>
             <div id="textureSummary" class="tex-summary"></div>
           </div>
           <div id="textureView" class="tex-view">
@@ -103,12 +104,23 @@
           <label class="row">
             <span>Shading</span>
             <select id="shadingSelect">
-              <option value="solid">Solid</option>
-              <option value="material">Material</option>
-              <option value="rendered">Rendered</option>
-              <option value="wireframe">Wireframe</option>
-              <option value="points">Points</option>
-              <option value="normals">Normals</option>
+              <optgroup label="Shading">
+                <option value="solid">Solid</option>
+                <option value="material">Material</option>
+                <option value="rendered">Rendered</option>
+                <option value="wireframe">Wireframe</option>
+                <option value="points">Points</option>
+              </optgroup>
+              <!-- Debug views: one channel of the material, unlit, on the geometry. -->
+              <optgroup label="Inspect">
+                <option value="normals">Normals</option>
+                <option value="baseColor">Base Color</option>
+                <option value="normalMap">Normal Map</option>
+                <option value="metalness">Metalness</option>
+                <option value="roughness">Roughness</option>
+                <option value="ao">AO</option>
+                <option value="emissive">Emissive</option>
+              </optgroup>
             </select>
           </label>
           <div id="mapToggles" style="display:none">
@@ -227,6 +239,13 @@
         <div id="scaleBar" hidden><span id="scaleBarLabel"></span></div>
         <div id="measureLabel" hidden></div>
         <div id="poseHint" hidden></div>
+        <!-- Names the active special view (Inspect channel / skin weights), with a
+             one-click way back, so the shading strip never silently disagrees
+             with what is rendered. -->
+        <div id="viewStateChip" hidden>
+          <span id="viewStateChipLabel"></span>
+          <button type="button" id="viewStateChipClose" title="Back to normal shading">✕</button>
+        </div>
         <!-- Blender-style shading mode strip, to the left of the corner view gizmo. -->
         <div id="shadingHud">
           <button id="shadingCollapse" class="shading-btn shading-collapse" data-tip="Hide the shading controls">›</button>
