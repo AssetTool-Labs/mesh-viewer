@@ -9,7 +9,7 @@ import { ViewHelper } from 'three/examples/jsm/helpers/ViewHelper.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { SparkRenderer } from '@sparkjsdev/spark';
 import type { CameraState, OrbitDelta } from '../types';
-import type { LoadedAsset } from './loaders';
+import { setViewerRenderer, type LoadedAsset } from './loaders';
 import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
 export type { WeightMode } from './weightMaterial';
 
@@ -228,6 +228,8 @@ export class Viewer {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
+    // Share the renderer so the GLTF loader can init KTX2Loader.detectSupport().
+    setViewerRenderer(this.renderer);
 
     this.camera = new THREE.PerspectiveCamera(50, 1, 0.01, 5000);
     this.camera.position.set(3, 2.5, 5);
