@@ -18,6 +18,7 @@ import {
   type ShadingMode,
   type EnvironmentMode,
   type WeightMode,
+  type MapChannel,
   type MorphMeshInfo,
   type HudInfo,
 } from './viewer';
@@ -84,6 +85,16 @@ const animSpeed = $<HTMLInputElement>('animSpeed');
 const animSpeedLabel = $('animSpeedLabel');
 
 const shadingSelect = $<HTMLSelectElement>('shadingSelect');
+const mapToggles = $('mapToggles');
+const mapTogglesHeader = $<HTMLButtonElement>('mapTogglesHeader');
+const mapToggleInputs: { el: HTMLInputElement; channel: MapChannel }[] = [
+  { el: $<HTMLInputElement>('mapBaseColor'), channel: 'baseColor' },
+  { el: $<HTMLInputElement>('mapNormal'), channel: 'normal' },
+  { el: $<HTMLInputElement>('mapMetalness'), channel: 'metalness' },
+  { el: $<HTMLInputElement>('mapRoughness'), channel: 'roughness' },
+  { el: $<HTMLInputElement>('mapAo'), channel: 'ao' },
+  { el: $<HTMLInputElement>('mapEmissive'), channel: 'emissive' },
+];
 const toggleGrid = $<HTMLInputElement>('toggleGrid');
 const toggleAxes = $<HTMLInputElement>('toggleAxes');
 const toggleBounds = $<HTMLInputElement>('toggleBounds');
@@ -284,6 +295,13 @@ document.querySelectorAll<HTMLButtonElement>('.tab').forEach((tab) => {
 // .value/.checked directly, which does NOT dispatch 'change', so it never
 // echoes back to the host.
 shadingSelect.addEventListener('change', () => { viewer.setShading(shadingSelect.value as ShadingMode); syncShadingHud(); pushViewSettings(); });
+for (const { el, channel } of mapToggleInputs) {
+  el.addEventListener('change', () => viewer.setMapEnabled(channel, el.checked));
+}
+mapTogglesHeader.addEventListener('click', () => {
+  const collapsed = mapToggles.classList.toggle('collapsed');
+  mapTogglesHeader.setAttribute('aria-expanded', String(!collapsed));
+});
 toggleXray.addEventListener('change', () => { viewer.setXray(toggleXray.checked); syncShadingHud(); pushViewSettings(); });
 toggleFlatShading.addEventListener('change', () => { viewer.setFlatShading(toggleFlatShading.checked); syncShadingHud(); pushViewSettings(); });
 
@@ -325,6 +343,9 @@ function syncShadingHud(): void {
   }
   shadingXrayBtn.classList.toggle('active', toggleXray.checked);
   shadingFlatBtn.classList.toggle('active', toggleFlatShading.checked);
+  // Map toggles only affect the asset's materials, so show them only there.
+  const shaded = shadingSelect.value === 'material' || shadingSelect.value === 'rendered';
+  mapToggles.style.display = shaded ? '' : 'none';
 }
 syncShadingHud();
 
