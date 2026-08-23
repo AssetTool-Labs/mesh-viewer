@@ -87,6 +87,11 @@ const animSpeedLabel = $('animSpeedLabel');
 const shadingSelect = $<HTMLSelectElement>('shadingSelect');
 const mapToggles = $('mapToggles');
 const mapTogglesHeader = $<HTMLButtonElement>('mapTogglesHeader');
+const optTextureMaps = $('optTextureMaps');
+const optPointSize = $('optPointSize');
+const optWireColor = $('optWireColor');
+const pointSizeInput = $<HTMLInputElement>('pointSizeInput');
+const wireColorInput = $<HTMLInputElement>('wireColorInput');
 const mapToggleInputs: { el: HTMLInputElement; channel: MapChannel }[] = [
   { el: $<HTMLInputElement>('mapBaseColor'), channel: 'baseColor' },
   { el: $<HTMLInputElement>('mapNormal'), channel: 'normal' },
@@ -302,6 +307,8 @@ mapTogglesHeader.addEventListener('click', () => {
   const collapsed = mapToggles.classList.toggle('collapsed');
   mapTogglesHeader.setAttribute('aria-expanded', String(!collapsed));
 });
+pointSizeInput.addEventListener('input', () => viewer.setPointSize(Number(pointSizeInput.value)));
+wireColorInput.addEventListener('input', () => viewer.setWireframeColor(parseInt(wireColorInput.value.slice(1), 16)));
 toggleXray.addEventListener('change', () => { viewer.setXray(toggleXray.checked); syncShadingHud(); pushViewSettings(); });
 toggleFlatShading.addEventListener('change', () => { viewer.setFlatShading(toggleFlatShading.checked); syncShadingHud(); pushViewSettings(); });
 
@@ -343,9 +350,13 @@ function syncShadingHud(): void {
   }
   shadingXrayBtn.classList.toggle('active', toggleXray.checked);
   shadingFlatBtn.classList.toggle('active', toggleFlatShading.checked);
-  // Map toggles only affect the asset's materials, so show them only there.
-  const shaded = shadingSelect.value === 'material' || shadingSelect.value === 'rendered';
-  mapToggles.style.display = shaded ? '' : 'none';
+  // "Shading options" swaps its content by mode and hides when a mode has none.
+  const mode = shadingSelect.value;
+  const hasMaps = mode === 'material' || mode === 'rendered';
+  optTextureMaps.style.display = hasMaps ? '' : 'none';
+  optPointSize.style.display = mode === 'points' ? '' : 'none';
+  optWireColor.style.display = mode === 'wireframe' ? '' : 'none';
+  mapToggles.style.display = hasMaps || mode === 'points' || mode === 'wireframe' ? '' : 'none';
 }
 syncShadingHud();
 

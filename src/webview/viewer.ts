@@ -213,6 +213,12 @@ export class Viewer {
   private readonly disabledMaps = new Set<MapChannel>();
   /** Original texture slots nulled by the map toggles, keyed by material, for restore. */
   private readonly mapSaved = new Map<THREE.Material, Record<string, THREE.Texture | null>>();
+  /** Screen-space point size (px) for Points shading. */
+  private pointSize = 3;
+  /** Wireframe line color for Wireframe shading. */
+  private wireframeColor = 0xdddddd;
+  /** Transient THREE.Points rendered over meshes in Points shading mode. */
+  private readonly pointClouds = new Map<THREE.Mesh, THREE.Points>();
   private flatShadingOn = false;
   private xrayOn = false;
   /** Blend/depth state saved per material while x-ray is active. */
@@ -1410,6 +1416,18 @@ export class Viewer {
     this.applyAllShading();
   }
 
+  /** Screen-space size (px) of the dots in Points shading. */
+  setPointSize(px: number): void {
+    this.pointSize = px;
+    if (this.shadingMode === 'points') this.applyAllShading();
+  }
+
+  /** Line color for Wireframe shading. */
+  setWireframeColor(hex: number): void {
+    this.wireframeColor = hex;
+    if (this.shadingMode === 'wireframe') this.applyAllShading();
+  }
+
   /** Blender's Alt+Z: composes with the current shading mode. */
   setXray(v: boolean): void {
     if (this.xrayOn === v) return;
@@ -1428,6 +1446,7 @@ export class Viewer {
   private applyAllShading(): void {
     this.restoreXray();
     this.restoreMaps();
+    this.clearPointClouds();
     this.contentRoot.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh && !(o as THREE.Points).isPoints) return;
@@ -1471,6 +1490,16 @@ export class Viewer {
       m.needsUpdate = true;
     }
     this.mapSaved.clear();
+  }
+
+  /** Remove the transient point clouds from Points mode. Their geometry is
+   *  shared with the source mesh, so only the material is disposed. */
+  private clearPointClouds(): void {
+    for (const cloud of this.pointClouds.values()) {
+      cloud.removeFromParent();
+      (cloud.material as THREE.Material).dispose();
+    }
+    this.pointClouds.clear();
   }
 
   private applyXray(): void {
@@ -1575,10 +1604,11 @@ export class Viewer {
         }
         break;
       case 'wireframe':
-        restore();
-        forEachMaterial((mesh as THREE.Mesh).material, (m) => {
-          if ('wireframe' in m) (m as THREE.MeshBasicMaterial).wireframe = true;
-        });
+        if (isMesh) {
+          mesh.material = new THREE.MeshBasicMaterial({ wireframe: true, color: this.wireframeColor });
+        } else {
+          restore();
+        }
         break;
       case 'normals':
         if (isMesh) {
@@ -1602,8 +1632,15 @@ export class Viewer {
         break;
       case 'points':
         if (isMesh) {
-          const pts = new THREE.PointsMaterial({ size: 0.005, color: 0xffffff, sizeAttenuation: true });
-          (mesh as THREE.Mesh).material = pts;
+          // A Mesh always draws triangles, so hide its surface and render the
+          // vertices as a real THREE.Points child (screen-space sized).
+          mesh.material = new THREE.MeshBasicMaterial({ visible: false });
+          const cloud = new THREE.Points(
+            mesh.geometry,
+            new THREE.PointsMaterial({ size: this.pointSize, sizeAttenuation: false, color: 0xffffff }),
+          );
+          mesh.add(cloud);
+          this.pointClouds.set(mesh, cloud);
         } else if (isPoints) {
           restore();
         }
