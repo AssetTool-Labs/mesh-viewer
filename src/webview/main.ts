@@ -2418,9 +2418,16 @@ function drawUVOverlay(
 
   const idx = geom.getIndex();
   const stroke = (a: number, b: number, c: number): void => {
-    const ax = ux(uvAttr.getX(a)), ay = uy(uvAttr.getY(a));
-    const bx = ux(uvAttr.getX(b)), by = uy(uvAttr.getY(b));
-    const cx = ux(uvAttr.getX(c)), cy = uy(uvAttr.getY(c));
+    // UVs may live outside [0, 1] and rely on wrapping at sample time (e.g.
+    // DamagedHelmet's V spans [1, 2]). Translate the whole triangle by the
+    // integer part of its first vertex so it lands on the visible tile;
+    // shifting per-triangle (not per-vertex) keeps seam-crossing triangles
+    // intact.
+    const du = Math.floor(uvAttr.getX(a));
+    const dv = Math.floor(uvAttr.getY(a));
+    const ax = ux(uvAttr.getX(a) - du), ay = uy(uvAttr.getY(a) - dv);
+    const bx = ux(uvAttr.getX(b) - du), by = uy(uvAttr.getY(b) - dv);
+    const cx = ux(uvAttr.getX(c) - du), cy = uy(uvAttr.getY(c) - dv);
     ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
     ctx.lineTo(cx, cy); ctx.lineTo(ax, ay);
   };
