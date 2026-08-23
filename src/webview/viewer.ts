@@ -14,6 +14,9 @@ import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, ty
 export type { WeightMode } from './weightMaterial';
 
 export type ShadingMode = 'solid' | 'material' | 'rendered' | 'wireframe' | 'points' | 'normals';
+
+/** PBR texture maps that can be toggled on/off in Material/Rendered shading. */
+export type MapChannel = 'baseColor' | 'normal' | 'metalness' | 'roughness' | 'ao' | 'emissive';
 export type EnvironmentMode = 'studio' | 'neutral' | 'none';
 
 /** Orbit camera pose in spherical terms about the target (offset-mode linking). */
@@ -206,6 +209,10 @@ export class Viewer {
 
   private originalMaterials = new WeakMap<THREE.Object3D, MaterialBackup>();
   private shadingMode: ShadingMode = 'material';
+  /** Maps the user has switched off in Material/Rendered shading. */
+  private readonly disabledMaps = new Set<MapChannel>();
+  /** Original texture slots nulled by the map toggles, keyed by material, for restore. */
+  private readonly mapSaved = new Map<THREE.Material, Record<string, THREE.Texture | null>>();
   private flatShadingOn = false;
   private xrayOn = false;
   /** Blend/depth state saved per material while x-ray is active. */
@@ -1395,6 +1402,14 @@ export class Viewer {
     this.applyAllShading();
   }
 
+  /** Toggle a texture map's contribution in Material/Rendered shading. Those
+   *  are the only modes that render the asset's maps, so it's a no-op elsewhere. */
+  setMapEnabled(channel: MapChannel, enabled: boolean): void {
+    if (enabled) this.disabledMaps.delete(channel);
+    else this.disabledMaps.add(channel);
+    this.applyAllShading();
+  }
+
   /** Blender's Alt+Z: composes with the current shading mode. */
   setXray(v: boolean): void {
     if (this.xrayOn === v) return;
@@ -1409,15 +1424,53 @@ export class Viewer {
     this.applyAllShading();
   }
 
-  /** Re-run the active mode plus the x-ray/flat toggles over all content. */
+  /** Re-run the active mode plus the x-ray/flat/map toggles over all content. */
   private applyAllShading(): void {
     this.restoreXray();
+    this.restoreMaps();
     this.contentRoot.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh && !(o as THREE.Points).isPoints) return;
       this.applyShadingToObject(o);
     });
+    // Map toggles only touch the asset's own materials (Material/Rendered modes).
+    if (this.shadingMode === 'material' || this.shadingMode === 'rendered') this.applyMapToggles();
     if (this.xrayOn) this.applyXray();
+  }
+
+  /** Null the disabled maps on each material, saving originals for restoreMaps. */
+  private applyMapToggles(): void {
+    if (this.disabledMaps.size === 0) return;
+    this.contentRoot.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      if (this.weightMode !== 'off' && (mesh as THREE.SkinnedMesh).isSkinnedMesh) return;
+      if (!this.originalMaterials.has(o)) return;
+      forEachMaterial(mesh.material, (m) => {
+        const maps = m as unknown as Record<string, THREE.Texture | null>;
+        let changed = false;
+        for (const ch of this.disabledMaps) {
+          const slot = MAP_SLOTS[ch];
+          if (!maps[slot]) continue;
+          let saved = this.mapSaved.get(m);
+          if (!saved) { saved = {}; this.mapSaved.set(m, saved); }
+          if (!(slot in saved)) saved[slot] = maps[slot];
+          maps[slot] = null;
+          changed = true;
+        }
+        if (changed) m.needsUpdate = true;
+      });
+    });
+  }
+
+  /** Put back every map slot nulled by applyMapToggles. */
+  private restoreMaps(): void {
+    for (const [m, saved] of this.mapSaved) {
+      const maps = m as unknown as Record<string, THREE.Texture | null>;
+      for (const slot in saved) maps[slot] = saved[slot];
+      m.needsUpdate = true;
+    }
+    this.mapSaved.clear();
   }
 
   private applyXray(): void {
@@ -1974,6 +2027,16 @@ export interface HudInfo {
   geometries: number;
   textures: number;
 }
+
+/** PBR channel → MeshStandardMaterial texture slot, for the map toggles. */
+const MAP_SLOTS: Record<MapChannel, string> = {
+  baseColor: 'map',
+  normal: 'normalMap',
+  metalness: 'metalnessMap',
+  roughness: 'roughnessMap',
+  ao: 'aoMap',
+  emissive: 'emissiveMap',
+};
 
 function forEachMaterial(
   m: THREE.Material | THREE.Material[],

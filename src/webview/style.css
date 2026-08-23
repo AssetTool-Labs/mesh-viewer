@@ -149,6 +149,48 @@ html, body {
   font-weight: 600;
 }
 
+/* Sentence-case group heading for the View tab (matches the row labels, not the
+   uppercase .section-title used in Info). The .fold variant is a click target. */
+.group-title {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+  margin: 10px 0 4px;
+}
+button.group-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  /* Match .group-title exactly; `font: inherit` would pull the larger panel size. */
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+}
+button.group-title:hover { color: var(--fg); }
+.group-title .fold-caret {
+  display: inline-block;
+  width: 9px;
+  font-size: 9px;
+  transition: transform 0.12s ease;
+}
+/* Indent the group's body so it nests under the "Shading options" header. */
+#mapTogglesBody { padding-left: 15px; }
+/* Caption for a sub-group inside "Shading options" (e.g. the map toggles). */
+.sub-label {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 2px 0 3px;
+}
+#mapToggles.collapsed #mapTogglesBody { display: none; }
+#mapToggles.collapsed .fold-caret { transform: rotate(-90deg); }
+
 .kv-list {
   display: grid;
   grid-template-columns: max-content 1fr;
