@@ -2406,11 +2406,8 @@ function drawUVOverlay(
   // up at the BOTTOM-LEFT of the displayed image. With flipY=false (GLTF), UV
   // (0, 0) is at TOP-LEFT.
   const flipped = tex.flipY !== false;
-  // Textures repeat, and some meshes place UVs in a non-zero tile (e.g. V in
-  // [1,2]); wrap into [0,1) so the layout lands on the previewed tile.
-  const fract = (x: number) => x - Math.floor(x);
-  const ux = (u: number) => fract(u) * w;
-  const uy = (v: number) => { const fv = fract(v); return flipped ? (1 - fv) * h : fv * h; };
+  const ux = (u: number) => u * w;
+  const uy = (v: number) => (flipped ? (1 - v) * h : v * h);
 
   ctx.strokeStyle = 'rgba(76, 195, 247, 0.85)';
   ctx.lineWidth = 0.6;
@@ -2418,9 +2415,16 @@ function drawUVOverlay(
 
   const idx = geom.getIndex();
   const stroke = (a: number, b: number, c: number): void => {
-    const ax = ux(uvAttr.getX(a)), ay = uy(uvAttr.getY(a));
-    const bx = ux(uvAttr.getX(b)), by = uy(uvAttr.getY(b));
-    const cx = ux(uvAttr.getX(c)), cy = uy(uvAttr.getY(c));
+    // UVs may live outside [0, 1] and rely on wrapping at sample time (e.g.
+    // DamagedHelmet's V spans [1, 2]). Translate the whole triangle by the
+    // integer part of its first vertex so it lands on the visible tile;
+    // shifting per-triangle (not per-vertex) keeps seam-crossing triangles
+    // intact.
+    const du = Math.floor(uvAttr.getX(a));
+    const dv = Math.floor(uvAttr.getY(a));
+    const ax = ux(uvAttr.getX(a) - du), ay = uy(uvAttr.getY(a) - dv);
+    const bx = ux(uvAttr.getX(b) - du), by = uy(uvAttr.getY(b) - dv);
+    const cx = ux(uvAttr.getX(c) - du), cy = uy(uvAttr.getY(c) - dv);
     ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
     ctx.lineTo(cx, cy); ctx.lineTo(ax, ay);
   };
