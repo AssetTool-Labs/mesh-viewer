@@ -104,23 +104,12 @@
           <label class="row">
             <span>Shading</span>
             <select id="shadingSelect">
-              <optgroup label="Shading">
-                <option value="solid">Solid</option>
-                <option value="material">Material</option>
-                <option value="rendered">Rendered</option>
-                <option value="wireframe">Wireframe</option>
-                <option value="points">Points</option>
-              </optgroup>
-              <!-- Debug views: one channel of the material, unlit, on the geometry. -->
-              <optgroup label="Inspect">
-                <option value="normals">Normals</option>
-                <option value="baseColor">Base Color</option>
-                <option value="normalMap">Normal Map</option>
-                <option value="metalness">Metalness</option>
-                <option value="roughness">Roughness</option>
-                <option value="ao">AO</option>
-                <option value="emissive">Emissive</option>
-              </optgroup>
+              <option value="solid">Solid</option>
+              <option value="material">Material</option>
+              <option value="rendered">Rendered</option>
+              <option value="wireframe">Wireframe</option>
+              <option value="points">Points</option>
+              <option value="normals">Normals</option>
             </select>
           </label>
           <div id="mapToggles" style="display:none">
@@ -244,7 +233,7 @@
              with what is rendered. -->
         <div id="viewStateChip" hidden>
           <span id="viewStateChipLabel"></span>
-          <button type="button" id="viewStateChipClose" title="Back to normal shading">✕</button>
+          <button type="button" id="viewStateChipClose" title="Exit this view">✕</button>
         </div>
         <!-- Blender-style shading mode strip, to the left of the corner view gizmo. -->
         <div id="shadingHud">

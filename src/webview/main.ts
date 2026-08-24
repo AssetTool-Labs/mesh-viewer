@@ -20,11 +20,11 @@ import {
   type WeightMode,
   type MapChannel,
   type InspectMode,
-  isInspectMode,
   INSPECT_LABELS,
   type MorphMeshInfo,
   type HudInfo,
 } from './viewer';
+import { UVView, type UVBacking } from './uvView';
 import { TimelinePanel, type TimelineClip } from './timeline';
 
 declare function acquireVsCodeApi(): {
@@ -302,10 +302,9 @@ interface TextureEntry {
 }
 let textureEntries: TextureEntry[] = [];
 let activeTextureIdx = 0;
-/** Live references to the canvases of the currently-mounted card, so the UV
- *  toggle / selection change can repaint without rebuilding the whole card. */
-let activeImgCanvas: HTMLCanvasElement | null = null;
-let activeUVCanvas: HTMLCanvasElement | null = null;
+/** One pan/zoom UV viewport, re-parented into whichever texture card is
+ *  mounted, so zoom state survives texture switches and panel rebuilds. */
+const uvView = new UVView();
 let showUV = false;
 
 // ---- Tabs ----
@@ -326,12 +325,10 @@ document.querySelectorAll<HTMLButtonElement>('.tab').forEach((tab) => {
 // pushViewSettings). Programmatic sync in applyViewSettings assigns
 // .value/.checked directly, which does NOT dispatch 'change', so it never
 // echoes back to the host.
-/** Last non-Inspect shading choice, so the status chip's ✕ can return to it. */
-let lastShadedMode: ShadingMode = 'material';
 shadingSelect.addEventListener('change', () => {
-  const mode = shadingSelect.value as ShadingMode;
-  if (!isInspectMode(mode)) lastShadedMode = mode;
-  viewer.setShading(mode);
+  // Picking any shading mode (dropdown or HUD strip) ends an Inspect view.
+  setInspect(null);
+  viewer.setShading(shadingSelect.value as ShadingMode);
   syncShadingHud();
   pushViewSettings();
 });
@@ -390,31 +387,41 @@ function syncShadingHud(): void {
 }
 syncShadingHud();
 
+/** Session-local Inspect channel shown on the model (entered from the
+ *  Textures tab). Like the skin-weight display it overrides the shading
+ *  dropdown without touching it, so the chip below is what makes it visible. */
+let inspectMode: InspectMode | null = null;
+function setInspect(mode: InspectMode | null): void {
+  if (inspectMode === mode) return;
+  inspectMode = mode;
+  viewer.setInspectMode(mode);
+  updateViewStateChip();
+  syncTexIsolateButton();
+}
+
 /** Viewport chip naming the active special view — skin weights or an Inspect
- *  channel — so the shading strip never silently disagrees with what is drawn
- *  (Inspect modes have no strip button, and weights override the dropdown on
- *  skinned meshes). Weights win when both are on, matching the precedence in
+ *  channel — so the shading controls never silently disagree with what is
+ *  drawn. Weights win when both are on, matching the precedence in
  *  Viewer.applyShadingToObject. */
 function updateViewStateChip(): void {
   let text = '';
   if (toggleWeights.checked) {
     const label = weightModeSelect.selectedOptions[0]?.textContent ?? weightModeSelect.value;
     text = `Skin weights: ${label}`;
-  } else if (isInspectMode(shadingSelect.value)) {
-    text = `Inspect: ${INSPECT_LABELS[shadingSelect.value]}`;
+  } else if (inspectMode) {
+    text = `Inspect: ${INSPECT_LABELS[inspectMode]}`;
   }
   viewStateChip.hidden = text === '';
   viewStateChipLabel.textContent = text;
 }
-// The ✕ routes through the sidebar controls, like the HUD buttons, so exiting
-// stays single-sourced with the dropdown/checkbox handlers.
+// Weights exit through their checkbox (single-sourced with its handler);
+// Inspect has no sidebar control of its own, so the chip clears it directly.
 viewStateChipClose.addEventListener('click', () => {
   if (toggleWeights.checked) {
     toggleWeights.checked = false;
     toggleWeights.dispatchEvent(new Event('change'));
   } else {
-    shadingSelect.value = lastShadedMode;
-    shadingSelect.dispatchEvent(new Event('change'));
+    setInspect(null);
   }
 });
 
@@ -1303,10 +1310,7 @@ function applyViewSettings(settings: InitViewSettings): void {
   // Settings remembered by pre-HUD versions used 'smooth'/'flat' as shading
   // modes; both map onto 'material', with 'flat' setting the new flat toggle.
   const legacy = settings.shading as string;
-  // Unknown values (e.g. a mode this build does not have) fall back to
-  // 'material' instead of leaving the dropdown blank.
-  const known = Array.from(shadingSelect.options).some((o) => o.value === legacy);
-  const shading = (legacy === 'smooth' || legacy === 'flat' || !known ? 'material' : legacy) as ShadingMode;
+  const shading = (legacy === 'smooth' || legacy === 'flat' ? 'material' : legacy) as ShadingMode;
   const flatShading = settings.flatShading ?? legacy === 'flat';
   const xray = settings.xray ?? false;
 
@@ -1333,7 +1337,6 @@ function applyViewSettings(settings: InitViewSettings): void {
   toggleSkeleton.checked = settings.showSkeleton;
   toggleWireframeOverlay.checked = settings.showWireframeOverlay;
   shadingSelect.value = shading;
-  if (!isInspectMode(shading)) lastShadedMode = shading;
   toggleXray.checked = xray;
   toggleFlatShading.checked = flatShading;
   syncShadingHud();
@@ -2131,8 +2134,6 @@ function populateTextures(): void {
   const prevKey = textureEntries[activeTextureIdx]?.key;
 
   textureEntries = [];
-  activeImgCanvas = null;
-  activeUVCanvas = null;
   textureView.innerHTML = '';
   textureSelect.innerHTML = '';
 
@@ -2216,8 +2217,6 @@ function populateTextures(): void {
 /** Build and mount the card for `textureEntries[activeTextureIdx]`. */
 function renderActiveTexture(): void {
   textureView.innerHTML = '';
-  activeImgCanvas = null;
-  activeUVCanvas = null;
   const entry = textureEntries[activeTextureIdx];
   if (!entry) return;
 
@@ -2235,36 +2234,40 @@ function renderActiveTexture(): void {
   roleBadge.className = 'tex-card-role';
   const uniqueRoles = Array.from(new Set(entry.usages.map((u) => TEXTURE_ROLE_LABELS[u.slot] ?? u.slot)));
   roleBadge.textContent = uniqueRoles.join(' · ');
-  head.append(name, roleBadge);
+  const expandBtn = document.createElement('button');
+  expandBtn.type = 'button';
+  expandBtn.className = 'tex-card-expand';
+  expandBtn.textContent = '⤢';
+  expandBtn.title = 'Enlarge';
+  head.append(name, roleBadge, expandBtn);
   card.appendChild(head);
 
   const preview = document.createElement('div');
   preview.className = 'tex-card-preview';
 
-  const imgCanvas = document.createElement('canvas');
-  imgCanvas.className = 'tex-img';
-  const ok = drawTextureToCanvas(entry.texture, imgCanvas);
-  if (!ok) {
+  const backing = buildTextureBacking(entry.texture);
+  if (!backing) {
     preview.classList.add('empty');
     preview.textContent = previewPlaceholderLabel(entry.texture);
+    expandBtn.disabled = true;
   } else {
-    const stack = document.createElement('div');
-    stack.className = 'tex-canvas-stack';
-    const uvCanvas = document.createElement('canvas');
-    uvCanvas.className = 'tex-uv';
-    // Critical for alignment: both canvases share the *same* internal buffer
-    // size. CSS scales them identically via object-fit: contain, so UV strokes
-    // drawn in the canvas's own pixel coords end up on top of the right
-    // texels at any rendered display size.
-    uvCanvas.width = imgCanvas.width;
-    uvCanvas.height = imgCanvas.height;
-    stack.append(imgCanvas, uvCanvas);
-    preview.appendChild(stack);
-    stack.addEventListener('click', () =>
-      openTextureModal(imgCanvas, uvCanvas, roleBadge.textContent ? `${nameText} · ${roleBadge.textContent}` : nameText),
-    );
-    activeImgCanvas = imgCanvas;
-    activeUVCanvas = uvCanvas;
+    uvView.setTexture(backing, entry.texture.flipY !== false, entry.key);
+    preview.appendChild(uvView.root);
+    // The modal keeps its own fixed-size render (image + composited overlay);
+    // it is a snapshot for close reading, not a second zoomable view.
+    expandBtn.addEventListener('click', () => {
+      const img = document.createElement('canvas');
+      if (!drawTextureToCanvas(entry.texture, img)) return;
+      let uv: HTMLCanvasElement | null = null;
+      const usage = showUV ? pickUsageForUV(entry) : null;
+      if (usage) {
+        uv = document.createElement('canvas');
+        uv.width = img.width;
+        uv.height = img.height;
+        drawUVOverlay(usage.mesh.geometry as THREE.BufferGeometry, entry.texture, uv);
+      }
+      openTextureModal(img, uv, roleBadge.textContent ? `${nameText} · ${roleBadge.textContent}` : nameText);
+    });
   }
   card.appendChild(preview);
 
@@ -2287,7 +2290,7 @@ function renderActiveTexture(): void {
 
   textureView.appendChild(card);
 
-  syncTexIsolateButton(entry);
+  syncTexIsolateButton();
   refreshUVOverlay();
 }
 
@@ -2309,22 +2312,27 @@ function inspectModeForEntry(entry: TextureEntry): InspectMode | null {
   return null;
 }
 
-function syncTexIsolateButton(entry: TextureEntry): void {
-  const mode = inspectModeForEntry(entry);
+/** Enable the button for textures in a standard PBR slot, and flip its label
+ *  when the model is already isolating this texture's channel. */
+function syncTexIsolateButton(): void {
+  const entry = textureEntries[activeTextureIdx];
+  const mode = entry ? inspectModeForEntry(entry) : null;
+  const active = mode !== null && mode === inspectMode;
   texIsolateBtn.disabled = !mode;
+  texIsolateBtn.textContent = active ? 'Stop isolating' : 'Isolate on model';
+  texIsolateBtn.classList.toggle('active', active);
   texIsolateBtn.title = mode
-    ? `Show the ${INSPECT_LABELS[mode]} channel unlit on the model (Shading → Inspect)`
+    ? active
+      ? 'Return the model to its normal shading'
+      : `Show the ${INSPECT_LABELS[mode]} channel unlit on the model`
     : 'Only the standard PBR slots (base color, normal, metalness, roughness, AO, emissive) can be isolated';
 }
 
-// Jumps to the matching Inspect mode through the dropdown so the HUD, chip,
-// and remembered view settings all follow the one change handler.
 texIsolateBtn.addEventListener('click', () => {
   const entry = textureEntries[activeTextureIdx];
   const mode = entry ? inspectModeForEntry(entry) : null;
   if (!mode) return;
-  shadingSelect.value = mode;
-  shadingSelect.dispatchEvent(new Event('change'));
+  setInspect(mode === inspectMode ? null : mode);
 });
 
 function displayTextureName(tex: THREE.Texture, usages: TextureUsage[]): string {
@@ -2389,8 +2397,28 @@ function filterName(f: THREE.TextureFilter | THREE.MagnificationTextureFilter | 
   }
 }
 
+/** GPU read-back cap for the zoomable view. CPU-drawable images are handed
+ *  over at native size with no copy; compressed/GPU-only ones are read back
+ *  once, and 2048² keeps that under a few hundred ms and ~16 MB. */
+const UV_BACKING_MAX_GPU = 2048;
+
+/** Source image for the zoomable UV view: the texture's own image when the
+ *  canvas can draw it directly, else a one-off GPU read-back. */
+function buildTextureBacking(tex: THREE.Texture): UVBacking | null {
+  const img = tex.image;
+  const dims = imageDims(img);
+  const drawable =
+    img instanceof HTMLImageElement ||
+    img instanceof HTMLCanvasElement ||
+    (typeof ImageBitmap !== 'undefined' && img instanceof ImageBitmap);
+  if (dims && drawable) return { source: img as CanvasImageSource, width: dims.w, height: dims.h };
+  const rendered = viewer.renderTextureToCanvas(tex, UV_BACKING_MAX_GPU);
+  return rendered ? { source: rendered, width: rendered.width, height: rendered.height } : null;
+}
+
 /** Fill the canvas with the texture's image, trying a CPU drawImage first and
- *  falling back to a GPU read-back for compressed (KTX2) / GPU-only textures. */
+ *  falling back to a GPU read-back for compressed (KTX2) / GPU-only textures.
+ *  Used by the enlarge modal; the card itself draws through UVView. */
 function drawTextureToCanvas(tex: THREE.Texture, canvas: HTMLCanvasElement): boolean {
   if (drawTextureCPU(tex, canvas)) return true;
   const rendered = viewer.renderTextureToCanvas(tex, TEXTURE_CANVAS_MAX);
@@ -2443,22 +2471,12 @@ function drawTextureCPU(tex: THREE.Texture, canvas: HTMLCanvasElement): boolean 
   }
 }
 
-/** Re-draw the UV overlay on the currently-mounted card. */
+/** Point the zoomable view at the UVs of the mesh that should be overlaid
+ *  (or at nothing when the overlay is off). */
 function refreshUVOverlay(): void {
-  if (!activeUVCanvas) return;
-  const ctx = activeUVCanvas.getContext('2d');
-  if (!ctx) return;
-  ctx.clearRect(0, 0, activeUVCanvas.width, activeUVCanvas.height);
-  if (!showUV) {
-    activeUVCanvas.classList.add('hidden');
-    return;
-  }
-  activeUVCanvas.classList.remove('hidden');
   const entry = textureEntries[activeTextureIdx];
-  if (!entry) return;
-  const usage = pickUsageForUV(entry);
-  if (!usage) return;
-  drawUVOverlay(usage.mesh.geometry as THREE.BufferGeometry, entry.texture, activeUVCanvas);
+  const usage = entry && showUV ? pickUsageForUV(entry) : null;
+  uvView.setWireframe(usage ? (usage.mesh.geometry as THREE.BufferGeometry) : null);
 }
 
 /**
@@ -2477,6 +2495,8 @@ function pickUsageForUV(entry: TextureEntry): TextureUsage | null {
   return entry.usages[0] ?? null;
 }
 
+/** Fixed-buffer UV overlay for the enlarge modal (the card's live overlay is
+ *  drawn by UVView with the same UV → texel rules). */
 function drawUVOverlay(
   geom: THREE.BufferGeometry,
   tex: THREE.Texture,

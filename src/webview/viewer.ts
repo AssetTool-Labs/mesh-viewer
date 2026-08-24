@@ -13,13 +13,13 @@ import { setViewerRenderer, type LoadedAsset } from './loaders';
 import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
 export type { WeightMode } from './weightMaterial';
 
-/** Inspect modes show one PBR channel unlit on the geometry: the slot's
- *  texture, or the material's scalar factor as a flat color when it has no
- *  map. They live in the Shading dropdown next to the normals debug mode. */
+export type ShadingMode = 'solid' | 'material' | 'rendered' | 'wireframe' | 'points' | 'normals';
+
+/** Inspect shows one PBR channel unlit on the geometry: the slot's texture,
+ *  or the material's scalar factor as a flat color when it has no map. It is
+ *  entered from the Textures tab and, like the skin-weight display, is a
+ *  session-local overlay on top of the shading dropdown. */
 export type InspectMode = 'baseColor' | 'normalMap' | 'metalness' | 'roughness' | 'ao' | 'emissive';
-export type ShadingMode =
-  | 'solid' | 'material' | 'rendered' | 'wireframe' | 'points' | 'normals'
-  | InspectMode;
 
 export const INSPECT_LABELS: Record<InspectMode, string> = {
   baseColor: 'Base Color',
@@ -29,9 +29,6 @@ export const INSPECT_LABELS: Record<InspectMode, string> = {
   ao: 'AO',
   emissive: 'Emissive',
 };
-export function isInspectMode(mode: string): mode is InspectMode {
-  return Object.prototype.hasOwnProperty.call(INSPECT_LABELS, mode);
-}
 
 /** PBR texture maps that can be toggled on/off in Material/Rendered shading. */
 export type MapChannel = 'baseColor' | 'normal' | 'metalness' | 'roughness' | 'ao' | 'emissive';
@@ -227,6 +224,8 @@ export class Viewer {
 
   private originalMaterials = new WeakMap<THREE.Object3D, MaterialBackup>();
   private shadingMode: ShadingMode = 'material';
+  /** Active Inspect channel; overrides the shading mode on meshes until null. */
+  private inspectMode: InspectMode | null = null;
   /** Maps the user has switched off in Material/Rendered shading. */
   private readonly disabledMaps = new Set<MapChannel>();
   /** Original texture slots nulled by the map toggles, keyed by material, for restore. */
@@ -1489,6 +1488,13 @@ export class Viewer {
     this.scene.environment = tex;
   }
 
+  /** Isolate one PBR channel unlit on every mesh (null = back to shading). */
+  setInspectMode(mode: InspectMode | null): void {
+    if (this.inspectMode === mode) return;
+    this.inspectMode = mode;
+    this.applyAllShading();
+  }
+
   setShading(mode: ShadingMode): void {
     if (this.shadingMode === mode) return;
     this.shadingMode = mode;
@@ -1527,8 +1533,11 @@ export class Viewer {
       if (!mesh.isMesh && !(o as THREE.Points).isPoints) return;
       this.applyShadingToObject(o);
     });
-    // Map toggles only touch the asset's own materials (Material/Rendered modes).
-    if (this.shadingMode === 'material' || this.shadingMode === 'rendered') this.applyMapToggles();
+    // Map toggles only touch the asset's own materials (Material/Rendered modes);
+    // while inspecting, meshes carry channel materials instead, so skip them.
+    if (!this.inspectMode && (this.shadingMode === 'material' || this.shadingMode === 'rendered')) {
+      this.applyMapToggles();
+    }
     if (this.xrayOn) this.applyXray();
   }
 
@@ -1628,6 +1637,13 @@ export class Viewer {
     // The previous mode may have left a generated material behind.
     this.disposeTransientMaterial(o);
 
+    // Inspect overrides the dropdown on meshes; applyAllShading has already
+    // restored any nulled map slots, so the channel material sees real maps.
+    if (this.inspectMode && isMesh) {
+      (mesh as THREE.Mesh).material = buildChannelMaterial(backup.material, this.inspectMode);
+      return;
+    }
+
     const restore = (): void => {
       (mesh as THREE.Mesh).material = backup.material;
       forEachMaterial(backup.material, (m) => {
@@ -1699,20 +1715,6 @@ export class Viewer {
           const pts = new THREE.PointsMaterial({ size: 0.005, color: 0xffffff, sizeAttenuation: true });
           (mesh as THREE.Mesh).material = pts;
         } else if (isPoints) {
-          restore();
-        }
-        break;
-      case 'baseColor':
-      case 'normalMap':
-      case 'metalness':
-      case 'roughness':
-      case 'ao':
-      case 'emissive':
-        // Map toggles never leak in here: applyAllShading restores every
-        // nulled slot before re-applying, so Inspect always sees the real maps.
-        if (isMesh) {
-          (mesh as THREE.Mesh).material = buildChannelMaterial(backup.material, mode);
-        } else {
           restore();
         }
         break;

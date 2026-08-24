@@ -7,10 +7,7 @@ export interface ViewerConfig {
   /** Corner orientation gizmo (ViewHelper) — on by default. */
   showViewGizmo: boolean;
   autoRotate: boolean;
-  shading:
-    | 'solid' | 'material' | 'rendered' | 'wireframe' | 'points' | 'normals'
-    // Inspect modes: one PBR channel shown unlit on the geometry.
-    | 'baseColor' | 'normalMap' | 'metalness' | 'roughness' | 'ao' | 'emissive';
+  shading: 'solid' | 'material' | 'rendered' | 'wireframe' | 'points' | 'normals';
   environment: 'studio' | 'neutral' | 'none';
   upAxis: 'y' | 'z';
 }

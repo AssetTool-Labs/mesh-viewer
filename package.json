@@ -190,13 +190,7 @@
             "rendered",
             "wireframe",
             "points",
-            "normals",
-            "baseColor",
-            "normalMap",
-            "metalness",
-            "roughness",
-            "ao",
-            "emissive"
+            "normals"
           ],
           "enumDescriptions": [
             "Neutral gray override material (shows vertex colors when present).",
@@ -204,13 +198,7 @@
             "The asset's materials under the configured environment.",
             "Wireframe edges only.",
             "Vertices as points (debug).",
-            "Vertex normals as colors (debug).",
-            "Inspect: base color map (or factor), unlit.",
-            "Inspect: normal map, unlit.",
-            "Inspect: metalness map (or factor), unlit.",
-            "Inspect: roughness map (or factor), unlit.",
-            "Inspect: ambient-occlusion map, unlit.",
-            "Inspect: emissive map (or color), unlit."
+            "Vertex normals as colors (debug)."
           ],
           "default": "material",
           "description": "Default shading mode. Legacy values \"smooth\"/\"flat\" map to \"material\" (with flat shading for \"flat\")."
