@@ -178,11 +178,36 @@ function gltfUsesKtx2(ext: string, data: ArrayBuffer | string): boolean {
   }
 }
 
+function validateGltfScene(ext: string, data: ArrayBuffer | string): void {
+  let document: { scene?: unknown; scenes?: unknown };
+  try {
+    let json: string;
+    if (ext === 'glb') {
+      const view = new DataView(data as ArrayBuffer);
+      const jsonLen = view.getUint32(12, true);
+      json = new TextDecoder().decode(new Uint8Array(data as ArrayBuffer, 20, jsonLen));
+    } else {
+      json = data as string;
+    }
+    document = JSON.parse(json) as { scene?: unknown; scenes?: unknown };
+  } catch {
+    return;
+  }
+
+  const scene = document.scene;
+  if (scene === undefined) return;
+  const sceneIndex = Number.isInteger(scene) ? scene as number : -1;
+  if (!Array.isArray(document.scenes) || sceneIndex < 0 || sceneIndex >= document.scenes.length) {
+    throw new Error(`glTF declares default scene ${String(scene)} but does not define it.`);
+  }
+}
+
 async function loadGLTF(
   ext: string,
   data: ArrayBuffer | string,
   auxFileUris: Record<string, string>,
 ): Promise<LoadedAsset> {
+  validateGltfScene(ext, data);
   const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
   const aux = makeManagerForAux(auxFileUris);
   const loader = new GLTFLoader(aux.manager);
