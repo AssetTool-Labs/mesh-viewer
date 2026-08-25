@@ -394,6 +394,18 @@ async function loadSTL(buf: ArrayBuffer, fileName: string): Promise<LoadedAsset>
   const { STLLoader } = await import('three/examples/jsm/loaders/STLLoader.js');
   const loader = new STLLoader();
   const geometry = loader.parse(buf);
+  const normals = geometry.getAttribute('normal');
+  let hasUsableNormal = false;
+  if (normals) {
+    for (let i = 0; i < normals.count; i++) {
+      const lengthSq = normals.getX(i) ** 2 + normals.getY(i) ** 2 + normals.getZ(i) ** 2;
+      if (Number.isFinite(lengthSq) && lengthSq > 1e-12) {
+        hasUsableNormal = true;
+        break;
+      }
+    }
+  }
+  if (!hasUsableNormal) geometry.computeVertexNormals();
   const material = new THREE.MeshStandardMaterial({
     color: 0xb5b5b5,
     roughness: 0.7,
