@@ -275,6 +275,34 @@ function validateGltfScene(ext: string, data: ArrayBuffer | string): void {
   }
 }
 
+/**
+ * Apply KHR_node_visibility, which three's GLTFLoader does not implement — nodes
+ * an asset marks hidden would otherwise render.
+ *
+ * The flag is read back out of `userData.gltfExtensions`, where GLTFLoader parks
+ * node extensions it doesn't recognise, rather than out of the source JSON. That
+ * matters for nodes reused by several parents: GLTFLoader hands out clones of
+ * those, and `Object3D.clone()` deep-copies userData, so every instance carries
+ * the flag while the JSON node index only maps to the original.
+ *
+ * Setting `visible = false` is the whole of the behaviour: three already skips
+ * descendants of a hidden object, and drops hidden lights from the render, which
+ * is what the extension specifies.
+ */
+function applyNodeVisibility(root: THREE.Object3D): number {
+  let hidden = 0;
+  root.traverse((o) => {
+    const extensions = o.userData?.gltfExtensions as
+      | { KHR_node_visibility?: { visible?: boolean } }
+      | undefined;
+    if (extensions?.KHR_node_visibility?.visible === false) {
+      o.visible = false;
+      hidden++;
+    }
+  });
+  return hidden;
+}
+
 async function loadGLTF(
   ext: string,
   data: ArrayBuffer | string,
@@ -389,6 +417,10 @@ async function loadGLTF(
             if (gltf.scenes && gltf.scenes.length > 1) {
               meta['Scenes'] = String(gltf.scenes.length);
             }
+            // Reported so a node missing from the viewport is explainable rather
+            // than just absent; the outliner can still toggle it back on.
+            const hidden = applyNodeVisibility(gltf.scene);
+            if (hidden) meta['Hidden nodes'] = String(hidden);
             const { lights, cameras } = gatherLightsAndCameras(gltf.scene);
             resolveOnce({
               root: gltf.scene,
