@@ -222,6 +222,7 @@ async function loadGLTF(
   // extension, so normal glTF never constructs it — and so we can arm a
   // watchdog on the load below.
   const usesKtx2 = gltfUsesKtx2(ext, data);
+  let disposeKtx2: (() => void) | undefined;
   const ktx2Path = (globalThis as { __ktx2TranscoderPath?: string }).__ktx2TranscoderPath;
   if (usesKtx2 && ktx2Path && sharedRenderer) {
     try {
@@ -230,6 +231,10 @@ async function loadGLTF(
       ktx2Loader.setTranscoderPath(ktx2Path);
       ktx2Loader.detectSupport(sharedRenderer);
       loader.setKTX2Loader(ktx2Loader);
+      disposeKtx2 = () => {
+        if (ktx2Loader.transcoderPending) ktx2Loader.dispose();
+        disposeKtx2 = undefined;
+      };
     } catch (err) {
       console.warn('[3DViewer] Failed to initialize KTX2Loader:', err);
     }
@@ -250,6 +255,7 @@ async function loadGLTF(
       ? setTimeout(() => {
           if (settled) return;
           settled = true;
+          disposeKtx2?.();
           reject(new Error(
             'KTX2 texture transcoding did not complete in time — see the webview console for details.',
           ));
@@ -262,6 +268,7 @@ async function loadGLTF(
         if (settled) return;
         settled = true;
         if (watchdog) clearTimeout(watchdog);
+        disposeKtx2?.();
         const meta: Record<string, string> = {};
         const asset = (gltf as unknown as { asset?: Record<string, unknown> }).asset;
         if (asset) {
@@ -285,6 +292,7 @@ async function loadGLTF(
         if (settled) return;
         settled = true;
         if (watchdog) clearTimeout(watchdog);
+        disposeKtx2?.();
         reject(err instanceof Error ? err : new Error(String(err)));
       },
     );
