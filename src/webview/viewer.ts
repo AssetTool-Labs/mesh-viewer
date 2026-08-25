@@ -41,6 +41,25 @@ function isSplat(o: THREE.Object3D): boolean {
   return o.userData.isSplat === true;
 }
 
+/**
+ * Whether every normal in the attribute is zero-length. Blender and other tools
+ * write `(0,0,0)` facet normals into binary STL; STLLoader still emits a normal
+ * attribute for them, so lighting has nothing to work with and the mesh renders
+ * black. Sampled rather than exhaustive to stay cheap on multi-million-vertex
+ * geometry, and deliberately all-or-nothing: a partially degenerate attribute is
+ * left alone, since recomputing would discard normals the exporter did author.
+ */
+function hasDegenerateNormals(geometry: THREE.BufferGeometry): boolean {
+  const normal = geometry.getAttribute('normal');
+  if (!normal || normal.count === 0) return false;
+  const step = Math.max(1, Math.floor(normal.count / 1024));
+  for (let i = 0; i < normal.count; i += step) {
+    const len = Math.abs(normal.getX(i)) + Math.abs(normal.getY(i)) + Math.abs(normal.getZ(i));
+    if (len > 1e-8) return false;
+  }
+  return true;
+}
+
 /** The mesh's morph influence array if it has any morph targets, else null. */
 function morphInfluencesOf(o: THREE.Object3D): number[] | null {
   const mesh = o as THREE.Mesh;
@@ -1779,9 +1798,13 @@ export class Viewer {
         this.ensureSparkRenderer();
         this.applySplatOrientation(o);
       } else if (mesh.isMesh) {
-        // Some formats ship without normals; the normals debug mode and lit
-        // shading both need them, so fill them in once at load time.
-        if (mesh.geometry && !mesh.geometry.getAttribute('normal')) {
+        // Some formats ship without normals, others ship an all-zero attribute;
+        // the normals debug mode and lit shading both need real ones, so fill
+        // them in once at load time.
+        if (
+          mesh.geometry &&
+          (!mesh.geometry.getAttribute('normal') || hasDegenerateNormals(mesh.geometry))
+        ) {
           mesh.geometry.computeVertexNormals();
         }
         this.originalMaterials.set(o, {
