@@ -154,6 +154,14 @@ export async function loadAsset(
   auxFileUris: Record<string, string> = {},
 ): Promise<LoadedAsset> {
   const lower = ext.toLowerCase();
+
+  // Every loader fails somewhere deep on an empty payload — usually a RangeError
+  // about buffer bounds, which tells the user nothing. Name the real problem.
+  const usableBytes = typeof data === 'string' ? data.trim().length : data.byteLength;
+  if (usableBytes === 0) {
+    throw new Error(`${fileName} is empty or truncated — there is no data to load.`);
+  }
+
   try {
     return await dispatch(lower, data, fileName, auxFileUris);
   } catch (err) {

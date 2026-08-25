@@ -17,6 +17,7 @@ import {
   computeStats,
   collectMaterials,
   contentBounds,
+  isFiniteBox,
   type AssetEntry,
   type ShadingMode,
   type EnvironmentMode,
@@ -1796,7 +1797,17 @@ function populateInfo(): void {
   appendKV(geomTotals, 'Vertices', Math.round(stats.vertices).toLocaleString());
   appendKV(geomTotals, 'Triangles', Math.round(stats.triangles).toLocaleString());
   const box = contentBounds(viewer.contentRoot);
-  if (!box.isEmpty()) {
+  if (!box.isEmpty() && !isFiniteBox(box)) {
+    // Inf/NaN vertex positions. Without this the row reads "NaN × NaN × NaN" and
+    // the viewport is blank with no explanation; the viewer has fallen back to a
+    // default view by this point.
+    appendKV(geomTotals, 'Bounds', 'not finite — NaN/Infinity vertex data');
+    showToast({
+      title: 'Non-finite geometry',
+      body: `${primaryFile?.name ?? 'This file'} has NaN or Infinity vertex positions; the view is approximate.`,
+      kind: 'error',
+    });
+  } else if (!box.isEmpty()) {
     const size = new THREE.Vector3();
     box.getSize(size);
     appendKV(geomTotals, 'Bounds', `${fmt(size.x)} × ${fmt(size.y)} × ${fmt(size.z)}`);
