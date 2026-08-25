@@ -178,11 +178,36 @@ function gltfUsesKtx2(ext: string, data: ArrayBuffer | string): boolean {
   }
 }
 
+function validateGltfScene(ext: string, data: ArrayBuffer | string): void {
+  let document: { scene?: unknown; scenes?: unknown };
+  try {
+    let json: string;
+    if (ext === 'glb') {
+      const view = new DataView(data as ArrayBuffer);
+      const jsonLen = view.getUint32(12, true);
+      json = new TextDecoder().decode(new Uint8Array(data as ArrayBuffer, 20, jsonLen));
+    } else {
+      json = data as string;
+    }
+    document = JSON.parse(json) as { scene?: unknown; scenes?: unknown };
+  } catch {
+    return;
+  }
+
+  const scene = document.scene;
+  if (scene === undefined) return;
+  const sceneIndex = Number.isInteger(scene) ? scene as number : -1;
+  if (!Array.isArray(document.scenes) || sceneIndex < 0 || sceneIndex >= document.scenes.length) {
+    throw new Error(`glTF declares default scene ${String(scene)} but does not define it.`);
+  }
+}
+
 async function loadGLTF(
   ext: string,
   data: ArrayBuffer | string,
   auxFileUris: Record<string, string>,
 ): Promise<LoadedAsset> {
+  validateGltfScene(ext, data);
   const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
   const aux = makeManagerForAux(auxFileUris);
   const loader = new GLTFLoader(aux.manager);
@@ -251,51 +276,63 @@ async function loadGLTF(
     // is a safety net; the generous timeout avoids tripping a slow-but-valid
     // transcode of many/large textures.
     let settled = false;
-    const watchdog = usesKtx2
-      ? setTimeout(() => {
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = (): void => {
+      if (watchdog) clearTimeout(watchdog);
+      disposeKtx2?.();
+    };
+    const rejectOnce = (err: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    const resolveOnce = (asset: LoadedAsset): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(asset);
+    };
+    if (usesKtx2) {
+      watchdog = setTimeout(() => rejectOnce(new Error(
+        'KTX2 texture transcoding did not complete in time — see the webview console for details.',
+      )), 30000);
+    }
+    try {
+      loader.parse(
+        buffer,
+        aux.baseUrl,
+        (gltf) => {
           if (settled) return;
-          settled = true;
-          disposeKtx2?.();
-          reject(new Error(
-            'KTX2 texture transcoding did not complete in time — see the webview console for details.',
-          ));
-        }, 30000)
-      : undefined;
-    loader.parse(
-      buffer,
-      aux.baseUrl,
-      (gltf) => {
-        if (settled) return;
-        settled = true;
-        if (watchdog) clearTimeout(watchdog);
-        disposeKtx2?.();
-        const meta: Record<string, string> = {};
-        const asset = (gltf as unknown as { asset?: Record<string, unknown> }).asset;
-        if (asset) {
-          if (asset.version) meta['glTF Version'] = String(asset.version);
-          if (asset.generator) meta['Generator'] = String(asset.generator);
-          if (asset.copyright) meta['Copyright'] = String(asset.copyright);
-        }
-        if (gltf.scenes && gltf.scenes.length > 1) {
-          meta['Scenes'] = String(gltf.scenes.length);
-        }
-        const { lights, cameras } = gatherLightsAndCameras(gltf.scene);
-        resolve({
-          root: gltf.scene,
-          animations: gltf.animations ?? [],
-          lights,
-          cameras: gltf.cameras?.length ? gltf.cameras : cameras,
-          metadata: meta,
-        });
-      },
-      (err) => {
-        if (settled) return;
-        settled = true;
-        if (watchdog) clearTimeout(watchdog);
-        disposeKtx2?.();
-        reject(err instanceof Error ? err : new Error(String(err)));
-      },
-    );
+          try {
+            if (!gltf.scene) throw new Error('glTF does not define a default scene.');
+            const meta: Record<string, string> = {};
+            const asset = (gltf as unknown as { asset?: Record<string, unknown> }).asset;
+            if (asset) {
+              if (asset.version) meta['glTF Version'] = String(asset.version);
+              if (asset.generator) meta['Generator'] = String(asset.generator);
+              if (asset.copyright) meta['Copyright'] = String(asset.copyright);
+            }
+            if (gltf.scenes && gltf.scenes.length > 1) {
+              meta['Scenes'] = String(gltf.scenes.length);
+            }
+            const { lights, cameras } = gatherLightsAndCameras(gltf.scene);
+            resolveOnce({
+              root: gltf.scene,
+              animations: gltf.animations ?? [],
+              lights,
+              cameras: gltf.cameras?.length ? gltf.cameras : cameras,
+              metadata: meta,
+            });
+          } catch (err) {
+            rejectOnce(err);
+          }
+        },
+        rejectOnce,
+      );
+    } catch (err) {
+      rejectOnce(err);
+    }
   });
 }
 
