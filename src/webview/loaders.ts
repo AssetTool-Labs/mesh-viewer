@@ -311,6 +311,93 @@ function applyNodeVisibility(root: THREE.Object3D): number {
   return hidden;
 }
 
+const SPEC_GLOSS = 'KHR_materials_pbrSpecularGlossiness';
+
+interface SpecGlossDef {
+  diffuseFactor?: [number, number, number, number];
+  specularFactor?: [number, number, number];
+  glossinessFactor?: number;
+  diffuseTexture?: { index: number; texCoord?: number };
+  specularGlossinessTexture?: { index: number; texCoord?: number };
+}
+
+/**
+ * Approximate KHR_materials_pbrSpecularGlossiness as a metallic-roughness
+ * material.
+ *
+ * three removed its built-in support for the extension, so GLTFLoader ignores it
+ * and the material falls back to the glTF defaults for a missing
+ * pbrMetallicRoughness block — metalness 1, roughness 1 — which renders
+ * spec-gloss assets as dark, flat metal.
+ *
+ * This is a conversion, not the original shading model:
+ *  - roughness comes straight from `1 - glossinessFactor`.
+ *  - metalness is estimated by measuring the specular colour against 0.04, the
+ *    reflectance of a dielectric; the base colour is then blended towards the
+ *    specular colour as metalness rises, since a metal's tint lives in its
+ *    reflectance rather than its diffuse term.
+ *  - a specularGlossinessTexture's *per-pixel* specular and gloss are not
+ *    unpacked: three's roughnessMap/metalnessMap sample G and B while spec-gloss
+ *    packs specular in RGB and gloss in A, so the layouts do not overlap and the
+ *    image would have to be repacked pixel by pixel. Those materials instead get
+ *    a neutral dielectric. Falling back to the *factors* there would be actively
+ *    wrong — they default to white specular and full gloss, which the texture is
+ *    meant to modulate, so the material would come out as a chrome mirror.
+ */
+function specGlossPlugin(
+  parser: { json: { materials?: { extensions?: Record<string, unknown> }[] } },
+  onApplied: (approximatedTexture: boolean) => void,
+) {
+  const defFor = (index: number): SpecGlossDef | undefined =>
+    parser.json.materials?.[index]?.extensions?.[SPEC_GLOSS] as SpecGlossDef | undefined;
+
+  return {
+    name: SPEC_GLOSS,
+    getMaterialType: (index: number) => (defFor(index) ? THREE.MeshStandardMaterial : null),
+    extendMaterialParams: (index: number, params: Record<string, unknown>) => {
+      const sg = defFor(index);
+      if (!sg) return null;
+      onApplied(sg.specularGlossinessTexture !== undefined);
+
+      const diffuse = sg.diffuseFactor ?? [1, 1, 1, 1];
+      const specular = sg.specularFactor ?? [1, 1, 1];
+      const glossiness = sg.glossinessFactor ?? 1;
+
+      if (sg.specularGlossinessTexture) {
+        // Per-pixel specular/gloss we cannot honour — see the note above on why
+        // the factors are not a usable stand-in here.
+        params.color = new THREE.Color(diffuse[0], diffuse[1], diffuse[2]);
+        params.metalness = 0;
+        params.roughness = 0.5;
+      } else {
+        const specularStrength = Math.max(specular[0], specular[1], specular[2]);
+        const metalness = Math.min(1, Math.max(0, (specularStrength - 0.04) / 0.96));
+        const color = new THREE.Color(diffuse[0], diffuse[1], diffuse[2]);
+        color.lerp(new THREE.Color(specular[0], specular[1], specular[2]), metalness);
+        params.color = color;
+        params.metalness = metalness;
+        params.roughness = 1 - glossiness;
+      }
+      params.opacity = diffuse[3];
+
+      const pending: Promise<unknown>[] = [];
+      if (sg.diffuseTexture) {
+        pending.push(
+          (parser as unknown as {
+            assignTexture(
+              p: Record<string, unknown>,
+              name: string,
+              def: { index: number; texCoord?: number },
+              colorSpace?: string,
+            ): Promise<unknown>;
+          }).assignTexture(params, 'map', sg.diffuseTexture, THREE.SRGBColorSpace),
+        );
+      }
+      return Promise.all(pending);
+    },
+  };
+}
+
 async function loadGLTF(
   ext: string,
   data: ArrayBuffer | string,
@@ -320,6 +407,15 @@ async function loadGLTF(
   const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
   const aux = await makeManagerForAux(auxFileUris);
   const loader = new GLTFLoader(aux.manager);
+
+  let specGlossCount = 0;
+  let specGlossTextures = 0;
+  loader.register((parser) =>
+    specGlossPlugin(parser as never, (approximatedTexture) => {
+      specGlossCount++;
+      if (approximatedTexture) specGlossTextures++;
+    }),
+  );
 
   // Wire up DRACO decompression so DRACO-compressed .glb/.gltf files load.
   // The decoder (wasm + wrapper) is bundled with the extension and its
@@ -429,6 +525,13 @@ async function loadGLTF(
             // than just absent; the outliner can still toggle it back on.
             const hidden = applyNodeVisibility(gltf.scene);
             if (hidden) meta['Hidden nodes'] = String(hidden);
+            // Surfaced rather than silent: the conversion is close but not the
+            // original shading model, so the shading is worth not trusting blindly.
+            if (specGlossCount) {
+              meta['Spec-gloss materials'] = specGlossTextures
+                ? `${specGlossCount} (approximated; ${specGlossTextures} textured → neutral)`
+                : `${specGlossCount} (approximated)`;
+            }
             const { lights, cameras } = gatherLightsAndCameras(gltf.scene);
             resolveOnce({
               root: gltf.scene,
