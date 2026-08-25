@@ -10,6 +10,7 @@ import type {
   ViewSettings,
 } from '../types';
 import { loadAsset, type LoadedAsset } from './loaders';
+import { decodeText } from './textEncoding';
 import {
   Viewer,
   computeStats,
@@ -1063,7 +1064,8 @@ async function importNativeFile(file: File): Promise<void> {
   const isText = TEXT_EXTENSIONS.has(ext);
   let data: ArrayBuffer | string;
   try {
-    data = isText ? await file.text() : await file.arrayBuffer();
+    const bytes = await file.arrayBuffer();
+    data = isText ? decodeText(bytes) : bytes;
   } catch (err) {
     showToast({ title: 'Read failed', body: `${file.name}: ${(err as Error).message}`, kind: 'error' });
     return;
@@ -1155,7 +1157,8 @@ window.addEventListener('message', (ev) => {
 async function fetchPayload(msg: FilePayload): Promise<ArrayBuffer | string> {
   const resp = await fetch(msg.fileUri);
   if (!resp.ok) throw new Error(`Failed to fetch ${msg.fileName}: ${resp.status} ${resp.statusText}`);
-  return msg.isText ? resp.text() : resp.arrayBuffer();
+  const bytes = await resp.arrayBuffer();
+  return msg.isText ? decodeText(bytes) : bytes;
 }
 
 vscode.postMessage({ type: 'ready' });
