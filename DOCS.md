@@ -100,6 +100,34 @@ anything else renders as a mesh or point cloud as before.
 
 For multi-file formats (`.gltf` + `.bin` + textures, `.obj` + `.mtl` + textures), only files with reference-able extensions (`.bin`, `.mtl`, common image types) in the same directory are loaded automatically. Unrelated files (`.glb` / `.fbx` siblings, etc.) are ignored so opening one model never drags 14 MB of unrelated bytes through the webview channel.
 
+### Format variants that are not supported
+
+An extension being listed above does not mean every file bearing it will open.
+These variants are recognised from the file header and refused with an
+explanation rather than a crash:
+
+| Variant | Why | What to do |
+| --- | --- | --- |
+| glTF 1.0 (`.gltf`, `.glb`) | Only glTF 2.0 is supported | Re-export as glTF 2.0, or convert with `gltf-pipeline` |
+| LightWave 5 (`LWOB` form) | Only the LWO2/LWO3 layouts are read, and the underlying loader is deprecated upstream | Re-save from a current LightWave, or convert to OBJ/FBX |
+| SPZ v4 | The bundled Spark decoder reads SPZ v1–v3 (gzip-wrapped) only | Export SPZ v3, or use `.ply`/`.sog` |
+
+### Known upstream loader gaps
+
+These come from the third-party loaders this extension bundles, not from the
+extension itself. Affected files now report a readable error naming the loader
+instead of a raw exception, but they still will not render until the upstream
+loader is fixed.
+
+| Format | Gap |
+| --- | --- |
+| LightWave `.lwo` | LWO2 files with unused vertex maps or nested hierarchies fail to parse; polygons with more than 4 sides are dropped |
+| FBX | Some 2013-era exports fail while building animation curves; files whose NUL bytes have been mangled in transit are rejected as an unknown format |
+| Collada `.dae` | `<polygons>` meshes can collapse to a single triangle, `<tristrips>` are not read, and some skinned+morphed files fail to parse |
+| 3MF | The volumetric extension is unsupported; beam-lattice models parse to no geometry |
+| VRML `.wrl` | Multi-line strings and some real-world files fail in the lexer |
+| USD | Composition (`references`, `payload`, `subLayer`) is not followed, so assets that rely on it load empty |
+
 ---
 
 ## Features
