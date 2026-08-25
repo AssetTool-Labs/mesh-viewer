@@ -14,6 +14,7 @@ import {
   Viewer,
   computeStats,
   collectMaterials,
+  contentBounds,
   type AssetEntry,
   type ShadingMode,
   type EnvironmentMode,
@@ -1775,7 +1776,7 @@ function populateInfo(): void {
   geomTotals.innerHTML = '';
   appendKV(geomTotals, 'Vertices', Math.round(stats.vertices).toLocaleString());
   appendKV(geomTotals, 'Triangles', Math.round(stats.triangles).toLocaleString());
-  const box = new THREE.Box3().setFromObject(viewer.contentRoot);
+  const box = contentBounds(viewer.contentRoot);
   if (!box.isEmpty()) {
     const size = new THREE.Vector3();
     box.getSize(size);

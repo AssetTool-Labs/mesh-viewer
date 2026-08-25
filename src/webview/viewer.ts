@@ -41,6 +41,24 @@ function isSplat(o: THREE.Object3D): boolean {
   return o.userData.isSplat === true;
 }
 
+/**
+ * Bounding box of everything renderable under `obj`, measured at the morph
+ * influences currently in effect.
+ *
+ * `Box3.setFromObject` in its default mode reads `geometry.boundingBox`, which
+ * three.js expands by *every* morph target regardless of influence. A mesh whose
+ * morph translates parts far from the base pose therefore reports a box many
+ * times the size of what is drawn, and camera framing, grid alignment, the
+ * bounds readout and joint sizing all inherit the error. The precise mode walks
+ * the position attribute through `Mesh.getVertexPosition`, which weights morphs
+ * by influence — zero unless the user dialled one in — so it measures what is
+ * actually on screen. It costs one pass over the vertices, which is fine here:
+ * every caller runs on load or on an explicit user action, never per frame.
+ */
+export function contentBounds(obj: THREE.Object3D, target = new THREE.Box3()): THREE.Box3 {
+  return target.setFromObject(obj, true);
+}
+
 /** The mesh's morph influence array if it has any morph targets, else null. */
 function morphInfluencesOf(o: THREE.Object3D): number[] | null {
   const mesh = o as THREE.Mesh;
@@ -364,7 +382,7 @@ export class Viewer {
     this.contentRoot.updateMatrixWorld(true);
     const box = new THREE.Box3();
     for (const entry of this.entries) {
-      box.expandByObject(entry.wrapper);
+      box.expandByObject(entry.wrapper, true);
     }
     if (box.isEmpty()) return;
     this.contentRoot.position.y = -box.min.y;
@@ -715,7 +733,7 @@ export class Viewer {
       this.boundsHelper = null;
     }
     if (!this.entries.length) return;
-    const box = new THREE.Box3().setFromObject(this.contentRoot);
+    const box = contentBounds(this.contentRoot);
     this.boundsHelper = new THREE.Box3Helper(box, new THREE.Color(0xffaa00));
     this.scene.add(this.boundsHelper);
   }
@@ -1019,7 +1037,7 @@ export class Viewer {
   }
 
   private estimateJointSize(): number {
-    const box = new THREE.Box3().setFromObject(this.contentRoot);
+    const box = contentBounds(this.contentRoot);
     if (box.isEmpty()) return 0.005;
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
@@ -1868,8 +1886,7 @@ export class Viewer {
   }
 
   frameObject(obj: THREE.Object3D): void {
-    const box = new THREE.Box3();
-    box.setFromObject(obj);
+    const box = contentBounds(obj);
     if (box.isEmpty()) return;
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
