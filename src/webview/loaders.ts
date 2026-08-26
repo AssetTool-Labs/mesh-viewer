@@ -38,13 +38,13 @@ export interface LoadedAsset {
  * Build a LoadingManager that resolves sidecar file references (textures, .bin,
  * .mtl) to webview-accessible URIs the browser can fetch directly.
  */
-function makeManagerForAux(auxFileUris: Record<string, string>): {
+async function makeManagerForAux(auxFileUris: Record<string, string>): Promise<{
   manager: LoadingManager;
   baseUrl: string;
   /** Resolves when every load started through this manager has settled
    *  (or immediately if the parse never started one). Call after parse(). */
   whenReady: () => Promise<void>;
-} {
+}> {
   // Aux names are paths relative to the model's directory (e.g.
   // "textures/diffuse.png"). Index by full relative path, and by bare
   // filename as a fallback for references whose directory prefix doesn't
@@ -58,6 +58,22 @@ function makeManagerForAux(auxFileUris: Record<string, string>): {
     if (!byName.has(base)) byName.set(base, uri);
   }
   const manager = new LoadingManager();
+
+  // The browser cannot decode Targa, so three's FBX/Collada/MTL loaders skip
+  // .tga textures outright ("TGA loader not found, skipping …") unless a handler
+  // is registered for them. Wired only when the asset actually ships one, so an
+  // ordinary load doesn't pay for the import. The manager is handed to the
+  // loader so its fetch goes through the URL modifier below and counts towards
+  // whenReady(), which is what refreshes the texture panel.
+  if (Object.keys(auxFileUris ?? {}).some((name) => name.toLowerCase().endsWith('.tga'))) {
+    try {
+      const { TGALoader } = await import('three/examples/jsm/loaders/TGALoader.js');
+      manager.addHandler(/\.tga$/i, new TGALoader(manager));
+    } catch (err) {
+      console.warn('[3DViewer] Failed to initialize TGALoader:', err);
+    }
+  }
+
   manager.setURLModifier((url) => {
     try {
       const u = decodeURIComponent(url)
@@ -266,7 +282,7 @@ async function loadGLTF(
 ): Promise<LoadedAsset> {
   validateGltfScene(ext, data);
   const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
-  const aux = makeManagerForAux(auxFileUris);
+  const aux = await makeManagerForAux(auxFileUris);
   const loader = new GLTFLoader(aux.manager);
 
   // Wire up DRACO decompression so DRACO-compressed .glb/.gltf files load.
@@ -405,7 +421,7 @@ async function loadOBJ(data: string, auxFileUris: Record<string, string>): Promi
   if (mtlEntry) {
     try {
       const { MTLLoader } = await import('three/examples/jsm/loaders/MTLLoader.js');
-      const aux = makeManagerForAux(auxFileUris);
+      const aux = await makeManagerForAux(auxFileUris);
       const mtlLoader = new MTLLoader(aux.manager);
       const mtlResp = await fetch(mtlEntry[1]);
       const mtlText = await mtlResp.text();
@@ -431,7 +447,7 @@ async function loadOBJ(data: string, auxFileUris: Record<string, string>): Promi
 
 async function loadFBX(buf: ArrayBuffer, auxFileUris: Record<string, string>): Promise<LoadedAsset> {
   const { FBXLoader } = await import('three/examples/jsm/loaders/FBXLoader.js');
-  const aux = makeManagerForAux(auxFileUris);
+  const aux = await makeManagerForAux(auxFileUris);
   const loader = new FBXLoader(aux.manager);
   const root = loader.parse(buf, aux.baseUrl);
   const { lights, cameras } = gatherLightsAndCameras(root);
@@ -585,7 +601,7 @@ function boxCorners(box: THREE.Box3): number[] {
 
 async function loadCollada(text: string, auxFileUris: Record<string, string>): Promise<LoadedAsset> {
   const { ColladaLoader } = await import('three/examples/jsm/loaders/ColladaLoader.js');
-  const aux = makeManagerForAux(auxFileUris);
+  const aux = await makeManagerForAux(auxFileUris);
   const loader = new ColladaLoader(aux.manager);
   const result = loader.parse(text, '');
   if (!result || !result.scene) throw new ViewerError('Collada file did not contain a parsable scene.');
