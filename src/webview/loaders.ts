@@ -696,11 +696,97 @@ function boxCorners(box: THREE.Box3): number[] {
 
 // ---------- Collada ----------
 
+function normalizeColladaPrimitives(text: string): string {
+  if (!/<(?:[\w.-]+:)?(?:polygons|tristrips)\b/.test(text)) return text;
+
+  const document = new DOMParser().parseFromString(text, 'application/xml');
+  if (document.getElementsByTagName('parsererror').length) return text;
+
+  const directChildren = (element: Element, name: string): Element[] =>
+    Array.from(element.childNodes).filter(
+      (child): child is Element =>
+        child.nodeType === Node.ELEMENT_NODE && (child as Element).localName === name,
+    );
+
+  const replacementFor = (primitive: Element, type: 'polylist' | 'triangles'): Element | null => {
+    const inputs = directChildren(primitive, 'input');
+    const stride = inputs.reduce((max, input) => {
+      const offset = Number.parseInt(input.getAttribute('offset') ?? '0', 10);
+      return Number.isFinite(offset) ? Math.max(max, offset + 1) : max;
+    }, 0);
+    if (!stride || directChildren(primitive, 'ph').length) return null;
+
+    const polygons = directChildren(primitive, 'p').map((p) =>
+      (p.textContent ?? '').trim().split(/\s+/).filter(Boolean),
+    );
+    if (!polygons.length || polygons.some((polygon) => polygon.length % stride !== 0)) return null;
+
+    const replacement = document.createElementNS(primitive.namespaceURI, type);
+    for (const attribute of Array.from(primitive.attributes)) {
+      replacement.setAttribute(attribute.name, attribute.value);
+    }
+    for (const input of inputs) replacement.appendChild(input.cloneNode(true));
+
+    const indices: string[] = [];
+    if (type === 'polylist') {
+      const vertexCounts = polygons.map((polygon) => polygon.length / stride);
+      replacement.setAttribute('count', String(vertexCounts.length));
+      const vcount = document.createElementNS(primitive.namespaceURI, 'vcount');
+      vcount.textContent = vertexCounts.join(' ');
+      replacement.appendChild(vcount);
+      for (const polygon of polygons) {
+        for (const index of polygon) indices.push(index);
+      }
+    } else {
+      let triangleCount = 0;
+      for (const strip of polygons) {
+        const vertexCount = strip.length / stride;
+        for (let index = 0; index + 2 < vertexCount; index++) {
+          const first = index % 2 === 0 ? index : index + 1;
+          const second = index % 2 === 0 ? index + 1 : index;
+          for (const vertex of [first, second, index + 2]) {
+            indices.push(...strip.slice(vertex * stride, (vertex + 1) * stride));
+          }
+          triangleCount++;
+        }
+      }
+      replacement.setAttribute('count', String(triangleCount));
+    }
+
+    const indexList = document.createElementNS(primitive.namespaceURI, 'p');
+    indexList.textContent = indices.join(' ');
+    replacement.appendChild(indexList);
+    for (const extra of directChildren(primitive, 'extra')) {
+      replacement.appendChild(extra.cloneNode(true));
+    }
+    return replacement;
+  };
+
+  let changed = false;
+  for (const polygons of Array.from(document.getElementsByTagNameNS('*', 'polygons'))) {
+    if (directChildren(polygons, 'p').length < 2) continue;
+    const replacement = replacementFor(polygons, 'polylist');
+    if (replacement) {
+      polygons.parentNode?.replaceChild(replacement, polygons);
+      changed = true;
+    }
+  }
+  for (const strips of Array.from(document.getElementsByTagNameNS('*', 'tristrips'))) {
+    const replacement = replacementFor(strips, 'triangles');
+    if (replacement) {
+      strips.parentNode?.replaceChild(replacement, strips);
+      changed = true;
+    }
+  }
+
+  return changed ? new XMLSerializer().serializeToString(document) : text;
+}
+
 async function loadCollada(text: string, auxFileUris: Record<string, string>): Promise<LoadedAsset> {
   const { ColladaLoader } = await import('three/examples/jsm/loaders/ColladaLoader.js');
   const aux = await makeManagerForAux(auxFileUris);
   const loader = new ColladaLoader(aux.manager);
-  const result = loader.parse(text, '');
+  const result = loader.parse(normalizeColladaPrimitives(text), '');
   if (!result || !result.scene) throw new ViewerError('Collada file did not contain a parsable scene.');
   const root: THREE.Object3D = result.scene;
   const { lights, cameras } = gatherLightsAndCameras(root);
