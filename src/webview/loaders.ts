@@ -99,6 +99,18 @@ async function makeManagerForAux(auxFileUris: Record<string, string>): Promise<{
   return { manager, baseUrl: '', whenReady: () => (sawLoads ? allLoaded : Promise.resolve()) };
 }
 
+/**
+ * ASCII tag of `length` bytes at `offset`, for magic-number and IFF sniffing.
+ * Built byte by byte rather than through TextDecoder so no encoding label is
+ * involved — these tags are always plain ASCII.
+ */
+function tagAt(buf: ArrayBuffer, offset: number, length: number): string {
+  if (buf.byteLength < offset + length) return '';
+  let out = '';
+  for (const byte of new Uint8Array(buf, offset, length)) out += String.fromCharCode(byte);
+  return out;
+}
+
 function emptyAsset(root: THREE.Object3D): LoadedAsset {
   return { root, animations: [], lights: [], cameras: [], metadata: {} };
 }
@@ -398,11 +410,43 @@ function specGlossPlugin(
   };
 }
 
+/**
+ * The `asset.version` of a pre-2.0 glTF, or null when the file is 2.0 (or its
+ * version can't be read). GLTFLoader does reject these, but with
+ * "Unsupported asset." / "Legacy binary file detected" — accurate, yet it never
+ * says what to do next. A .glb carries the container version at offset 4; a
+ * .gltf carries it in `asset.version`.
+ */
+function legacyGltfVersion(ext: string, data: ArrayBuffer | string): string | null {
+  if (ext === 'glb') {
+    const buf = data as ArrayBuffer;
+    if (buf.byteLength < 12 || tagAt(buf, 0, 4) !== 'glTF') return null;
+    const container = new DataView(buf).getUint32(4, true);
+    return container < 2 ? '1.0' : null;
+  }
+  try {
+    const version = (JSON.parse(data as string) as { asset?: { version?: string } }).asset?.version;
+    return version && !version.startsWith('2') ? version : null;
+  } catch {
+    return null;
+  }
+}
+
 async function loadGLTF(
   ext: string,
   data: ArrayBuffer | string,
   auxFileUris: Record<string, string>,
 ): Promise<LoadedAsset> {
+  // Version first: glTF 1.0 stores `scenes` as a name-keyed object, so the 2.0
+  // scene validation below would fire on it with a misleading "declares default
+  // scene defaultScene but does not define it" instead of naming the real problem.
+  const legacy = legacyGltfVersion(ext, data);
+  if (legacy) {
+    throw new ViewerError(
+      `This is a glTF ${legacy} file. Only glTF 2.0 is supported — re-export the asset ` +
+        'as glTF 2.0, or convert it with gltf-pipeline.',
+    );
+  }
   validateGltfScene(ext, data);
   const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
   const aux = await makeManagerForAux(auxFileUris);
@@ -700,6 +744,19 @@ async function loadSplat(
   fileName: string,
   fileTypeKey: 'PLY' | 'SPZ' | 'SPLAT' | 'KSPLAT' | 'PCSOGSZIP',
 ): Promise<LoadedAsset> {
+  // SPZ v4 dropped the gzip wrapper and ships the NGSP magic raw. Spark gunzips
+  // unconditionally, so it fails with "Invalid gzip header" — and its header
+  // parser rejects version > 3 regardless. Keying on the raw magic cannot
+  // misfire on a supported file: v1-v3 are gzip-wrapped, so they begin 1f 8b.
+  if (fileTypeKey === 'SPZ' && tagAt(buf, 0, 4) === 'NGSP') {
+    const version = new DataView(buf).getUint32(4, true);
+    if (version > 3) {
+      throw new ViewerError(
+        `This is an SPZ v${version} file. The bundled Spark splat decoder reads ` +
+          'SPZ v1-v3 (gzip-wrapped) only.',
+      );
+    }
+  }
   const { SplatMesh, SplatFileType } = await import('@sparkjsdev/spark');
   const mesh = new SplatMesh({
     fileBytes: buf,
@@ -861,6 +918,16 @@ async function loadXYZ(data: string): Promise<LoadedAsset> {
 // ---------- LWO ----------
 
 async function loadLWO(buf: ArrayBuffer): Promise<LoadedAsset> {
+  // LightWave 5 files declare the LWOB form type. three's LWOLoader reads LWO2
+  // and LWO3 only and dies on LWOB with "Cannot read properties of undefined
+  // (reading 'materials')". Upstream has deprecated the loader entirely
+  // (mrdoob/three.js#33621), so LWOB is never going to start working — name it.
+  if (tagAt(buf, 0, 4) === 'FORM' && tagAt(buf, 8, 4) === 'LWOB') {
+    throw new ViewerError(
+      'This is a LightWave 5 (LWOB) file, which is not supported — only the newer ' +
+        'LWO2 and LWO3 layouts are. Re-save it from a current LightWave, or convert it to OBJ or FBX.',
+    );
+  }
   const { LWOLoader } = await import('three/examples/jsm/loaders/LWOLoader.js');
   const loader = new LWOLoader();
   const result = loader.parse(buf, '', '');
