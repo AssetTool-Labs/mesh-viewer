@@ -37,8 +37,17 @@ function declaredParentRefs(ext: string, text: string): string[] {
       /* not valid JSON — fall through to the text scan */
     }
   }
-  for (const match of text.matchAll(/(?:\.\.\/)+[^\s"'<>]+\.[A-Za-z0-9]{2,5}/g)) {
-    refs.add(match[0]);
+  for (const match of text.matchAll(/(?:file:\/\/)?\.\.\/[^\s"'<>]*/g)) {
+    const index = match.index ?? 0;
+    if (index > 0 && !/[\s"'<>]/.test(text[index - 1])) continue;
+    const token = match[0];
+    const ref = token.startsWith('file://') ? token.slice('file://'.length) : token;
+    if (!ref.startsWith('../')) continue;
+    const dot = ref.lastIndexOf('.');
+    const extension = dot >= 0 ? ref.slice(dot + 1) : '';
+    if (extension.length >= 2 && extension.length <= 5 && /^[A-Za-z0-9]+$/.test(extension)) {
+      refs.add(ref);
+    }
   }
   return [...refs];
 }

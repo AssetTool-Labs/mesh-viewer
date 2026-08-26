@@ -473,7 +473,15 @@ async function loadCollada(text: string, auxFileUris: Record<string, string>): P
   const { ColladaLoader } = await import('three/examples/jsm/loaders/ColladaLoader.js');
   const aux = makeManagerForAux(auxFileUris);
   const loader = new ColladaLoader(aux.manager);
-  const result = loader.parse(text, '');
+  let result;
+  try {
+    result = loader.parse(text, '');
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Could not parse Collada file. The input may be malformed or use an unsupported Collada structure.${detail ? ` Details: ${detail}` : ''}`,
+    );
+  }
   if (!result || !result.scene) throw new Error('Collada file did not contain a parsable scene.');
   const root: THREE.Object3D = result.scene;
   const { lights, cameras } = gatherLightsAndCameras(root);
