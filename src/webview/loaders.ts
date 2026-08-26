@@ -97,6 +97,40 @@ function gatherLightsAndCameras(root: THREE.Object3D): { lights: THREE.Light[]; 
   return { lights, cameras };
 }
 
+/**
+ * An error whose message is already written for a user to read. `loadAsset`
+ * passes these through untouched instead of framing them as a parse failure.
+ */
+export class ViewerError extends Error {}
+
+/** The three.js loader that owns each extension, named in failure messages. */
+const LOADER_NAMES: Record<string, string> = {
+  gltf: 'GLTFLoader',
+  glb: 'GLTFLoader',
+  obj: 'OBJLoader',
+  fbx: 'FBXLoader',
+  stl: 'STLLoader',
+  ply: 'PLYLoader',
+  dae: 'ColladaLoader',
+  '3ds': 'TDSLoader',
+  '3mf': '3MFLoader',
+  wrl: 'VRMLLoader',
+  vrml: 'VRMLLoader',
+  usd: 'USDLoader',
+  usda: 'USDLoader',
+  usdc: 'USDLoader',
+  usdz: 'USDLoader',
+  vox: 'VOXLoader',
+  pcd: 'PCDLoader',
+  xyz: 'XYZLoader',
+  lwo: 'LWOLoader',
+  kmz: 'KMZLoader',
+  spz: 'the Spark splat loader',
+  splat: 'the Spark splat loader',
+  ksplat: 'the Spark splat loader',
+  sog: 'the Spark splat loader',
+};
+
 export async function loadAsset(
   ext: string,
   data: ArrayBuffer | string,
@@ -104,7 +138,30 @@ export async function loadAsset(
   auxFileUris: Record<string, string> = {},
 ): Promise<LoadedAsset> {
   const lower = ext.toLowerCase();
+  try {
+    return await dispatch(lower, data, fileName, auxFileUris);
+  } catch (err) {
+    if (err instanceof ViewerError) throw err;
+    // three.js loaders throw straight out of their parse routines on malformed
+    // input, so the bare message ("Cannot read properties of undefined (reading
+    // 'a')") would otherwise be the whole of what the error overlay shows. Keep
+    // the original — with its stack — in the console for debugging.
+    const original = err instanceof Error ? err : new Error(String(err));
+    const loader = LOADER_NAMES[lower] ?? `The .${lower} loader`;
+    console.error(`[3DViewer] ${loader} failed on ${fileName}:`, original);
+    throw new ViewerError(
+      `${loader} could not parse ${fileName} — it may be malformed or use a ` +
+        `variant of the format that is not supported. (${original.message})`,
+    );
+  }
+}
 
+async function dispatch(
+  lower: string,
+  data: ArrayBuffer | string,
+  fileName: string,
+  auxFileUris: Record<string, string>,
+): Promise<LoadedAsset> {
   switch (lower) {
     case 'gltf':
     case 'glb':
@@ -154,7 +211,7 @@ export async function loadAsset(
     case 'kmz':
       return loadKMZ(data as ArrayBuffer);
     default:
-      throw new Error(`Unsupported file extension: .${ext}`);
+      throw new ViewerError(`Unsupported file extension: .${lower}`);
   }
 }
 
@@ -178,11 +235,36 @@ function gltfUsesKtx2(ext: string, data: ArrayBuffer | string): boolean {
   }
 }
 
+function validateGltfScene(ext: string, data: ArrayBuffer | string): void {
+  let document: { scene?: unknown; scenes?: unknown };
+  try {
+    let json: string;
+    if (ext === 'glb') {
+      const view = new DataView(data as ArrayBuffer);
+      const jsonLen = view.getUint32(12, true);
+      json = new TextDecoder().decode(new Uint8Array(data as ArrayBuffer, 20, jsonLen));
+    } else {
+      json = data as string;
+    }
+    document = JSON.parse(json) as { scene?: unknown; scenes?: unknown };
+  } catch {
+    return;
+  }
+
+  const scene = document.scene;
+  if (scene === undefined) return;
+  const sceneIndex = Number.isInteger(scene) ? scene as number : -1;
+  if (!Array.isArray(document.scenes) || sceneIndex < 0 || sceneIndex >= document.scenes.length) {
+    throw new ViewerError(`glTF declares default scene ${String(scene)} but does not define it.`);
+  }
+}
+
 async function loadGLTF(
   ext: string,
   data: ArrayBuffer | string,
   auxFileUris: Record<string, string>,
 ): Promise<LoadedAsset> {
+  validateGltfScene(ext, data);
   const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
   const aux = makeManagerForAux(auxFileUris);
   const loader = new GLTFLoader(aux.manager);
@@ -222,6 +304,7 @@ async function loadGLTF(
   // extension, so normal glTF never constructs it — and so we can arm a
   // watchdog on the load below.
   const usesKtx2 = gltfUsesKtx2(ext, data);
+  let disposeKtx2: (() => void) | undefined;
   const ktx2Path = (globalThis as { __ktx2TranscoderPath?: string }).__ktx2TranscoderPath;
   if (usesKtx2 && ktx2Path && sharedRenderer) {
     try {
@@ -230,6 +313,10 @@ async function loadGLTF(
       ktx2Loader.setTranscoderPath(ktx2Path);
       ktx2Loader.detectSupport(sharedRenderer);
       loader.setKTX2Loader(ktx2Loader);
+      disposeKtx2 = () => {
+        if (ktx2Loader.transcoderPending) ktx2Loader.dispose();
+        disposeKtx2 = undefined;
+      };
     } catch (err) {
       console.warn('[3DViewer] Failed to initialize KTX2Loader:', err);
     }
@@ -246,48 +333,63 @@ async function loadGLTF(
     // is a safety net; the generous timeout avoids tripping a slow-but-valid
     // transcode of many/large textures.
     let settled = false;
-    const watchdog = usesKtx2
-      ? setTimeout(() => {
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = (): void => {
+      if (watchdog) clearTimeout(watchdog);
+      disposeKtx2?.();
+    };
+    const rejectOnce = (err: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    const resolveOnce = (asset: LoadedAsset): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(asset);
+    };
+    if (usesKtx2) {
+      watchdog = setTimeout(() => rejectOnce(new ViewerError(
+        'KTX2 texture transcoding did not complete in time — see the webview console for details.',
+      )), 30000);
+    }
+    try {
+      loader.parse(
+        buffer,
+        aux.baseUrl,
+        (gltf) => {
           if (settled) return;
-          settled = true;
-          reject(new Error(
-            'KTX2 texture transcoding did not complete in time — see the webview console for details.',
-          ));
-        }, 30000)
-      : undefined;
-    loader.parse(
-      buffer,
-      aux.baseUrl,
-      (gltf) => {
-        if (settled) return;
-        settled = true;
-        if (watchdog) clearTimeout(watchdog);
-        const meta: Record<string, string> = {};
-        const asset = (gltf as unknown as { asset?: Record<string, unknown> }).asset;
-        if (asset) {
-          if (asset.version) meta['glTF Version'] = String(asset.version);
-          if (asset.generator) meta['Generator'] = String(asset.generator);
-          if (asset.copyright) meta['Copyright'] = String(asset.copyright);
-        }
-        if (gltf.scenes && gltf.scenes.length > 1) {
-          meta['Scenes'] = String(gltf.scenes.length);
-        }
-        const { lights, cameras } = gatherLightsAndCameras(gltf.scene);
-        resolve({
-          root: gltf.scene,
-          animations: gltf.animations ?? [],
-          lights,
-          cameras: gltf.cameras?.length ? gltf.cameras : cameras,
-          metadata: meta,
-        });
-      },
-      (err) => {
-        if (settled) return;
-        settled = true;
-        if (watchdog) clearTimeout(watchdog);
-        reject(err instanceof Error ? err : new Error(String(err)));
-      },
-    );
+          try {
+            if (!gltf.scene) throw new ViewerError('glTF does not define a default scene.');
+            const meta: Record<string, string> = {};
+            const asset = (gltf as unknown as { asset?: Record<string, unknown> }).asset;
+            if (asset) {
+              if (asset.version) meta['glTF Version'] = String(asset.version);
+              if (asset.generator) meta['Generator'] = String(asset.generator);
+              if (asset.copyright) meta['Copyright'] = String(asset.copyright);
+            }
+            if (gltf.scenes && gltf.scenes.length > 1) {
+              meta['Scenes'] = String(gltf.scenes.length);
+            }
+            const { lights, cameras } = gatherLightsAndCameras(gltf.scene);
+            resolveOnce({
+              root: gltf.scene,
+              animations: gltf.animations ?? [],
+              lights,
+              cameras: gltf.cameras?.length ? gltf.cameras : cameras,
+              metadata: meta,
+            });
+          } catch (err) {
+            rejectOnce(err);
+          }
+        },
+        rejectOnce,
+      );
+    } catch (err) {
+      rejectOnce(err);
+    }
   });
 }
 
@@ -349,6 +451,18 @@ async function loadSTL(buf: ArrayBuffer, fileName: string): Promise<LoadedAsset>
   const { STLLoader } = await import('three/examples/jsm/loaders/STLLoader.js');
   const loader = new STLLoader();
   const geometry = loader.parse(buf);
+  const normals = geometry.getAttribute('normal');
+  let hasUsableNormal = false;
+  if (normals) {
+    for (let i = 0; i < normals.count; i++) {
+      const lengthSq = normals.getX(i) ** 2 + normals.getY(i) ** 2 + normals.getZ(i) ** 2;
+      if (Number.isFinite(lengthSq) && lengthSq > 1e-12) {
+        hasUsableNormal = true;
+        break;
+      }
+    }
+  }
+  if (!hasUsableNormal) geometry.computeVertexNormals();
   const material = new THREE.MeshStandardMaterial({
     color: 0xb5b5b5,
     roughness: 0.7,
@@ -473,16 +587,8 @@ async function loadCollada(text: string, auxFileUris: Record<string, string>): P
   const { ColladaLoader } = await import('three/examples/jsm/loaders/ColladaLoader.js');
   const aux = makeManagerForAux(auxFileUris);
   const loader = new ColladaLoader(aux.manager);
-  let result;
-  try {
-    result = loader.parse(text, '');
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `Could not parse Collada file. The input may be malformed or use an unsupported Collada structure.${detail ? ` Details: ${detail}` : ''}`,
-    );
-  }
-  if (!result || !result.scene) throw new Error('Collada file did not contain a parsable scene.');
+  const result = loader.parse(text, '');
+  if (!result || !result.scene) throw new ViewerError('Collada file did not contain a parsable scene.');
   const root: THREE.Object3D = result.scene;
   const { lights, cameras } = gatherLightsAndCameras(root);
   // ColladaLoader.parse() returns clips on result.animations, NOT

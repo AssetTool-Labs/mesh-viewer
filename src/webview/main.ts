@@ -10,6 +10,7 @@ import type {
   ViewSettings,
 } from '../types';
 import { loadAsset, type LoadedAsset } from './loaders';
+import { hasRenderableGeometry } from './renderables';
 import { decodeText } from './textEncoding';
 import {
   Viewer,
@@ -1083,7 +1084,19 @@ async function importNativeFile(file: File): Promise<void> {
   sceneTotalSize += file.size;
   viewer.addAsset(asset, file.name);
   rebuildAllPanels();
-  showToast({ title: 'Imported', body: `${file.name} (${formatBytes(file.size)})`, kind: 'success' });
+  if (!showEmptyGeometryWarning(asset, file.name)) {
+    showToast({ title: 'Imported', body: `${file.name} (${formatBytes(file.size)})`, kind: 'success' });
+  }
+}
+
+function showEmptyGeometryWarning(asset: LoadedAsset, fileName: string): boolean {
+  if (hasRenderableGeometry(asset.root)) return false;
+  showToast({
+    title: 'No renderable geometry',
+    body: `${fileName} loaded successfully but contains no mesh, points, lines, or splats.`,
+    kind: 'error',
+  });
+  return true;
 }
 
 function requestImportUris(uris: string[]): void {
@@ -1189,6 +1202,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
   rebuildAllPanels();
   refreshTexturesWhenReady(asset);
   hideOverlay();
+  showEmptyGeometryWarning(asset, msg.fileName);
 }
 
 async function handleAddFile(msg: AddFileMessage): Promise<void> {
@@ -1213,11 +1227,13 @@ async function handleAddFile(msg: AddFileMessage): Promise<void> {
   rebuildAllPanels();
   refreshTexturesWhenReady(asset);
   consumePendingImport(msg.requestId);
-  showToast({
-    title: 'Imported',
-    body: `${msg.fileName} (${formatBytes(msg.fileSizeBytes)})`,
-    kind: 'success',
-  });
+  if (!showEmptyGeometryWarning(asset, msg.fileName)) {
+    showToast({
+      title: 'Imported',
+      body: `${msg.fileName} (${formatBytes(msg.fileSizeBytes)})`,
+      kind: 'success',
+    });
+  }
 }
 
 function handleAddFileError(msg: AddFileErrorMessage): void {
