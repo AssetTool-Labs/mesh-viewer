@@ -1814,6 +1814,17 @@ function populateInfo(): void {
     const center = new THREE.Vector3();
     box.getCenter(center);
     appendKV(geomTotals, 'Center', `${fmt(center.x)}, ${fmt(center.y)}, ${fmt(center.z)}`);
+    // Geometry that exists but collapses to a point renders as nothing at all,
+    // and slips past both the no-renderables warning (there *are* meshes) and the
+    // non-finite guard (zero is a finite number). Usually a degenerate transform
+    // — a zero scale on an ancestor.
+    if (stats.meshes + stats.points + stats.lines > 0 && size.x === 0 && size.y === 0 && size.z === 0) {
+      showToast({
+        title: 'Model has zero size',
+        body: `${primaryFile?.name ?? 'This file'} contains geometry but collapses to a single point — a transform in the file is probably scaled to zero.`,
+        kind: 'error',
+      });
+    }
   }
 
   const mats = collectMaterials(viewer.contentRoot);

@@ -869,6 +869,81 @@ function boxCorners(box: THREE.Box3): number[] {
 
 // ---------- Collada ----------
 
+/**
+ * Collada elements whose text is purely numeric, so a comma inside a number can
+ * only be a decimal mark. `<p>` and the `*_array` index lists are included
+ * because a comma-locale exporter formats every number it writes.
+ */
+const COLLADA_NUMERIC_ELEMENTS = [
+  'float_array', 'int_array', 'float', 'int', 'color',
+  'translate', 'scale', 'rotate', 'matrix', 'lookat', 'skew',
+  'bind_shape_matrix', 'transparency', 'index_of_refraction', 'shininess',
+];
+
+/**
+ * A comma-locale exporter writes `0,010000` where the spec wants `0.010000`.
+ * `parseFloat` stops at the comma, so three reads every such value as its
+ * integer part: `<unit meter="0,01">` becomes 0 and scales the whole scene to
+ * nothing, effect parameters collapse (`transparency` 0 × `transparent` alpha
+ * makes every material fully transparent), and vertex coordinates silently lose
+ * their fractional part. assimp's `teapots.DAE` does all three at once.
+ *
+ * Returns null when there is nothing to repair, so ordinary files are handed to
+ * the loader untouched.
+ *
+ * Only a token that is *itself* a single comma-decimal number is rewritten. That
+ * is what keeps a legitimately comma-separated list (`1.5, 2.5`) safe: such a
+ * list carries period decimals, and a token holding two commas is never treated
+ * as a number. The test is per element rather than per document, because these
+ * files mix the two — `teapots.DAE` has 34,844 comma decimals *and* a
+ * period-separated version string.
+ */
+function normalizeColladaDecimalCommas(text: string): string | null {
+  if (!/\d,\d/.test(text)) return null;
+
+  const asDecimalMarks = (body: string): string | null => {
+    if (!/\d,\d/.test(body)) return null;
+    // A period decimal anywhere in this element means the comma separates items.
+    if (/\d\.\d/.test(body)) return null;
+    const tokens = body.trim().split(/\s+/).filter(Boolean);
+    if (!tokens.length) return null;
+    const numeric = /^[-+]?\d+(,\d+)?([eE][-+]?\d+)?$/;
+    if (!tokens.every((token) => numeric.test(token))) return null;
+    return body.replace(/(\d),(\d)/g, '$1.$2');
+  };
+
+  let repaired = 0;
+
+  // `meter` is a lone scalar, so it needs no list disambiguation.
+  let out = text.replace(
+    /(<(?:[\w.-]+:)?unit\b[^>]*?\bmeter\s*=\s*")([^"]*)(")/gi,
+    (all, head: string, value: string, tail: string) => {
+      const fixed = asDecimalMarks(value);
+      if (fixed === null) return all;
+      repaired++;
+      return `${head}${fixed}${tail}`;
+    },
+  );
+
+  const names = COLLADA_NUMERIC_ELEMENTS.join('|');
+  out = out.replace(
+    new RegExp(`(<(?:[\\w.-]+:)?(?:${names})\\b[^>]*>)([^<]*)(<)`, 'gi'),
+    (all, open: string, body: string, next: string) => {
+      const fixed = asDecimalMarks(body);
+      if (fixed === null) return all;
+      repaired++;
+      return `${open}${fixed}${next}`;
+    },
+  );
+
+  if (!repaired) return null;
+  console.warn(
+    `[3DViewer] Collada file uses comma decimal separators; rewrote ${repaired} value list(s) ` +
+      'so units, transforms, coordinates and materials parse correctly.',
+  );
+  return out;
+}
+
 function normalizeColladaPrimitives(text: string): string {
   if (!/<(?:[\w.-]+:)?(?:polygons|tristrips)\b/.test(text)) return text;
 
@@ -959,7 +1034,10 @@ async function loadCollada(text: string, auxFileUris: Record<string, string>): P
   const { ColladaLoader } = await import('three/examples/jsm/loaders/ColladaLoader.js');
   const aux = await makeManagerForAux(auxFileUris);
   const loader = new ColladaLoader(aux.manager);
-  const result = loader.parse(normalizeColladaPrimitives(text), '');
+  // Decimal commas first: the primitives pass below re-serialises index lists,
+  // and repairing the numbers beforehand keeps both passes working on one form.
+  const source = normalizeColladaDecimalCommas(text) ?? text;
+  const result = loader.parse(normalizeColladaPrimitives(source), '');
   if (!result || !result.scene) throw new ViewerError('Collada file did not contain a parsable scene.');
   const root: THREE.Object3D = result.scene;
   const { lights, cameras } = gatherLightsAndCameras(root);
