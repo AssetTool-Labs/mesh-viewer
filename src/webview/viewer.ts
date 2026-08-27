@@ -72,6 +72,51 @@ export function isFiniteBox(box: THREE.Box3): boolean {
   );
 }
 
+/**
+ * Bring every vertex attribute up to `position`'s length.
+ *
+ * three indexes all attributes with the same vertex index and assumes they are
+ * the same length. Some loaders do not deliver that — Collada's skin+morph path
+ * can emit `position` 240 / `skinIndex` 216 — and three then reads past the end.
+ * For skinning that is fatal rather than cosmetic: the out-of-range read yields
+ * an undefined bone index, so `SkinnedMesh.applyBoneTransform` throws
+ * `Cannot read properties of undefined (reading 'matrixWorld')` from inside
+ * `WebGLRenderer.render`, on every frame, and the viewport dies.
+ *
+ * Padding with zeros is the right repair: a zero skin weight makes
+ * `applyBoneTransform` skip that bone entirely, so unskinned vertices simply
+ * stay at their bind position. A short `normal` is dropped instead so the
+ * recompute below can rebuild it consistently.
+ */
+function padShortAttributes(geometry: THREE.BufferGeometry): string[] {
+  const position = geometry.getAttribute('position');
+  if (!position) return [];
+  const padded: string[] = [];
+  for (const name of Object.keys(geometry.attributes)) {
+    if (name === 'position') continue;
+    const attr = geometry.getAttribute(name) as THREE.BufferAttribute;
+    // Interleaved attributes share a buffer with others; rewriting them safely
+    // is not worth it, and no loader that emits them mismatches counts.
+    if (attr.count >= position.count || !(attr as { array?: ArrayLike<number> }).array) continue;
+    if (name === 'normal') {
+      geometry.deleteAttribute('normal');
+      padded.push(`${name} (dropped, recomputed)`);
+      continue;
+    }
+    const source = attr.array as unknown as { length: number };
+    const filled = new (attr.array.constructor as new (n: number) => typeof attr.array)(
+      position.count * attr.itemSize,
+    );
+    (filled as unknown as { set(a: ArrayLike<number>): void }).set(attr.array as ArrayLike<number>);
+    geometry.setAttribute(
+      name,
+      new THREE.BufferAttribute(filled, attr.itemSize, attr.normalized),
+    );
+    padded.push(`${name} ${source.length / attr.itemSize}→${position.count}`);
+  }
+  return padded;
+}
+
 /** The mesh's morph influence array if it has any morph targets, else null. */
 function morphInfluencesOf(o: THREE.Object3D): number[] | null {
   const mesh = o as THREE.Mesh;
@@ -1814,6 +1859,14 @@ export class Viewer {
         this.ensureSparkRenderer();
         this.applySplatOrientation(o);
       } else if (mesh.isMesh) {
+        if (mesh.geometry) {
+          const padded = padShortAttributes(mesh.geometry);
+          if (padded.length) {
+            console.warn(
+              `[3DViewer] ${o.name || 'mesh'}: vertex attributes shorter than position; padded ${padded.join(', ')}.`,
+            );
+          }
+        }
         // Some formats ship without normals; the normals debug mode and lit
         // shading both need them, so fill them in once at load time.
         if (mesh.geometry && !mesh.geometry.getAttribute('normal')) {
