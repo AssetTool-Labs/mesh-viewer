@@ -739,6 +739,60 @@ function isGaussianSplatPLY(buf: ArrayBuffer): boolean {
  * tagged `userData.isSplat` because Spark exposes no public type guard, and the
  * viewer needs to recognise it to dispose it, count it, and orient it.
  */
+/**
+ * Drop a SOG bundle's higher-order spherical harmonics so the rest of it loads.
+ *
+ * The bundled Spark rejects any SOG carrying an `shN` block outright — the whole
+ * file fails with "Failed to parse meta.json for SOGS" and nothing renders. That
+ * is confirmed in both directions: removing `shN` from a failing bundle makes it
+ * load, and grafting `shN` onto a working one makes it fail. Notably it is *not*
+ * the `"version": 2` the symptom is usually attributed to; both the working and
+ * failing samples are version 2.
+ *
+ * `shN` only carries view-dependent colour detail, so dropping it costs a little
+ * specular variation and keeps the splats — much better than showing an error.
+ * Returns null when there is nothing to strip, so ordinary bundles are passed
+ * through untouched and pay nothing.
+ */
+async function stripSogHigherOrderSH(
+  buf: ArrayBuffer,
+): Promise<{ bytes: ArrayBuffer; droppedFiles: number } | null> {
+  try {
+    const { unzipSync, zipSync } = await import('three/examples/jsm/libs/fflate.module.js');
+    const entries = unzipSync(new Uint8Array(buf));
+    const rawMeta = entries['meta.json'];
+    if (!rawMeta) return null;
+    const meta = JSON.parse(new TextDecoder().decode(rawMeta)) as {
+      shN?: { files?: string[] };
+    };
+    if (!meta.shN) return null;
+
+    const shFiles = new Set(meta.shN.files ?? []);
+    delete meta.shN;
+    const kept: Record<string, Uint8Array> = {};
+    for (const [name, bytes] of Object.entries(entries)) {
+      if (name !== 'meta.json' && !shFiles.has(name) && !name.startsWith('shN')) {
+        kept[name] = bytes;
+      }
+    }
+    kept['meta.json'] = new TextEncoder().encode(JSON.stringify(meta));
+    // level 0: the payload is already-compressed .webp, so deflating again would
+    // cost time for nothing.
+    const rebuilt = zipSync(kept, { level: 0 });
+    return {
+      bytes: rebuilt.buffer.slice(
+        rebuilt.byteOffset,
+        rebuilt.byteOffset + rebuilt.byteLength,
+      ) as ArrayBuffer,
+      droppedFiles: shFiles.size,
+    };
+  } catch (err) {
+    // Not a readable zip, or an unexpected meta shape — let Spark report it.
+    console.warn('[3DViewer] Could not inspect SOG bundle for higher-order SH:', err);
+    return null;
+  }
+}
+
 async function loadSplat(
   buf: ArrayBuffer,
   fileName: string,
@@ -755,6 +809,19 @@ async function loadSplat(
         `This is an SPZ v${version} file. The bundled Spark splat decoder reads ` +
           'SPZ v1-v3 (gzip-wrapped) only.',
       );
+    }
+  }
+
+  let droppedSH = false;
+  if (fileTypeKey === 'PCSOGSZIP') {
+    const stripped = await stripSogHigherOrderSH(buf);
+    if (stripped) {
+      console.warn(
+        `[3DViewer] ${fileName} carries higher-order spherical harmonics (shN), which the ` +
+          `bundled Spark decoder cannot read; dropped ${stripped.droppedFiles} shN file(s) so the splats load.`,
+      );
+      buf = stripped.bytes;
+      droppedSH = true;
     }
   }
   const { SplatMesh, SplatFileType } = await import('@sparkjsdev/spark');
@@ -784,6 +851,9 @@ async function loadSplat(
   const asset = emptyAsset(mesh);
   asset.metadata['Splats'] = mesh.numSplats.toLocaleString();
   asset.metadata['Splat format'] = `.${fileTypeKey.toLowerCase()}`;
+  // Said out loud, because the view-dependent colour is genuinely less accurate
+  // than the file describes.
+  if (droppedSH) asset.metadata['Spherical harmonics'] = 'higher-order (shN) dropped';
   return asset;
 }
 
