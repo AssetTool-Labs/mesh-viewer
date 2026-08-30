@@ -7,7 +7,7 @@ const THREE = require('three');
 const root = path.resolve(__dirname, '..');
 const fixtures = [
   { file: 'step-cube.stp', faces: 6, meshes: 1, bounds: [[-160, -140, 0], [140, 160, 300]] },
-  { file: 'step-rounded-cube.step', faces: 7, meshes: 1, bounds: [[0, 0, 0], [10, 10, 10]] },
+  { file: 'step-rounded-cube.step', faces: 7, meshes: 1, bounds: [[0, 0, 0], [10, 10, 10]], maxTriangles: 80 },
   {
     file: 'step-conical-surface.step',
     faces: 5,
@@ -56,13 +56,49 @@ const built = esbuild.buildSync({
 });
 const compiled = { exports: {} };
 new Function('module', 'exports', 'require', built.outputFiles[0].text)(compiled, compiled.exports, require);
-const { expandStepKnots, parsePart21, tessellateStep, validateStepSpline } = compiled.exports;
+const {
+  buildSurfaceRectangle,
+  expandStepKnots,
+  parsePart21,
+  rectangleCoordinates,
+  tessellateStep,
+  validateStepSpline,
+} = compiled.exports;
 assert.throws(() => tessellateStep(''), /Not an ISO-10303-21 STEP file/);
 assert.throws(() => tessellateStep('ISO-10303-21; HEADER; ENDSEC; DATA; ENDSEC; END-ISO-10303-21;'), /contains no entities/);
 assert.throws(() => expandStepKnots([65], [0]), /Invalid B-spline knot multiplicity/);
 assert.throws(() => expandStepKnots([2], [Number.NaN]), /finite and nondecreasing/);
 assert.throws(() => validateStepSpline(99, 100, 200), /outside the supported range/);
 assert.throws(() => validateStepSpline(3, 4, 7), /inconsistent control-point and knot counts/);
+assert.deepEqual(
+  rectangleCoordinates(
+    [new THREE.Vector2(0, 0), new THREE.Vector2(0.1, 0), new THREE.Vector2(0.4, 0), new THREE.Vector2(1, 0)],
+    'x',
+    0,
+    1,
+    1e-6,
+  ),
+  [0, 0.1, 0.4, 1],
+  'structured grids preserve nonuniform source coordinates',
+);
+const nearFullAngle = Math.PI * 1.95;
+const nearFullCylinder = buildSurfaceRectangle(
+  { type: 'CYLINDRICAL_SURFACE', periodU: Math.PI * 2 },
+  [
+    new THREE.Vector2(0, 0),
+    new THREE.Vector2(nearFullAngle, 0),
+    new THREE.Vector2(nearFullAngle, 1),
+    new THREE.Vector2(0, 1),
+  ],
+  [],
+  undefined,
+);
+assert.ok(nearFullCylinder, 'near-full cylinder uses a structured grid');
+assert.equal(
+  Math.max(...nearFullCylinder.points.map((point) => point.x)),
+  nearFullAngle,
+  'near-full cylinder preserves its trimmed angular span',
+);
 
 const binaryDocument = parsePart21('ISO-10303-21; DATA; #1=PROPERTY_DEFINITION(\'binary\',"0aFF",$); ENDSEC; END-ISO-10303-21;');
 assert.deepEqual(binaryDocument.entities.get(1).args[1], { kind: 'binary', value: '0AFF' });
@@ -156,7 +192,55 @@ for (const fixture of fixtures) {
     assert.equal(colors.size, fixture.colors, `${fixture.file}: distinct part colors`);
   }
   const triangles = result.meshes.reduce((sum, mesh) => sum + mesh.indices.length / 3, 0);
+  if (fixture.maxTriangles) {
+    assert.ok(triangles <= fixture.maxTriangles, `${fixture.file}: trimmed periodic faces use structured grids`);
+  }
   console.log(`${fixture.file}: ${result.meshes.length} mesh(es), ${triangles} triangles, ${(performance.now() - started).toFixed(1)} ms`);
+}
+
+const roundedCube = tessellateStep(fs.readFileSync(path.join(root, 'test_data', 'step-rounded-cube.step'), 'utf8')).meshes[0];
+const roundedGeometry = new THREE.BufferGeometry();
+roundedGeometry.setAttribute('position', new THREE.BufferAttribute(roundedCube.positions, 3));
+roundedGeometry.setIndex(new THREE.BufferAttribute(roundedCube.indices, 1));
+const roundedMesh = new THREE.Mesh(roundedGeometry, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+const roundedRaycaster = new THREE.Raycaster();
+for (const [x, z] of [[6, 9.5], [7, 9], [8, 8], [8.5, 7], [9.5, 6], [7.5, 8.5]]) {
+  roundedRaycaster.set(new THREE.Vector3(x, -1, z), new THREE.Vector3(0, 1, 0));
+  assert.equal(roundedRaycaster.intersectObject(roundedMesh, false).length, 2, 'Rounded corner stays closed beneath its arc');
+}
+roundedRaycaster.set(new THREE.Vector3(9, -1, 9), new THREE.Vector3(0, 1, 0));
+assert.equal(roundedRaycaster.intersectObject(roundedMesh, false).length, 0, 'Rounded corner stays open outside its arc');
+
+const led = tessellateStep(fs.readFileSync(path.join(root, 'test_data', 'step-led-5mm.step'), 'utf8'));
+const ledShell = led.meshes.find((mesh) => mesh.name === 'Funda');
+assert.ok(ledShell, 'LED contains its shell mesh');
+let maximumDomeEdge = 0;
+for (let index = 0; index < ledShell.indices.length; index += 3) {
+  const triangle = Array.from(ledShell.indices.slice(index, index + 3));
+  if (!triangle.every((vertex) => ledShell.positions[vertex * 3 + 2] >= 6.199)) continue;
+  for (const [first, second] of [[0, 1], [1, 2], [2, 0]]) {
+    maximumDomeEdge = Math.max(
+      maximumDomeEdge,
+      new THREE.Vector3().fromArray(ledShell.positions, triangle[first] * 3)
+        .distanceTo(new THREE.Vector3().fromArray(ledShell.positions, triangle[second] * 3)),
+    );
+  }
+}
+assert.ok(maximumDomeEdge <= 0.6, 'LED dome avoids seam-spanning triangles');
+const ledGeometry = new THREE.BufferGeometry();
+ledGeometry.setAttribute('position', new THREE.BufferAttribute(ledShell.positions, 3));
+ledGeometry.setIndex(new THREE.BufferAttribute(ledShell.indices, 1));
+const ledMesh = new THREE.Mesh(ledGeometry, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+const ledRaycaster = new THREE.Raycaster();
+for (const z of [6.25, 7, 7.5, 8]) {
+  for (let index = 0; index < 72; index++) {
+    const angle = (index + 0.5) * Math.PI * 2 / 72;
+    ledRaycaster.set(
+      new THREE.Vector3(5 * Math.cos(angle), 5 * Math.sin(angle), z),
+      new THREE.Vector3(-Math.cos(angle), -Math.sin(angle), 0),
+    );
+    assert.ok(ledRaycaster.intersectObject(ledMesh, false).length > 0, 'LED dome remains continuously visible');
+  }
 }
 
 const resistor = tessellateStep(fs.readFileSync(path.join(root, 'test_data', 'step-resistor.step'), 'utf8'));
@@ -172,7 +256,7 @@ const raycaster = new THREE.Raycaster();
 for (const [ringName, sampleX] of [['Ring-1', -1.33], ['Ring-2', -0.44], ['Ring-3', 0.44], ['Ring-4', 1.33]]) {
   let visibleSamples = 0;
   for (let index = 0; index < 72; index++) {
-    const angle = index * Math.PI * 2 / 72;
+    const angle = (index + 0.5) * Math.PI * 2 / 72;
     raycaster.set(
       new THREE.Vector3(sampleX, 5 * Math.cos(angle), 5 * Math.sin(angle)),
       new THREE.Vector3(0, -Math.cos(angle), -Math.sin(angle)),
@@ -180,6 +264,16 @@ for (const [ringName, sampleX] of [['Ring-1', -1.33], ['Ring-2', -0.44], ['Ring-
     if (raycaster.intersectObjects(resistorMeshes, false)[0]?.object.name === ringName) visibleSamples++;
   }
   assert.equal(visibleSamples, 72, `${ringName} remains continuously visible around the body`);
+}
+
+const pins = resistor.meshes.find((mesh) => mesh.name === 'pins');
+assert.ok(pins, 'Resistor contains its pin mesh');
+assert.ok(pins.indices.length / 3 <= 2_000, 'Pin elbows use trimmed periodic torus grids');
+const pinPositions = pins.positions;
+for (let index = 0; index < pinPositions.length; index += 3) {
+  const x = pinPositions[index];
+  const z = pinPositions[index + 2];
+  assert.ok(z >= -1.001 || Math.abs(x) >= 4.7, 'Pin elbows stay within their trimmed quarter-torus envelope');
 }
 
 console.log(`STEP regression passed (${fixtures.length} files).`);

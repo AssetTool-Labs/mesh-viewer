@@ -37,6 +37,7 @@ interface Placement {
 
 interface Surface {
   readonly type: string;
+  readonly center?: Vector3;
   readonly periodU?: number;
   readonly periodV?: number;
   pointAt(u: number, v: number): Vector3;
@@ -242,7 +243,7 @@ class StepResolver {
 
     const projected = bounds.map((bound) => {
       const edgeLoop = this.requireRefEntity(bound.args[1], `Boundary #${bound.id} has no edge loop.`);
-      const fullPeriodU = this.loopSpansFullPeriod(edgeLoop);
+      const fullPeriodAxis = this.loopFullPeriodAxis(edgeLoop, surfaceEntity, surface);
       const loop = this.edgeLoop(edgeLoop, surfaceEntity, surface);
       let points = loop.points;
       let uv = loop.uv;
@@ -250,9 +251,9 @@ class StepResolver {
         points = points.reverse();
         uv = uv.reverse();
       }
-      if (surface.periodU && !fullPeriodU) uv = unwrapPeriodicLoop(uv, 'x', surface.periodU);
-      if (surface.periodV) uv = unwrapPeriodicLoop(uv, 'y', surface.periodV);
-      return { points, uv, area: signedArea(uv), fullPeriodU };
+      if (surface.periodU && fullPeriodAxis !== 'x') uv = unwrapPeriodicLoop(uv, 'x', surface.periodU);
+      if (surface.periodV && fullPeriodAxis !== 'y') uv = unwrapPeriodicLoop(uv, 'y', surface.periodV);
+      return { points, uv, area: signedArea(uv), fullPeriodAxis };
     });
 
     projected.sort((left, right) => Math.abs(right.area) - Math.abs(left.area));
@@ -269,12 +270,13 @@ class StepResolver {
 
     const contour = outer.uv.map((point) => point.clone());
     const holeContours = holes.map((hole) => hole.uv.map((point) => point.clone()));
-    const periodicGrid = buildPeriodicRectangle(surface, contour, holeContours, outer.fullPeriodU);
-    let triangles = periodicGrid?.triangles ?? ShapeUtils.triangulateShape(contour, holeContours);
+    const surfaceGrid = buildSphericalCap(surface, outer.points, holes.map((hole) => hole.points))
+      ?? buildSurfaceRectangle(surface, contour, holeContours, outer.fullPeriodAxis);
+    let triangles = surfaceGrid?.triangles ?? ShapeUtils.triangulateShape(contour, holeContours);
     if (triangles.length === 0) throw new Error('boundary triangulation produced no triangles.');
 
-    let allUv = periodicGrid?.points ?? [...contour, ...holeContours.flat()];
-    if (!periodicGrid) {
+    let allUv = surfaceGrid?.points ?? [...contour, ...holeContours.flat()];
+    if (!surfaceGrid) {
       ({ points: allUv, triangles } = insertSurfaceCenter(surface, allUv, triangles));
       ({ points: allUv, triangles } = refineSurfaceTriangles(surface, allUv, triangles));
     }
@@ -320,8 +322,10 @@ class StepResolver {
       const sameSense = !isStepEnum(edge.args[4], 'F');
       let sampled = this.sampleCurve(curve, start, end, sameSense);
       const orientedForward = !isStepEnum(oriented.args[4], 'F');
-      let sampledUv = this.samplePCurve(curve, surfaceEntity, surface, sampled, sameSense, orientedForward)
-        ?? sampled.map((point) => surface.project(point));
+      let sampledUv = surface.type === 'PLANE'
+        ? sampled.map((point) => surface.project(point))
+        : this.samplePCurve(curve, surfaceEntity, surface, sampled, sameSense, orientedForward)
+          ?? sampled.map((point) => surface.project(point));
       if (!orientedForward) {
         sampled = sampled.reverse();
         sampledUv = sampledUv.reverse();
@@ -341,14 +345,50 @@ class StepResolver {
     return { points, uv };
   }
 
-  private loopSpansFullPeriod(loop: StepEntity): boolean {
-    const seamEdges = new Map<number, number>();
+  private loopFullPeriodAxis(
+    loop: StepEntity,
+    surfaceEntity: StepEntity,
+    surface: Surface,
+  ): 'x' | 'y' | undefined {
+    const seamEdges = new Map<number, StepEntity>();
     for (const oriented of this.refEntities(loop.args[1])) {
       const edge = this.refEntity(oriented.args[3]);
       const curve = edge && this.refEntity(edge.args[3]);
-      if (edge && curve?.type === 'SEAM_CURVE') seamEdges.set(edge.id, (seamEdges.get(edge.id) ?? 0) + 1);
+      if (!edge || curve?.type !== 'SEAM_CURVE') continue;
+      if (seamEdges.has(edge.id)) {
+        const pcurves = this.refEntities(curve.args[2]).filter((candidate) => {
+          const basis = candidate.type === 'PCURVE' ? candidate.args[1] : undefined;
+          return isStepRef(basis) && basis.id === surfaceEntity.id;
+        });
+        if (pcurves.length < 2 || !surface.nativeParameter) return undefined;
+        const anchors = pcurves.slice(0, 2).map((pcurve) => {
+          const representation = this.refEntity(pcurve.args[2]);
+          const parameterCurve = representation && this.refEntities(representation.args[1])[0];
+          return parameterCurve ? this.parameterCurveAnchor(parameterCurve, surface) : undefined;
+        });
+        if (!anchors[0] || !anchors[1]) return undefined;
+        const deltaX = Math.abs(anchors[1].x - anchors[0].x);
+        const deltaY = Math.abs(anchors[1].y - anchors[0].y);
+        if (surface.periodU && Math.abs(deltaX - surface.periodU) <= surface.periodU * 1e-4) return 'x';
+        if (surface.periodV && Math.abs(deltaY - surface.periodV) <= surface.periodV * 1e-4) return 'y';
+        return undefined;
+      }
+      seamEdges.set(edge.id, curve);
     }
-    return [...seamEdges.values()].some((count) => count >= 2);
+    return undefined;
+  }
+
+  private parameterCurveAnchor(curve: StepEntity, surface: Surface): Vector2 | undefined {
+    if (!surface.nativeParameter) return undefined;
+    if (curve.type === 'LINE') {
+      const origin = this.refEntity(curve.args[1]);
+      const values = origin ? this.numberList(origin.args[1]) : [];
+      return surface.nativeParameter(new Vector2(values[0] ?? 0, values[1] ?? 0));
+    }
+    if (entityArgs(curve, 'B_SPLINE_CURVE') || curve.type === 'B_SPLINE_CURVE_WITH_KNOTS') {
+      return surface.nativeParameter(this.sampleParameterBSpline(curve, 2)[0]);
+    }
+    return undefined;
   }
 
   private samplePCurve(
@@ -398,6 +438,8 @@ class StepResolver {
     } else if (Math.abs(direction.x) <= axisTolerance) {
       for (const point of projected) point.x = origin.x;
     }
+    alignPeriodicStart(projected, origin.x, surface.periodU, 'x');
+    alignPeriodicStart(projected, origin.y, surface.periodV, 'y');
     const first = projected[0];
     const last = projected[projected.length - 1];
     adjustPeriodicEnd(first, last, direction.x, surface.periodU, 'x');
@@ -608,6 +650,7 @@ class StepResolver {
       const radius = this.number(entity.args[2], `Sphere #${entity.id} has no radius.`) * this.currentLengthScale;
       return {
         type: entity.type,
+        center: placement.origin,
         periodU: Math.PI * 2,
         periodV: undefined,
         pointAt: (u, v) => {
@@ -1100,6 +1143,17 @@ function shiftLoopNear(points: readonly Vector2[], target: number, axis: 'x' | '
   for (const point of points) point[axis] += shift;
 }
 
+function alignPeriodicStart(
+  points: readonly Vector2[],
+  target: number,
+  period: number | undefined,
+  axis: 'x' | 'y',
+): void {
+  if (!period || points.length === 0) return;
+  const shift = Math.round((target - points[0][axis]) / period) * period;
+  for (const point of points) point[axis] += shift;
+}
+
 function adjustPeriodicEnd(
   start: Vector2,
   end: Vector2,
@@ -1107,7 +1161,7 @@ function adjustPeriodicEnd(
   period: number | undefined,
   axis: 'x' | 'y',
 ): void {
-  if (!period) return;
+  if (!period || Math.abs(direction) < EPSILON) return;
   if (Math.abs(end[axis] - start[axis]) < EPSILON) {
     end[axis] = start[axis] + (direction < 0 ? -period : period);
     return;
@@ -1260,19 +1314,33 @@ function refineSurfaceTriangles(
   return { points, triangles };
 }
 
-function buildPeriodicRectangle(
+export function buildSurfaceRectangle(
   surface: Surface,
   contour: readonly Vector2[],
   holes: readonly Vector2[][],
-  forceFullPeriod: boolean,
+  fullPeriodAxis: 'x' | 'y' | undefined,
 ): { points: Vector2[]; triangles: number[][] } | undefined {
-  if (!surface.periodU || holes.length > 0 || contour.length < 4) return undefined;
+  if (holes.length > 0 || contour.length < 4) return undefined;
   const minimum = contour.reduce((result, point) => result.min(point), contour[0].clone());
   const maximum = contour.reduce((result, point) => result.max(point), contour[0].clone());
   let spanU = maximum.x - minimum.x;
-  const spanV = maximum.y - minimum.y;
-  if (spanU < surface.periodU * 0.95 || spanV < EPSILON) return undefined;
-  if (forceFullPeriod) spanU = surface.periodU;
+  let spanV = maximum.y - minimum.y;
+  const spansNearPeriod = Boolean(
+    (surface.periodU && spanU >= surface.periodU * 0.95)
+    || (surface.periodV && spanV >= surface.periodV * 0.95),
+  );
+  if (!fullPeriodAxis && !spansNearPeriod
+    && surface.type !== 'CYLINDRICAL_SURFACE' && surface.type !== 'CONICAL_SURFACE') {
+    return undefined;
+  }
+  if ((!surface.periodU && !surface.periodV) || spanU < EPSILON || spanV < EPSILON) return undefined;
+  if (fullPeriodAxis) {
+    const period = fullPeriodAxis === 'x' ? surface.periodU : surface.periodV;
+    const periodicSpan = fullPeriodAxis === 'x' ? spanU : spanV;
+    if (!period || periodicSpan < period * 0.95) return undefined;
+    if (fullPeriodAxis === 'x') spanU = period;
+    else spanV = period;
+  }
   const toleranceU = Math.max(spanU * 1e-4, 1e-7);
   const toleranceV = Math.max(spanV * 1e-4, 1e-7);
   const followsRectangle = contour.every((point) =>
@@ -1283,27 +1351,98 @@ function buildPeriodicRectangle(
   );
   if (!followsRectangle) return undefined;
 
-  const segmentsU = 48;
-  const segmentsV = surface.type === 'CYLINDRICAL_SURFACE' || surface.type === 'CONICAL_SURFACE' ? 1 : 8;
+  const coordinatesU = rectangleCoordinates(contour, 'x', minimum.x, minimum.x + spanU, toleranceU);
+  const coordinatesV = rectangleCoordinates(contour, 'y', minimum.y, minimum.y + spanV, toleranceV);
   const points: Vector2[] = [];
-  for (let row = 0; row <= segmentsV; row++) {
-    for (let column = 0; column <= segmentsU; column++) {
-      points.push(new Vector2(
-        minimum.x + spanU * column / segmentsU,
-        minimum.y + spanV * row / segmentsV,
-      ));
+  for (const v of coordinatesV) {
+    for (const u of coordinatesU) {
+      points.push(new Vector2(u, v));
     }
   }
   const triangles: number[][] = [];
-  const stride = segmentsU + 1;
-  for (let row = 0; row < segmentsV; row++) {
-    for (let column = 0; column < segmentsU; column++) {
+  const stride = coordinatesU.length;
+  for (let row = 0; row < coordinatesV.length - 1; row++) {
+    for (let column = 0; column < coordinatesU.length - 1; column++) {
       const a = row * stride + column;
       const b = a + 1;
       const c = a + stride;
       const d = c + 1;
       triangles.push([a, b, c], [b, d, c]);
     }
+  }
+  return { points, triangles };
+}
+
+export function rectangleCoordinates(
+  points: readonly Vector2[],
+  axis: 'x' | 'y',
+  minimum: number,
+  maximum: number,
+  tolerance: number,
+): number[] {
+  const values = points.map((point) => point[axis]).sort((left, right) => left - right);
+  const coordinates = [values[0]];
+  for (let index = 1; index < values.length; index++) {
+    if (values[index] - coordinates[coordinates.length - 1] > tolerance) coordinates.push(values[index]);
+  }
+  if (coordinates.length < 2) return [minimum, maximum];
+  coordinates[0] = minimum;
+  coordinates[coordinates.length - 1] = maximum;
+  return coordinates;
+}
+
+function buildSphericalCap(
+  surface: Surface,
+  boundary: readonly Vector3[],
+  holes: readonly Vector3[][],
+): { points: Vector2[]; triangles: number[][] } | undefined {
+  if (surface.type !== 'SPHERICAL_SURFACE' || !surface.center || holes.length > 0 || boundary.length < 8) {
+    return undefined;
+  }
+  const normal = new Vector3();
+  for (let index = 0; index < boundary.length; index++) {
+    const first = boundary[index];
+    const second = boundary[(index + 1) % boundary.length];
+    normal.x += (first.y - second.y) * (first.z + second.z);
+    normal.y += (first.z - second.z) * (first.x + second.x);
+    normal.z += (first.x - second.x) * (first.y + second.y);
+  }
+  if (normal.lengthSq() < EPSILON) return undefined;
+  normal.normalize();
+  const radius = boundary.reduce((sum, point) => sum + point.distanceTo(surface.center!), 0) / boundary.length;
+  const planeTolerance = Math.max(radius * 1e-4, EPSILON);
+  if (boundary.some((point) => Math.abs(point.clone().sub(surface.center!).dot(normal)) > planeTolerance)) {
+    return undefined;
+  }
+
+  const radialSegments = 16;
+  const points: Vector2[] = [];
+  for (let ring = 0; ring < radialSegments; ring++) {
+    const angle = Math.PI * 0.5 * (radialSegments - ring) / radialSegments;
+    for (const point of boundary) {
+      const radial = point.clone().sub(surface.center).normalize();
+      const direction = radial.multiplyScalar(Math.sin(angle)).addScaledVector(normal, Math.cos(angle));
+      points.push(surface.project(surface.center.clone().addScaledVector(direction, radius)));
+    }
+  }
+  const pole = points.length;
+  points.push(surface.project(surface.center.clone().addScaledVector(normal, radius)));
+
+  const triangles: number[][] = [];
+  const ringSize = boundary.length;
+  for (let ring = 0; ring < radialSegments - 1; ring++) {
+    for (let index = 0; index < ringSize; index++) {
+      const next = (index + 1) % ringSize;
+      const outer = ring * ringSize + index;
+      const outerNext = ring * ringSize + next;
+      const inner = outer + ringSize;
+      const innerNext = outerNext + ringSize;
+      triangles.push([outer, outerNext, inner], [outerNext, innerNext, inner]);
+    }
+  }
+  const innerRing = (radialSegments - 1) * ringSize;
+  for (let index = 0; index < ringSize; index++) {
+    triangles.push([innerRing + index, innerRing + (index + 1) % ringSize, pole]);
   }
   return { points, triangles };
 }
