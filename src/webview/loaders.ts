@@ -38,13 +38,13 @@ export interface LoadedAsset {
  * Build a LoadingManager that resolves sidecar file references (textures, .bin,
  * .mtl) to webview-accessible URIs the browser can fetch directly.
  */
-function makeManagerForAux(auxFileUris: Record<string, string>): {
+async function makeManagerForAux(auxFileUris: Record<string, string>): Promise<{
   manager: LoadingManager;
   baseUrl: string;
   /** Resolves when every load started through this manager has settled
    *  (or immediately if the parse never started one). Call after parse(). */
   whenReady: () => Promise<void>;
-} {
+}> {
   // Aux names are paths relative to the model's directory (e.g.
   // "textures/diffuse.png"). Index by full relative path, and by bare
   // filename as a fallback for references whose directory prefix doesn't
@@ -58,6 +58,22 @@ function makeManagerForAux(auxFileUris: Record<string, string>): {
     if (!byName.has(base)) byName.set(base, uri);
   }
   const manager = new LoadingManager();
+
+  // The browser cannot decode Targa, so three's FBX/Collada/MTL loaders skip
+  // .tga textures outright ("TGA loader not found, skipping …") unless a handler
+  // is registered for them. Wired only when the asset actually ships one, so an
+  // ordinary load doesn't pay for the import. The manager is handed to the
+  // loader so its fetch goes through the URL modifier below and counts towards
+  // whenReady(), which is what refreshes the texture panel.
+  if (Object.keys(auxFileUris ?? {}).some((name) => name.toLowerCase().endsWith('.tga'))) {
+    try {
+      const { TGALoader } = await import('three/examples/jsm/loaders/TGALoader.js');
+      manager.addHandler(/\.tga$/i, new TGALoader(manager));
+    } catch (err) {
+      console.warn('[3DViewer] Failed to initialize TGALoader:', err);
+    }
+  }
+
   manager.setURLModifier((url) => {
     try {
       const u = decodeURIComponent(url)
@@ -83,6 +99,18 @@ function makeManagerForAux(auxFileUris: Record<string, string>): {
   return { manager, baseUrl: '', whenReady: () => (sawLoads ? allLoaded : Promise.resolve()) };
 }
 
+/**
+ * ASCII tag of `length` bytes at `offset`, for magic-number and IFF sniffing.
+ * Built byte by byte rather than through TextDecoder so no encoding label is
+ * involved — these tags are always plain ASCII.
+ */
+function tagAt(buf: ArrayBuffer, offset: number, length: number): string {
+  if (buf.byteLength < offset + length) return '';
+  let out = '';
+  for (const byte of new Uint8Array(buf, offset, length)) out += String.fromCharCode(byte);
+  return out;
+}
+
 function emptyAsset(root: THREE.Object3D): LoadedAsset {
   return { root, animations: [], lights: [], cameras: [], metadata: {} };
 }
@@ -97,6 +125,40 @@ function gatherLightsAndCameras(root: THREE.Object3D): { lights: THREE.Light[]; 
   return { lights, cameras };
 }
 
+/**
+ * An error whose message is already written for a user to read. `loadAsset`
+ * passes these through untouched instead of framing them as a parse failure.
+ */
+export class ViewerError extends Error {}
+
+/** The three.js loader that owns each extension, named in failure messages. */
+const LOADER_NAMES: Record<string, string> = {
+  gltf: 'GLTFLoader',
+  glb: 'GLTFLoader',
+  obj: 'OBJLoader',
+  fbx: 'FBXLoader',
+  stl: 'STLLoader',
+  ply: 'PLYLoader',
+  dae: 'ColladaLoader',
+  '3ds': 'TDSLoader',
+  '3mf': '3MFLoader',
+  wrl: 'VRMLLoader',
+  vrml: 'VRMLLoader',
+  usd: 'USDLoader',
+  usda: 'USDLoader',
+  usdc: 'USDLoader',
+  usdz: 'USDLoader',
+  vox: 'VOXLoader',
+  pcd: 'PCDLoader',
+  xyz: 'XYZLoader',
+  lwo: 'LWOLoader',
+  kmz: 'KMZLoader',
+  spz: 'the Spark splat loader',
+  splat: 'the Spark splat loader',
+  ksplat: 'the Spark splat loader',
+  sog: 'the Spark splat loader',
+};
+
 export async function loadAsset(
   ext: string,
   data: ArrayBuffer | string,
@@ -105,6 +167,37 @@ export async function loadAsset(
 ): Promise<LoadedAsset> {
   const lower = ext.toLowerCase();
 
+  // Every loader fails somewhere deep on an empty payload — usually a RangeError
+  // about buffer bounds, which tells the user nothing. Name the real problem.
+  const usableBytes = typeof data === 'string' ? data.trim().length : data.byteLength;
+  if (usableBytes === 0) {
+    throw new Error(`${fileName} is empty or truncated — there is no data to load.`);
+  }
+
+  try {
+    return await dispatch(lower, data, fileName, auxFileUris);
+  } catch (err) {
+    if (err instanceof ViewerError) throw err;
+    // three.js loaders throw straight out of their parse routines on malformed
+    // input, so the bare message ("Cannot read properties of undefined (reading
+    // 'a')") would otherwise be the whole of what the error overlay shows. Keep
+    // the original — with its stack — in the console for debugging.
+    const original = err instanceof Error ? err : new Error(String(err));
+    const loader = LOADER_NAMES[lower] ?? `The .${lower} loader`;
+    console.error(`[3DViewer] ${loader} failed on ${fileName}:`, original);
+    throw new ViewerError(
+      `${loader} could not parse ${fileName} — it may be malformed or use a ` +
+        `variant of the format that is not supported. (${original.message})`,
+    );
+  }
+}
+
+async function dispatch(
+  lower: string,
+  data: ArrayBuffer | string,
+  fileName: string,
+  auxFileUris: Record<string, string>,
+): Promise<LoadedAsset> {
   switch (lower) {
     case 'gltf':
     case 'glb':
@@ -154,7 +247,7 @@ export async function loadAsset(
     case 'kmz':
       return loadKMZ(data as ArrayBuffer);
     default:
-      throw new Error(`Unsupported file extension: .${ext}`);
+      throw new ViewerError(`Unsupported file extension: .${lower}`);
   }
 }
 
@@ -178,14 +271,195 @@ function gltfUsesKtx2(ext: string, data: ArrayBuffer | string): boolean {
   }
 }
 
+function validateGltfScene(ext: string, data: ArrayBuffer | string): void {
+  let document: { scene?: unknown; scenes?: unknown };
+  try {
+    let json: string;
+    if (ext === 'glb') {
+      const view = new DataView(data as ArrayBuffer);
+      const jsonLen = view.getUint32(12, true);
+      json = new TextDecoder().decode(new Uint8Array(data as ArrayBuffer, 20, jsonLen));
+    } else {
+      json = data as string;
+    }
+    document = JSON.parse(json) as { scene?: unknown; scenes?: unknown };
+  } catch {
+    return;
+  }
+
+  const scene = document.scene;
+  if (scene === undefined) return;
+  const sceneIndex = Number.isInteger(scene) ? scene as number : -1;
+  if (!Array.isArray(document.scenes) || sceneIndex < 0 || sceneIndex >= document.scenes.length) {
+    throw new ViewerError(`glTF declares default scene ${String(scene)} but does not define it.`);
+  }
+}
+
+/**
+ * Apply KHR_node_visibility, which three's GLTFLoader does not implement — nodes
+ * an asset marks hidden would otherwise render.
+ *
+ * The flag is read back out of `userData.gltfExtensions`, where GLTFLoader parks
+ * node extensions it doesn't recognise, rather than out of the source JSON. That
+ * matters for nodes reused by several parents: GLTFLoader hands out clones of
+ * those, and `Object3D.clone()` deep-copies userData, so every instance carries
+ * the flag while the JSON node index only maps to the original.
+ *
+ * Setting `visible = false` is the whole of the behaviour: three already skips
+ * descendants of a hidden object, and drops hidden lights from the render, which
+ * is what the extension specifies.
+ */
+function applyNodeVisibility(root: THREE.Object3D): number {
+  let hidden = 0;
+  root.traverse((o) => {
+    const extensions = o.userData?.gltfExtensions as
+      | { KHR_node_visibility?: { visible?: boolean } }
+      | undefined;
+    if (extensions?.KHR_node_visibility?.visible === false) {
+      o.visible = false;
+      hidden++;
+    }
+  });
+  return hidden;
+}
+
+const SPEC_GLOSS = 'KHR_materials_pbrSpecularGlossiness';
+
+interface SpecGlossDef {
+  diffuseFactor?: [number, number, number, number];
+  specularFactor?: [number, number, number];
+  glossinessFactor?: number;
+  diffuseTexture?: { index: number; texCoord?: number };
+  specularGlossinessTexture?: { index: number; texCoord?: number };
+}
+
+/**
+ * Approximate KHR_materials_pbrSpecularGlossiness as a metallic-roughness
+ * material.
+ *
+ * three removed its built-in support for the extension, so GLTFLoader ignores it
+ * and the material falls back to the glTF defaults for a missing
+ * pbrMetallicRoughness block — metalness 1, roughness 1 — which renders
+ * spec-gloss assets as dark, flat metal.
+ *
+ * This is a conversion, not the original shading model:
+ *  - roughness comes straight from `1 - glossinessFactor`.
+ *  - metalness is estimated by measuring the specular colour against 0.04, the
+ *    reflectance of a dielectric; the base colour is then blended towards the
+ *    specular colour as metalness rises, since a metal's tint lives in its
+ *    reflectance rather than its diffuse term.
+ *  - a specularGlossinessTexture's *per-pixel* specular and gloss are not
+ *    unpacked: three's roughnessMap/metalnessMap sample G and B while spec-gloss
+ *    packs specular in RGB and gloss in A, so the layouts do not overlap and the
+ *    image would have to be repacked pixel by pixel. Those materials instead get
+ *    a neutral dielectric. Falling back to the *factors* there would be actively
+ *    wrong — they default to white specular and full gloss, which the texture is
+ *    meant to modulate, so the material would come out as a chrome mirror.
+ */
+function specGlossPlugin(
+  parser: { json: { materials?: { extensions?: Record<string, unknown> }[] } },
+  onApplied: (approximatedTexture: boolean) => void,
+) {
+  const defFor = (index: number): SpecGlossDef | undefined =>
+    parser.json.materials?.[index]?.extensions?.[SPEC_GLOSS] as SpecGlossDef | undefined;
+
+  return {
+    name: SPEC_GLOSS,
+    getMaterialType: (index: number) => (defFor(index) ? THREE.MeshStandardMaterial : null),
+    extendMaterialParams: (index: number, params: Record<string, unknown>) => {
+      const sg = defFor(index);
+      if (!sg) return null;
+      onApplied(sg.specularGlossinessTexture !== undefined);
+
+      const diffuse = sg.diffuseFactor ?? [1, 1, 1, 1];
+      const specular = sg.specularFactor ?? [1, 1, 1];
+      const glossiness = sg.glossinessFactor ?? 1;
+
+      if (sg.specularGlossinessTexture) {
+        // Per-pixel specular/gloss we cannot honour — see the note above on why
+        // the factors are not a usable stand-in here.
+        params.color = new THREE.Color(diffuse[0], diffuse[1], diffuse[2]);
+        params.metalness = 0;
+        params.roughness = 0.5;
+      } else {
+        const specularStrength = Math.max(specular[0], specular[1], specular[2]);
+        const metalness = Math.min(1, Math.max(0, (specularStrength - 0.04) / 0.96));
+        const color = new THREE.Color(diffuse[0], diffuse[1], diffuse[2]);
+        color.lerp(new THREE.Color(specular[0], specular[1], specular[2]), metalness);
+        params.color = color;
+        params.metalness = metalness;
+        params.roughness = 1 - glossiness;
+      }
+      params.opacity = diffuse[3];
+
+      const pending: Promise<unknown>[] = [];
+      if (sg.diffuseTexture) {
+        pending.push(
+          (parser as unknown as {
+            assignTexture(
+              p: Record<string, unknown>,
+              name: string,
+              def: { index: number; texCoord?: number },
+              colorSpace?: string,
+            ): Promise<unknown>;
+          }).assignTexture(params, 'map', sg.diffuseTexture, THREE.SRGBColorSpace),
+        );
+      }
+      return Promise.all(pending);
+    },
+  };
+}
+
+/**
+ * The `asset.version` of a pre-2.0 glTF, or null when the file is 2.0 (or its
+ * version can't be read). GLTFLoader does reject these, but with
+ * "Unsupported asset." / "Legacy binary file detected" — accurate, yet it never
+ * says what to do next. A .glb carries the container version at offset 4; a
+ * .gltf carries it in `asset.version`.
+ */
+function legacyGltfVersion(ext: string, data: ArrayBuffer | string): string | null {
+  if (ext === 'glb') {
+    const buf = data as ArrayBuffer;
+    if (buf.byteLength < 12 || tagAt(buf, 0, 4) !== 'glTF') return null;
+    const container = new DataView(buf).getUint32(4, true);
+    return container < 2 ? '1.0' : null;
+  }
+  try {
+    const version = (JSON.parse(data as string) as { asset?: { version?: string } }).asset?.version;
+    return version && !version.startsWith('2') ? version : null;
+  } catch {
+    return null;
+  }
+}
+
 async function loadGLTF(
   ext: string,
   data: ArrayBuffer | string,
   auxFileUris: Record<string, string>,
 ): Promise<LoadedAsset> {
+  // Version first: glTF 1.0 stores `scenes` as a name-keyed object, so the 2.0
+  // scene validation below would fire on it with a misleading "declares default
+  // scene defaultScene but does not define it" instead of naming the real problem.
+  const legacy = legacyGltfVersion(ext, data);
+  if (legacy) {
+    throw new ViewerError(
+      `This is a glTF ${legacy} file. Only glTF 2.0 is supported — re-export the asset ` +
+        'as glTF 2.0, or convert it with gltf-pipeline.',
+    );
+  }
+  validateGltfScene(ext, data);
   const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
-  const aux = makeManagerForAux(auxFileUris);
+  const aux = await makeManagerForAux(auxFileUris);
   const loader = new GLTFLoader(aux.manager);
+
+  let specGlossCount = 0;
+  let specGlossTextures = 0;
+  loader.register((parser) =>
+    specGlossPlugin(parser as never, (approximatedTexture) => {
+      specGlossCount++;
+      if (approximatedTexture) specGlossTextures++;
+    }),
+  );
 
   // Wire up DRACO decompression so DRACO-compressed .glb/.gltf files load.
   // The decoder (wasm + wrapper) is bundled with the extension and its
@@ -222,6 +496,7 @@ async function loadGLTF(
   // extension, so normal glTF never constructs it — and so we can arm a
   // watchdog on the load below.
   const usesKtx2 = gltfUsesKtx2(ext, data);
+  let disposeKtx2: (() => void) | undefined;
   const ktx2Path = (globalThis as { __ktx2TranscoderPath?: string }).__ktx2TranscoderPath;
   if (usesKtx2 && ktx2Path && sharedRenderer) {
     try {
@@ -230,6 +505,10 @@ async function loadGLTF(
       ktx2Loader.setTranscoderPath(ktx2Path);
       ktx2Loader.detectSupport(sharedRenderer);
       loader.setKTX2Loader(ktx2Loader);
+      disposeKtx2 = () => {
+        if (ktx2Loader.transcoderPending) ktx2Loader.dispose();
+        disposeKtx2 = undefined;
+      };
     } catch (err) {
       console.warn('[3DViewer] Failed to initialize KTX2Loader:', err);
     }
@@ -246,48 +525,74 @@ async function loadGLTF(
     // is a safety net; the generous timeout avoids tripping a slow-but-valid
     // transcode of many/large textures.
     let settled = false;
-    const watchdog = usesKtx2
-      ? setTimeout(() => {
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = (): void => {
+      if (watchdog) clearTimeout(watchdog);
+      disposeKtx2?.();
+    };
+    const rejectOnce = (err: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err instanceof Error ? err : new Error(String(err)));
+    };
+    const resolveOnce = (asset: LoadedAsset): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(asset);
+    };
+    if (usesKtx2) {
+      watchdog = setTimeout(() => rejectOnce(new ViewerError(
+        'KTX2 texture transcoding did not complete in time — see the webview console for details.',
+      )), 30000);
+    }
+    try {
+      loader.parse(
+        buffer,
+        aux.baseUrl,
+        (gltf) => {
           if (settled) return;
-          settled = true;
-          reject(new Error(
-            'KTX2 texture transcoding did not complete in time — see the webview console for details.',
-          ));
-        }, 30000)
-      : undefined;
-    loader.parse(
-      buffer,
-      aux.baseUrl,
-      (gltf) => {
-        if (settled) return;
-        settled = true;
-        if (watchdog) clearTimeout(watchdog);
-        const meta: Record<string, string> = {};
-        const asset = (gltf as unknown as { asset?: Record<string, unknown> }).asset;
-        if (asset) {
-          if (asset.version) meta['glTF Version'] = String(asset.version);
-          if (asset.generator) meta['Generator'] = String(asset.generator);
-          if (asset.copyright) meta['Copyright'] = String(asset.copyright);
-        }
-        if (gltf.scenes && gltf.scenes.length > 1) {
-          meta['Scenes'] = String(gltf.scenes.length);
-        }
-        const { lights, cameras } = gatherLightsAndCameras(gltf.scene);
-        resolve({
-          root: gltf.scene,
-          animations: gltf.animations ?? [],
-          lights,
-          cameras: gltf.cameras?.length ? gltf.cameras : cameras,
-          metadata: meta,
-        });
-      },
-      (err) => {
-        if (settled) return;
-        settled = true;
-        if (watchdog) clearTimeout(watchdog);
-        reject(err instanceof Error ? err : new Error(String(err)));
-      },
-    );
+          try {
+            if (!gltf.scene) throw new ViewerError('glTF does not define a default scene.');
+            const meta: Record<string, string> = {};
+            const asset = (gltf as unknown as { asset?: Record<string, unknown> }).asset;
+            if (asset) {
+              if (asset.version) meta['glTF Version'] = String(asset.version);
+              if (asset.generator) meta['Generator'] = String(asset.generator);
+              if (asset.copyright) meta['Copyright'] = String(asset.copyright);
+            }
+            if (gltf.scenes && gltf.scenes.length > 1) {
+              meta['Scenes'] = String(gltf.scenes.length);
+            }
+            // Reported so a node missing from the viewport is explainable rather
+            // than just absent; the outliner can still toggle it back on.
+            const hidden = applyNodeVisibility(gltf.scene);
+            if (hidden) meta['Hidden nodes'] = String(hidden);
+            // Surfaced rather than silent: the conversion is close but not the
+            // original shading model, so the shading is worth not trusting blindly.
+            if (specGlossCount) {
+              meta['Spec-gloss materials'] = specGlossTextures
+                ? `${specGlossCount} (approximated; ${specGlossTextures} textured → neutral)`
+                : `${specGlossCount} (approximated)`;
+            }
+            const { lights, cameras } = gatherLightsAndCameras(gltf.scene);
+            resolveOnce({
+              root: gltf.scene,
+              animations: gltf.animations ?? [],
+              lights,
+              cameras: gltf.cameras?.length ? gltf.cameras : cameras,
+              metadata: meta,
+            });
+          } catch (err) {
+            rejectOnce(err);
+          }
+        },
+        rejectOnce,
+      );
+    } catch (err) {
+      rejectOnce(err);
+    }
   });
 }
 
@@ -303,7 +608,7 @@ async function loadOBJ(data: string, auxFileUris: Record<string, string>): Promi
   if (mtlEntry) {
     try {
       const { MTLLoader } = await import('three/examples/jsm/loaders/MTLLoader.js');
-      const aux = makeManagerForAux(auxFileUris);
+      const aux = await makeManagerForAux(auxFileUris);
       const mtlLoader = new MTLLoader(aux.manager);
       const mtlResp = await fetch(mtlEntry[1]);
       const mtlText = await mtlResp.text();
@@ -329,7 +634,7 @@ async function loadOBJ(data: string, auxFileUris: Record<string, string>): Promi
 
 async function loadFBX(buf: ArrayBuffer, auxFileUris: Record<string, string>): Promise<LoadedAsset> {
   const { FBXLoader } = await import('three/examples/jsm/loaders/FBXLoader.js');
-  const aux = makeManagerForAux(auxFileUris);
+  const aux = await makeManagerForAux(auxFileUris);
   const loader = new FBXLoader(aux.manager);
   const root = loader.parse(buf, aux.baseUrl);
   const { lights, cameras } = gatherLightsAndCameras(root);
@@ -349,6 +654,18 @@ async function loadSTL(buf: ArrayBuffer, fileName: string): Promise<LoadedAsset>
   const { STLLoader } = await import('three/examples/jsm/loaders/STLLoader.js');
   const loader = new STLLoader();
   const geometry = loader.parse(buf);
+  const normals = geometry.getAttribute('normal');
+  let hasUsableNormal = false;
+  if (normals) {
+    for (let i = 0; i < normals.count; i++) {
+      const lengthSq = normals.getX(i) ** 2 + normals.getY(i) ** 2 + normals.getZ(i) ** 2;
+      if (Number.isFinite(lengthSq) && lengthSq > 1e-12) {
+        hasUsableNormal = true;
+        break;
+      }
+    }
+  }
+  if (!hasUsableNormal) geometry.computeVertexNormals();
   const material = new THREE.MeshStandardMaterial({
     color: 0xb5b5b5,
     roughness: 0.7,
@@ -427,6 +744,19 @@ async function loadSplat(
   fileName: string,
   fileTypeKey: 'PLY' | 'SPZ' | 'SPLAT' | 'KSPLAT' | 'PCSOGSZIP',
 ): Promise<LoadedAsset> {
+  // SPZ v4 dropped the gzip wrapper and ships the NGSP magic raw. Spark gunzips
+  // unconditionally, so it fails with "Invalid gzip header" — and its header
+  // parser rejects version > 3 regardless. Keying on the raw magic cannot
+  // misfire on a supported file: v1-v3 are gzip-wrapped, so they begin 1f 8b.
+  if (fileTypeKey === 'SPZ' && tagAt(buf, 0, 4) === 'NGSP') {
+    const version = new DataView(buf).getUint32(4, true);
+    if (version > 3) {
+      throw new ViewerError(
+        `This is an SPZ v${version} file. The bundled Spark splat decoder reads ` +
+          'SPZ v1-v3 (gzip-wrapped) only.',
+      );
+    }
+  }
   const { SplatMesh, SplatFileType } = await import('@sparkjsdev/spark');
   const mesh = new SplatMesh({
     fileBytes: buf,
@@ -471,10 +801,10 @@ function boxCorners(box: THREE.Box3): number[] {
 
 async function loadCollada(text: string, auxFileUris: Record<string, string>): Promise<LoadedAsset> {
   const { ColladaLoader } = await import('three/examples/jsm/loaders/ColladaLoader.js');
-  const aux = makeManagerForAux(auxFileUris);
+  const aux = await makeManagerForAux(auxFileUris);
   const loader = new ColladaLoader(aux.manager);
   const result = loader.parse(text, '');
-  if (!result || !result.scene) throw new Error('Collada file did not contain a parsable scene.');
+  if (!result || !result.scene) throw new ViewerError('Collada file did not contain a parsable scene.');
   const root: THREE.Object3D = result.scene;
   const { lights, cameras } = gatherLightsAndCameras(root);
   // ColladaLoader.parse() returns clips on result.animations, NOT
@@ -588,6 +918,16 @@ async function loadXYZ(data: string): Promise<LoadedAsset> {
 // ---------- LWO ----------
 
 async function loadLWO(buf: ArrayBuffer): Promise<LoadedAsset> {
+  // LightWave 5 files declare the LWOB form type. three's LWOLoader reads LWO2
+  // and LWO3 only and dies on LWOB with "Cannot read properties of undefined
+  // (reading 'materials')". Upstream has deprecated the loader entirely
+  // (mrdoob/three.js#33621), so LWOB is never going to start working — name it.
+  if (tagAt(buf, 0, 4) === 'FORM' && tagAt(buf, 8, 4) === 'LWOB') {
+    throw new ViewerError(
+      'This is a LightWave 5 (LWOB) file, which is not supported — only the newer ' +
+        'LWO2 and LWO3 layouts are. Re-save it from a current LightWave, or convert it to OBJ or FBX.',
+    );
+  }
   const { LWOLoader } = await import('three/examples/jsm/loaders/LWOLoader.js');
   const loader = new LWOLoader();
   const result = loader.parse(buf, '', '');

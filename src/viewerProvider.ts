@@ -11,6 +11,54 @@ const REMEMBERED_KEY = '3dMeshViewer.viewSettings';
 const TEXTURE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp', 'ktx', 'ktx2', 'basis', 'tga', 'bmp', 'gif', 'exr', 'hdr'];
 
 /**
+ * Upper bound on a text asset we're willing to slurp just to find its `../`
+ * references. Both formats scanned keep their geometry in sidecars, so anything
+ * past this is either base64-inlined or pathological — and the downward scan
+ * still covers the ordinary same-directory case either way.
+ */
+const MAX_REF_SCAN_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Relative references in a text asset that point outside the file's own
+ * directory. glTF is parsed as JSON so the reference list is exact; other
+ * formats fall back to picking paths out of the raw text, which covers
+ * Collada's `<init_from>` and its `file://../…` variant.
+ */
+function declaredParentRefs(ext: string, text: string): string[] {
+  const refs = new Set<string>();
+  if (ext === 'gltf') {
+    try {
+      const json = JSON.parse(text) as { buffers?: { uri?: string }[]; images?: { uri?: string }[] };
+      for (const def of [...(json.buffers ?? []), ...(json.images ?? [])]) {
+        if (def.uri?.startsWith('../')) refs.add(def.uri);
+      }
+      return [...refs];
+    } catch {
+      /* not valid JSON — fall through to the text scan */
+    }
+  }
+  for (const match of text.matchAll(/(?:file:\/\/)?\.\.\/[^\s"'<>]*/g)) {
+    const index = match.index ?? 0;
+    if (index > 0 && !/[\s"'<>]/.test(text[index - 1])) continue;
+    const token = match[0];
+    const ref = token.startsWith('file://') ? token.slice('file://'.length) : token;
+    if (!ref.startsWith('../')) continue;
+    const dot = ref.lastIndexOf('.');
+    const extension = dot >= 0 ? ref.slice(dot + 1) : '';
+    if (extension.length >= 2 && extension.length <= 5 && /^[A-Za-z0-9]+$/.test(extension)) {
+      refs.add(ref);
+    }
+  }
+  return [...refs];
+}
+
+/** Whether `target` sits under `root`, used to bound `../` walking. */
+function isInside(root: string, target: string): boolean {
+  const rel = path.relative(root, target);
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/**
  * Extensions of files we should ship as companion data when opening `ext`.
  * Returning `null` means "don't scan the directory at all".
  */
@@ -291,6 +339,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       } catch {
         /* ignore: no sidecar context available */
       }
+      this.addParentDirSidecars(webview, uri, ext, auxFileUris);
     }
 
     return {
@@ -301,6 +350,73 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       isText,
       auxFileUris,
     };
+  }
+
+  /**
+   * Register sidecars the asset references through a parent directory, e.g. a
+   * glTF whose buffer is `"uri": "../glTF/DamagedHelmet.bin"`. The directory
+   * scan in buildFilePayload only walks *downwards* from the model's own folder,
+   * so these references reached the webview unresolved and 404'd.
+   *
+   * Resolved paths must stay inside the containing workspace folder: a
+   * hand-edited asset should not be able to walk up to somewhere like
+   * `../../../../.ssh/id_rsa` and have the extension hand it to the webview.
+   */
+  private addParentDirSidecars(
+    webview: vscode.Webview,
+    uri: vscode.Uri,
+    ext: string,
+    auxFileUris: Record<string, string>,
+  ): void {
+    // Only the text formats that spell their references out. FBX bakes absolute
+    // paths instead, which the loader's bare-filename fallback already covers,
+    // and OBJ is skipped because it can be hundreds of megabytes of text.
+    if (ext !== 'gltf' && ext !== 'dae') return;
+
+    const fs = require('fs') as typeof import('fs');
+    let text: string;
+    try {
+      if (fs.statSync(uri.fsPath).size > MAX_REF_SCAN_BYTES) return;
+      text = fs.readFileSync(uri.fsPath, 'utf8');
+    } catch {
+      return;
+    }
+
+    const root = vscode.workspace.getWorkspaceFolder(uri)?.uri.fsPath
+      // Opened outside any workspace folder: allow one level up from the model's
+      // own directory, which still covers the usual
+      // `<asset>/glTF-instancing/x.gltf` → `<asset>/glTF/y.bin` layout.
+      ?? path.dirname(path.dirname(uri.fsPath));
+    const dir = path.dirname(uri.fsPath);
+
+    for (const ref of declaredParentRefs(ext, text)) {
+      // The webview's URL modifier matches on the decoded path, and the
+      // filesystem needs the decoded name too.
+      let decoded = ref;
+      try {
+        decoded = decodeURIComponent(ref);
+      } catch {
+        /* malformed escape — match on the raw form */
+      }
+      const target = path.resolve(dir, decoded);
+      if (!isInside(root, target)) continue;
+      const key = decoded.replace(/\\/g, '/');
+      if (auxFileUris[key]) continue;
+      try {
+        if (!fs.statSync(target).isFile()) continue;
+      } catch {
+        continue;
+      }
+      this.allowResourceRoot(webview, vscode.Uri.file(path.dirname(target)));
+      auxFileUris[key] = webview.asWebviewUri(vscode.Uri.file(target)).toString();
+    }
+  }
+
+  /** Let the webview fetch from `dir`, needed for sidecars outside the model's folder. */
+  private allowResourceRoot(webview: vscode.Webview, dir: vscode.Uri): void {
+    const roots = webview.options.localResourceRoots ?? [];
+    if (roots.some((r) => r.toString() === dir.toString())) return;
+    webview.options = { ...webview.options, localResourceRoots: [...roots, dir] };
   }
 
   private getFileSize(uri: vscode.Uri): number {

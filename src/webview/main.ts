@@ -10,10 +10,14 @@ import type {
   ViewSettings,
 } from '../types';
 import { loadAsset, type LoadedAsset } from './loaders';
+import { hasRenderableGeometry } from './renderables';
+import { decodeText } from './textEncoding';
 import {
   Viewer,
   computeStats,
   collectMaterials,
+  contentBounds,
+  isFiniteBox,
   type AssetEntry,
   type ShadingMode,
   type EnvironmentMode,
@@ -1116,7 +1120,8 @@ async function importNativeFile(file: File): Promise<void> {
   const isText = TEXT_EXTENSIONS.has(ext);
   let data: ArrayBuffer | string;
   try {
-    data = isText ? await file.text() : await file.arrayBuffer();
+    const bytes = await file.arrayBuffer();
+    data = isText ? decodeText(bytes) : bytes;
   } catch (err) {
     showToast({ title: 'Read failed', body: `${file.name}: ${(err as Error).message}`, kind: 'error' });
     return;
@@ -1133,7 +1138,19 @@ async function importNativeFile(file: File): Promise<void> {
   sceneTotalSize += file.size;
   viewer.addAsset(asset, file.name);
   rebuildAllPanels();
-  showToast({ title: 'Imported', body: `${file.name} (${formatBytes(file.size)})`, kind: 'success' });
+  if (!showEmptyGeometryWarning(asset, file.name)) {
+    showToast({ title: 'Imported', body: `${file.name} (${formatBytes(file.size)})`, kind: 'success' });
+  }
+}
+
+function showEmptyGeometryWarning(asset: LoadedAsset, fileName: string): boolean {
+  if (hasRenderableGeometry(asset.root)) return false;
+  showToast({
+    title: 'No renderable geometry',
+    body: `${fileName} loaded successfully but contains no mesh, points, lines, or splats.`,
+    kind: 'error',
+  });
+  return true;
 }
 
 function requestImportUris(uris: string[]): void {
@@ -1208,7 +1225,8 @@ window.addEventListener('message', (ev) => {
 async function fetchPayload(msg: FilePayload): Promise<ArrayBuffer | string> {
   const resp = await fetch(msg.fileUri);
   if (!resp.ok) throw new Error(`Failed to fetch ${msg.fileName}: ${resp.status} ${resp.statusText}`);
-  return msg.isText ? resp.text() : resp.arrayBuffer();
+  const bytes = await resp.arrayBuffer();
+  return msg.isText ? decodeText(bytes) : bytes;
 }
 
 vscode.postMessage({ type: 'ready' });
@@ -1238,6 +1256,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
   rebuildAllPanels();
   refreshTexturesWhenReady(asset);
   hideOverlay();
+  showEmptyGeometryWarning(asset, msg.fileName);
 }
 
 async function handleAddFile(msg: AddFileMessage): Promise<void> {
@@ -1262,11 +1281,13 @@ async function handleAddFile(msg: AddFileMessage): Promise<void> {
   rebuildAllPanels();
   refreshTexturesWhenReady(asset);
   consumePendingImport(msg.requestId);
-  showToast({
-    title: 'Imported',
-    body: `${msg.fileName} (${formatBytes(msg.fileSizeBytes)})`,
-    kind: 'success',
-  });
+  if (!showEmptyGeometryWarning(asset, msg.fileName)) {
+    showToast({
+      title: 'Imported',
+      body: `${msg.fileName} (${formatBytes(msg.fileSizeBytes)})`,
+      kind: 'success',
+    });
+  }
 }
 
 function handleAddFileError(msg: AddFileErrorMessage): void {
@@ -1828,8 +1849,18 @@ function populateInfo(): void {
   geomTotals.innerHTML = '';
   appendKV(geomTotals, 'Vertices', Math.round(stats.vertices).toLocaleString());
   appendKV(geomTotals, 'Triangles', Math.round(stats.triangles).toLocaleString());
-  const box = new THREE.Box3().setFromObject(viewer.contentRoot);
-  if (!box.isEmpty()) {
+  const box = contentBounds(viewer.contentRoot);
+  if (!box.isEmpty() && !isFiniteBox(box)) {
+    // Inf/NaN vertex positions. Without this the row reads "NaN × NaN × NaN" and
+    // the viewport is blank with no explanation; the viewer has fallen back to a
+    // default view by this point.
+    appendKV(geomTotals, 'Bounds', 'not finite — NaN/Infinity vertex data');
+    showToast({
+      title: 'Non-finite geometry',
+      body: `${primaryFile?.name ?? 'This file'} has NaN or Infinity vertex positions; the view is approximate.`,
+      kind: 'error',
+    });
+  } else if (!box.isEmpty()) {
     const size = new THREE.Vector3();
     box.getSize(size);
     appendKV(geomTotals, 'Bounds', `${fmt(size.x)} × ${fmt(size.y)} × ${fmt(size.z)}`);
@@ -2514,11 +2545,8 @@ function drawUVOverlay(
   // up at the BOTTOM-LEFT of the displayed image. With flipY=false (GLTF), UV
   // (0, 0) is at TOP-LEFT.
   const flipped = tex.flipY !== false;
-  // Textures repeat, and some meshes place UVs in a non-zero tile (e.g. V in
-  // [1,2]); wrap into [0,1) so the layout lands on the previewed tile.
-  const fract = (x: number) => x - Math.floor(x);
-  const ux = (u: number) => fract(u) * w;
-  const uy = (v: number) => { const fv = fract(v); return flipped ? (1 - fv) * h : fv * h; };
+  const ux = (u: number) => u * w;
+  const uy = (v: number) => (flipped ? (1 - v) * h : v * h);
 
   ctx.strokeStyle = 'rgba(76, 195, 247, 0.85)';
   ctx.lineWidth = 0.6;
@@ -2526,9 +2554,16 @@ function drawUVOverlay(
 
   const idx = geom.getIndex();
   const stroke = (a: number, b: number, c: number): void => {
-    const ax = ux(uvAttr.getX(a)), ay = uy(uvAttr.getY(a));
-    const bx = ux(uvAttr.getX(b)), by = uy(uvAttr.getY(b));
-    const cx = ux(uvAttr.getX(c)), cy = uy(uvAttr.getY(c));
+    // UVs may live outside [0, 1] and rely on wrapping at sample time (e.g.
+    // DamagedHelmet's V spans [1, 2]). Translate the whole triangle by the
+    // integer part of its first vertex so it lands on the visible tile;
+    // shifting per-triangle (not per-vertex) keeps seam-crossing triangles
+    // intact.
+    const du = Math.floor(uvAttr.getX(a));
+    const dv = Math.floor(uvAttr.getY(a));
+    const ax = ux(uvAttr.getX(a) - du), ay = uy(uvAttr.getY(a) - dv);
+    const bx = ux(uvAttr.getX(b) - du), by = uy(uvAttr.getY(b) - dv);
+    const cx = ux(uvAttr.getX(c) - du), cy = uy(uvAttr.getY(c) - dv);
     ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
     ctx.lineTo(cx, cy); ctx.lineTo(ax, ay);
   };

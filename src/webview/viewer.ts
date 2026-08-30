@@ -56,6 +56,37 @@ function isSplat(o: THREE.Object3D): boolean {
   return o.userData.isSplat === true;
 }
 
+/**
+ * Bounding box of everything renderable under `obj`, measured at the morph
+ * influences currently in effect.
+ *
+ * `Box3.setFromObject` in its default mode reads `geometry.boundingBox`, which
+ * three.js expands by *every* morph target regardless of influence. A mesh whose
+ * morph translates parts far from the base pose therefore reports a box many
+ * times the size of what is drawn, and camera framing, grid alignment, the
+ * bounds readout and joint sizing all inherit the error. The precise mode walks
+ * the position attribute through `Mesh.getVertexPosition`, which weights morphs
+ * by influence — zero unless the user dialled one in — so it measures what is
+ * actually on screen. It costs one pass over the vertices, which is fine here:
+ * every caller runs on load or on an explicit user action, never per frame.
+ */
+export function contentBounds(obj: THREE.Object3D, target = new THREE.Box3()): THREE.Box3 {
+  return target.setFromObject(obj, true);
+}
+
+/**
+ * Whether every corner of the box is a real number. Assets carrying Inf/NaN
+ * vertex positions produce boxes that silently poison anything derived from
+ * them — the camera, the content transform, helper geometry — and the result is
+ * a blank viewport with nothing in the console to explain it.
+ */
+export function isFiniteBox(box: THREE.Box3): boolean {
+  return (
+    Number.isFinite(box.min.x) && Number.isFinite(box.min.y) && Number.isFinite(box.min.z) &&
+    Number.isFinite(box.max.x) && Number.isFinite(box.max.y) && Number.isFinite(box.max.z)
+  );
+}
+
 /** The mesh's morph influence array if it has any morph targets, else null. */
 function morphInfluencesOf(o: THREE.Object3D): number[] | null {
   const mesh = o as THREE.Mesh;
@@ -381,9 +412,12 @@ export class Viewer {
     this.contentRoot.updateMatrixWorld(true);
     const box = new THREE.Box3();
     for (const entry of this.entries) {
-      box.expandByObject(entry.wrapper);
+      box.expandByObject(entry.wrapper, true);
     }
     if (box.isEmpty()) return;
+    // Shifting by a NaN min would move the whole content root to NaN and make
+    // every object vanish. Leave it seated at the origin instead.
+    if (!isFiniteBox(box)) return;
     this.contentRoot.position.y = -box.min.y;
     this.contentRoot.updateMatrixWorld(true);
   }
@@ -732,7 +766,8 @@ export class Viewer {
       this.boundsHelper = null;
     }
     if (!this.entries.length) return;
-    const box = new THREE.Box3().setFromObject(this.contentRoot);
+    const box = contentBounds(this.contentRoot);
+    if (!isFiniteBox(box)) return;
     this.boundsHelper = new THREE.Box3Helper(box, new THREE.Color(0xffaa00));
     this.scene.add(this.boundsHelper);
   }
@@ -1036,8 +1071,8 @@ export class Viewer {
   }
 
   private estimateJointSize(): number {
-    const box = new THREE.Box3().setFromObject(this.contentRoot);
-    if (box.isEmpty()) return 0.005;
+    const box = contentBounds(this.contentRoot);
+    if (box.isEmpty() || !isFiniteBox(box)) return 0.005;
     const size = box.getSize(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z);
     return maxDim * 0.006;
@@ -1902,9 +1937,16 @@ export class Viewer {
   }
 
   frameObject(obj: THREE.Object3D): void {
-    const box = new THREE.Box3();
-    box.setFromObject(obj);
+    const box = contentBounds(obj);
     if (box.isEmpty()) return;
+    if (!isFiniteBox(box)) {
+      // Framing off this box would park the camera at NaN and render nothing at
+      // all. A unit view at least shows whichever parts of the asset are finite.
+      console.warn(
+        '[3DViewer] Asset bounds are not finite (NaN/Infinity vertex data); using a default view.',
+      );
+      box.set(new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5));
+    }
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     const maxDim = Math.max(size.x, size.y, size.z) || 1;

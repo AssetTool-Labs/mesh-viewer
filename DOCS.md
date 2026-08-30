@@ -100,6 +100,34 @@ anything else renders as a mesh or point cloud as before.
 
 For multi-file formats (`.gltf` + `.bin` + textures, `.obj` + `.mtl` + textures), only files with reference-able extensions (`.bin`, `.mtl`, common image types) in the same directory are loaded automatically. Unrelated files (`.glb` / `.fbx` siblings, etc.) are ignored so opening one model never drags 14 MB of unrelated bytes through the webview channel.
 
+### Format variants that are not supported
+
+An extension being listed above does not mean every file bearing it will open.
+These variants are recognised from the file header and refused with an
+explanation rather than a crash:
+
+| Variant | Why | What to do |
+| --- | --- | --- |
+| glTF 1.0 (`.gltf`, `.glb`) | Only glTF 2.0 is supported | Re-export as glTF 2.0, or convert with `gltf-pipeline` |
+| LightWave 5 (`LWOB` form) | Only the LWO2/LWO3 layouts are read, and the underlying loader is deprecated upstream | Re-save from a current LightWave, or convert to OBJ/FBX |
+| SPZ v4 | The bundled Spark decoder reads SPZ v1–v3 (gzip-wrapped) only | Export SPZ v3, or use `.ply`/`.sog` |
+
+### Known upstream loader gaps
+
+These come from the third-party loaders this extension bundles, not from the
+extension itself. Affected files now report a readable error naming the loader
+instead of a raw exception, but they still will not render until the upstream
+loader is fixed.
+
+| Format | Gap |
+| --- | --- |
+| LightWave `.lwo` | LWO2 files with unused vertex maps or nested hierarchies fail to parse; polygons with more than 4 sides are dropped |
+| FBX | Some 2013-era exports fail while building animation curves; files whose NUL bytes have been mangled in transit are rejected as an unknown format |
+| Collada `.dae` | `<polygons>` meshes can collapse to a single triangle, `<tristrips>` are not read, and some skinned+morphed files fail to parse |
+| 3MF | The volumetric extension is unsupported; beam-lattice models parse to no geometry |
+| VRML `.wrl` | Multi-line strings and some real-world files fail in the lexer |
+| USD | Composition (`references`, `payload`, `subLayer`) is not followed, so assets that rely on it load empty |
+
 ---
 
 ## Features
@@ -289,6 +317,7 @@ The packaged `.vsix` is ~2 MB, most of it the Spark splat renderer (which inline
 - Compressed glTF decodes out of the box — DRACO (`KHR_draco_mesh_compression`) and meshopt (both `EXT_meshopt_compression` and the ratified `KHR_meshopt_compression`). Each decoder is bundled, so nothing is fetched from a CDN. Meshopt decodes on the main thread instead of in its worker pool, because starting those workers needs a `blob:` URL the webview CSP forbids; very large compressed assets will therefore hitch briefly while loading.
 - KTX2 / Basis Universal textures (`KHR_texture_basisu`) decode out of the box too. The Basis transcoder (wasm + js) is bundled, so nothing is fetched from a CDN; the GPU's supported compressed-texture format is picked via the renderer at load time. Its Emscripten glue builds bindings with `new Function()`, which is why the webview CSP carries `'unsafe-eval'` (kept safe by `default-src 'none'` and no remote script origins). Once transcoded, KTX2 textures are GPU-compressed and not CPU-readable, so the Textures tab **renders their preview through the GPU** (a render-target read-back) rather than a `drawImage`; ordinary PNG/JPEG textures preview directly as before.
 - Encrypted or proprietary FBX variants from some pipelines may fail to parse.
+- `KHR_materials_pbrSpecularGlossiness` is **approximated**, not reproduced. three.js removed its built-in support for the extension, so these materials are converted to metallic-roughness: roughness from `1 - glossinessFactor`, metalness estimated from the specular colour against the 0.04 dielectric reflectance, and the base colour blended towards the specular colour as metalness rises. Materials driven by factors alone convert faithfully. Materials carrying a `specularGlossinessTexture` cannot: three samples roughness and metalness from a texture's G and B channels, while spec-gloss packs specular into RGB and glossiness into A, so those get a neutral dielectric (metalness 0, roughness 0.5) over the diffuse map. The Info panel reports how many materials were approximated and how many were flattened this way.
 
 ---
 
