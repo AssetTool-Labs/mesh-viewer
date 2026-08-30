@@ -944,6 +944,41 @@ function normalizeColladaDecimalCommas(text: string): string | null {
   return out;
 }
 
+/**
+ * Rescue materials an exporter left fully transparent.
+ *
+ * COLLADA's `A_ONE` rule is `opacity = transparent.alpha × transparency`, and
+ * three implements it to the letter. Several DCC exporters — 3ds Max and Maya
+ * among them — instead write `<transparency>0</transparency>` to mean "not
+ * transparent at all", so the spec-literal reading makes every surface invisible:
+ * the file loads, reports its geometry, and draws nothing.
+ *
+ * A material that ends up fully transparent with no alpha map carries no other
+ * transparency signal, so treat it as opaque. A deliberately invisible surface is
+ * rare and shows nothing either way; an entire model silently vanishing is the
+ * far worse outcome.
+ */
+function rescueFullyTransparentMaterials(root: THREE.Object3D): number {
+  let rescued = 0;
+  const seen = new Set<THREE.Material>();
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.material) return;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const material of materials) {
+      if (seen.has(material)) continue;
+      seen.add(material);
+      const m = material as THREE.MeshPhongMaterial;
+      if (m.transparent === true && m.opacity === 0 && !m.alphaMap) {
+        m.opacity = 1;
+        m.transparent = false;
+        rescued++;
+      }
+    }
+  });
+  return rescued;
+}
+
 function normalizeColladaPrimitives(text: string): string {
   if (!/<(?:[\w.-]+:)?(?:polygons|tristrips)\b/.test(text)) return text;
 
@@ -1040,6 +1075,13 @@ async function loadCollada(text: string, auxFileUris: Record<string, string>): P
   const result = loader.parse(normalizeColladaPrimitives(source), '');
   if (!result || !result.scene) throw new ViewerError('Collada file did not contain a parsable scene.');
   const root: THREE.Object3D = result.scene;
+  const rescued = rescueFullyTransparentMaterials(root);
+  if (rescued) {
+    console.warn(
+      `[3DViewer] ${rescued} Collada material(s) resolved to fully transparent (the exporter's ` +
+        'transparency convention is inverted); treated them as opaque.',
+    );
+  }
   const { lights, cameras } = gatherLightsAndCameras(root);
   // ColladaLoader.parse() returns clips on result.animations, NOT
   // result.scene.animations (Scene/Group has no animations field).
