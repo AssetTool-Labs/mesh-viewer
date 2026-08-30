@@ -457,6 +457,22 @@ button.group-title:hover { color: var(--fg); }
 .elem-seg button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .elem-seg button:disabled { opacity: 0.45; cursor: default; }
 .uv-view.picking { cursor: crosshair; }
+#areaSvg {
+  display: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 5;
+}
+#areaSvg.active { display: block; }
+#areaSvg .band {
+  fill: rgba(76, 195, 247, 0.08);
+  stroke: #4cc3f7;
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
 .uv-view.picking.dragging { cursor: grabbing; }
 .tex-view {
   flex: 1 1 auto;

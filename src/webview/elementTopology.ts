@@ -201,3 +201,103 @@ function distPointToSegmentSq(p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vecto
   tmpSeg.multiplyScalar(t).add(a);
   return p.distanceToSquared(tmpSeg);
 }
+
+/** All ids of one mode on this topology (for select-all). */
+export function allIds(topo: Topology, mode: Exclude<ElementMode, 'off'>): Iterable<number> {
+  if (mode === 'face') return { *[Symbol.iterator]() { for (let t = 0; t < topo.triCount; t++) yield t; } };
+  if (mode === 'vertex') return topo.repVerts.keys();
+  return topo.edgeCopies.keys();
+}
+
+/**
+ * Ids of the current mode inside an area, driven by two predicates so the UV
+ * view (texel space, per-tile shift) and the 3D view (screen projection) share
+ * the same seam-aware semantics: a vertex counts if any UV copy is inside, an
+ * edge if some copy has both endpoints inside, a face if its center is inside
+ * (the predicate owns the center test).
+ */
+export function idsInRegion(
+  topo: Topology,
+  mode: Exclude<ElementMode, 'off'>,
+  insideVert: (bufferIdx: number) => boolean,
+  insideTri: (tri: number) => boolean,
+): Set<number> {
+  const out = new Set<number>();
+  if (mode === 'vertex') {
+    for (let i = 0; i < topo.vertCount; i++) if (insideVert(i)) out.add(topo.rep[i]);
+  } else if (mode === 'edge') {
+    for (const [key, copies] of topo.edgeCopies) {
+      for (let i = 0; i < copies.length; i += 2) {
+        if (insideVert(copies[i]) && insideVert(copies[i + 1])) {
+          out.add(key);
+          break;
+        }
+      }
+    }
+  } else {
+    for (let t = 0; t < topo.triCount; t++) if (insideTri(t)) out.add(t);
+  }
+  return out;
+}
+
+/**
+ * Ids of the connected patch containing `seed`, where `labels` picks the
+ * connectivity: islandOfTri = UV island, componentOfTri = 3D component.
+ */
+export function linkedIds(
+  topo: Topology,
+  mode: Exclude<ElementMode, 'off'>,
+  seed: number,
+  labels: Int32Array,
+): Set<number> {
+  // Resolve the seed to one triangle, then take that triangle's label.
+  let seedTri = -1;
+  if (mode === 'face') {
+    seedTri = seed;
+  } else if (mode === 'vertex') {
+    for (let t = 0; t < topo.triCount && seedTri < 0; t++) {
+      for (let k = 0; k < 3; k++) if (topo.rep[topo.tris[t * 3 + k]] === seed) { seedTri = t; break; }
+    }
+  } else {
+    const copies = topo.edgeCopies.get(seed);
+    const a = copies ? copies[0] : -1;
+    for (let t = 0; t < topo.triCount && seedTri < 0 && a >= 0; t++) {
+      for (let k = 0; k < 3; k++) if (topo.tris[t * 3 + k] === a) { seedTri = t; break; }
+    }
+  }
+  const out = new Set<number>();
+  if (seedTri < 0 || seedTri >= topo.triCount) return out;
+  const label = labels[seedTri];
+  for (let t = 0; t < topo.triCount; t++) {
+    if (labels[t] !== label) continue;
+    const a = topo.tris[t * 3];
+    const b = topo.tris[t * 3 + 1];
+    const c = topo.tris[t * 3 + 2];
+    if (mode === 'face') {
+      out.add(t);
+    } else if (mode === 'vertex') {
+      out.add(topo.rep[a]);
+      out.add(topo.rep[b]);
+      out.add(topo.rep[c]);
+    } else {
+      out.add(edgeKeyOf(topo, a, b));
+      out.add(edgeKeyOf(topo, b, c));
+      out.add(edgeKeyOf(topo, c, a));
+    }
+  }
+  return out;
+}
+
+/** Even-odd point-in-polygon in whatever 2D space the points live in. */
+export function pointInPolygon(x: number, y: number, pts: Array<{ x: number; y: number }>): boolean {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const yi = pts[i].y;
+    const yj = pts[j].y;
+    if (yi > y === yj > y) continue;
+    const xi = pts[i].x;
+    const xj = pts[j].x;
+    if (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}

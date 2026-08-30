@@ -1,5 +1,5 @@
 import type * as THREE from 'three';
-import { topologyOf, type ElementMode, type Topology } from './elementTopology';
+import { allIds, linkedIds, topologyOf, type ElementMode, type Topology } from './elementTopology';
 
 /**
  * One selection, two views: the UV canvas and the 3D viewport both render this
@@ -63,6 +63,32 @@ class ElementSelection {
     if (this.hovered === id) return;
     this.hovered = id;
     this.notify();
+  }
+
+  /** Area-select result: replace or union into the selection. */
+  applyArea(ids: Iterable<number>, extend: boolean): void {
+    if (!extend) this.selected.clear();
+    for (const id of ids) this.selected.add(id);
+    this.notify();
+  }
+
+  /** `A`: everything when nothing is selected, otherwise back to nothing. */
+  selectAllToggle(): void {
+    if (this.mode === 'off' || !this.topo) return;
+    if (this.selected.size) {
+      this.selected.clear();
+    } else {
+      for (const id of allIds(this.topo, this.mode)) this.selected.add(id);
+    }
+    this.notify();
+  }
+
+  /** Double-click: the connected patch around `seed` — the UV island when
+   *  initiated from the UV view, the 3D component from the viewport. */
+  selectLinked(seed: number, space: 'uv' | '3d', extend: boolean): void {
+    if (this.mode === 'off' || !this.topo) return;
+    const labels = space === 'uv' ? this.topo.islandOfTri : this.topo.componentOfTri;
+    this.applyArea(linkedIds(this.topo, this.mode, seed, labels), extend);
   }
 
   clear(): void {

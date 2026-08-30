@@ -1,16 +1,21 @@
 import type { BufferGeometry, BufferAttribute } from 'three';
-import { edgeKeyOf, type ElementMode, type Topology } from './elementTopology';
+import { edgeKeyOf, idsInRegion, pointInPolygon, type ElementMode, type Topology } from './elementTopology';
+
+export type AreaTool = 'box' | 'lasso';
 
 /** Everything the view needs to draw and pick elements; owned by main.ts and
  *  swapped on every selection change (the sets are live references). */
 export interface UVElementContext {
   mode: Exclude<ElementMode, 'off'>;
+  tool: AreaTool;
   topo: Topology;
   geometry: BufferGeometry;
   selected: ReadonlySet<number>;
   hovered: number | null;
   onHover(id: number | null): void;
   onClick(id: number | null, extend: boolean): void;
+  onArea(ids: Set<number>, extend: boolean): void;
+  onLinked(id: number, extend: boolean): void;
 }
 
 /** Full-resolution image the view paints; whatever the texture already holds
@@ -56,6 +61,8 @@ export class UVView {
   private drawQueued = false;
   private dragging: { id: number; lastX: number; lastY: number; moved: number } | null = null;
   private elements: UVElementContext | null = null;
+  /** In-progress box/lasso, in screen (CSS px) space. */
+  private marquee: { tool: AreaTool; pts: Array<{ x: number; y: number }>; extend: boolean } | null = null;
   private readonly observer: ResizeObserver;
 
   constructor() {
@@ -72,7 +79,7 @@ export class UVView {
     this.canvas.addEventListener('pointerup', this.onPointerUp);
     this.canvas.addEventListener('pointercancel', this.onPointerUp);
     this.canvas.addEventListener('pointerleave', this.onPointerLeave);
-    this.canvas.addEventListener('dblclick', () => this.resetView());
+    this.canvas.addEventListener('dblclick', (ev) => this.onDblClick(ev));
     this.observer = new ResizeObserver(() => this.onResize());
     this.observer.observe(this.root);
   }
@@ -183,7 +190,18 @@ export class UVView {
     if (ev.button !== 0 && ev.button !== 1) return;
     this.canvas.setPointerCapture(ev.pointerId);
     this.dragging = { id: ev.pointerId, lastX: ev.clientX, lastY: ev.clientY, moved: 0 };
-    this.root.classList.add('dragging');
+    // With a selection mode on, a left-drag is an area select; pan moves to
+    // the middle button or Alt+drag. With no mode, left-drag pans as before.
+    if (this.elements && ev.button === 0 && !ev.altKey) {
+      const rect = this.canvas.getBoundingClientRect();
+      this.marquee = {
+        tool: this.elements.tool,
+        pts: [{ x: ev.clientX - rect.left, y: ev.clientY - rect.top }],
+        extend: ev.shiftKey,
+      };
+    } else {
+      this.root.classList.add('dragging');
+    }
   };
 
   private readonly onPointerMove = (ev: PointerEvent): void => {
@@ -193,8 +211,15 @@ export class UVView {
       return;
     }
     this.dragging.moved += Math.abs(ev.clientX - this.dragging.lastX) + Math.abs(ev.clientY - this.dragging.lastY);
-    this.offX += ev.clientX - this.dragging.lastX;
-    this.offY += ev.clientY - this.dragging.lastY;
+    if (this.marquee) {
+      const rect = this.canvas.getBoundingClientRect();
+      const pt = { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+      if (this.marquee.tool === 'lasso') this.marquee.pts.push(pt);
+      else this.marquee.pts[1] = pt;
+    } else {
+      this.offX += ev.clientX - this.dragging.lastX;
+      this.offY += ev.clientY - this.dragging.lastY;
+    }
     this.dragging.lastX = ev.clientX;
     this.dragging.lastY = ev.clientY;
     this.requestDraw();
@@ -206,10 +231,15 @@ export class UVView {
     this.canvas.releasePointerCapture(ev.pointerId);
     this.dragging = null;
     this.root.classList.remove('dragging');
-    // A stationary press is a pick, a real drag stays a pan.
+    const marquee = this.marquee;
+    this.marquee = null;
     if (wasClick && ev.button === 0 && this.elements) {
+      // A stationary press is a pick, not an area.
       this.elements.onClick(this.pickElement(ev.clientX, ev.clientY), ev.shiftKey);
+    } else if (marquee && this.elements && marquee.pts.length > 1) {
+      this.finishArea(marquee);
     }
+    this.requestDraw();
   };
 
   private readonly onPointerLeave = (): void => {
@@ -270,8 +300,92 @@ export class UVView {
     }
     this.drawElements(ctx);
 
+    if (this.marquee && this.marquee.pts.length > 1) {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.strokeStyle = '#4cc3f7';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      const pts = this.marquee.pts;
+      if (this.marquee.tool === 'box') {
+        ctx.strokeRect(pts[0].x, pts[0].y, pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      } else {
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+        ctx.closePath();
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+
     const zoom = s / this.fitScale;
     this.zoomLabel.textContent = zoom >= 10 ? `${zoom.toFixed(0)}×` : `${zoom.toFixed(2)}×`;
+  }
+
+  /** Cancel an in-progress box/lasso (Esc). True if one was active. */
+  cancelArea(): boolean {
+    if (!this.marquee) return false;
+    this.marquee = null;
+    this.requestDraw();
+    return true;
+  }
+
+  private onDblClick(ev: MouseEvent): void {
+    // Double-click selects the UV island under the cursor; with no mode (or on
+    // empty space) it keeps its old meaning: re-fit the view.
+    if (this.elements) {
+      const id = this.pickElement(ev.clientX, ev.clientY);
+      if (id !== null) {
+        this.elements.onLinked(id, ev.shiftKey);
+        return;
+      }
+    }
+    this.resetView();
+  }
+
+  private finishArea(marquee: { tool: AreaTool; pts: Array<{ x: number; y: number }>; extend: boolean }): void {
+    const ctx = this.elements;
+    const b = this.backing;
+    if (!ctx || !b) return;
+    const uv = ctx.geometry.getAttribute('uv') as BufferAttribute | undefined;
+    if (!uv) return;
+    // Region test in texel space (the transform is uniform, so a screen box
+    // stays an axis-aligned texel box).
+    const toTexel = (p: { x: number; y: number }): { x: number; y: number } => ({
+      x: (p.x - this.offX) / this.scale,
+      y: (p.y - this.offY) / this.scale,
+    });
+    const pts = marquee.pts.map(toTexel);
+    let inside: (x: number, y: number) => boolean;
+    if (marquee.tool === 'box') {
+      const minX = Math.min(pts[0].x, pts[1].x);
+      const maxX = Math.max(pts[0].x, pts[1].x);
+      const minY = Math.min(pts[0].y, pts[1].y);
+      const maxY = Math.max(pts[0].y, pts[1].y);
+      inside = (x, y) => x >= minX && x <= maxX && y >= minY && y <= maxY;
+    } else {
+      inside = (x, y) => pointInPolygon(x, y, pts);
+    }
+    const t = ctx.topo;
+    const p = { x: 0, y: 0 };
+    const insideVert = (i: number): boolean => {
+      this.texelOf(uv, i, Math.floor(uv.getX(i)), Math.floor(uv.getY(i)), p);
+      return inside(p.x, p.y);
+    };
+    const q = { x: 0, y: 0 };
+    const r = { x: 0, y: 0 };
+    const insideTri = (f: number): boolean => {
+      const a = t.tris[f * 3];
+      const c = t.tris[f * 3 + 1];
+      const d = t.tris[f * 3 + 2];
+      const du = Math.floor(uv.getX(a));
+      const dv = Math.floor(uv.getY(a));
+      this.texelOf(uv, a, du, dv, p);
+      this.texelOf(uv, c, du, dv, q);
+      this.texelOf(uv, d, du, dv, r);
+      return inside((p.x + q.x + r.x) / 3, (p.y + q.y + r.y) / 3);
+    };
+    ctx.onArea(idsInRegion(t, ctx.mode, insideVert, insideTri), marquee.extend);
   }
 
   // ---- Element picking & highlights ----

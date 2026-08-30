@@ -28,9 +28,9 @@ import {
   type MorphMeshInfo,
   type HudInfo,
 } from './viewer';
-import { UVView, type UVBacking, type UVElementContext } from './uvView';
+import { UVView, type AreaTool, type UVBacking, type UVElementContext } from './uvView';
 import { elementSelection, type ElementMode } from './elementSelection';
-import { pickFromIntersection } from './elementTopology';
+import { idsInRegion, pickFromIntersection, pointInPolygon } from './elementTopology';
 import { TimelinePanel, type TimelineClip } from './timeline';
 
 declare function acquireVsCodeApi(): {
@@ -160,7 +160,10 @@ const viewStateChipLabel = $('viewStateChipLabel');
 const viewStateChipClose = $<HTMLButtonElement>('viewStateChipClose');
 const elemModeSeg = $('elemModeSeg');
 const elemModeBtns = Array.from(elemModeSeg.querySelectorAll<HTMLButtonElement>('[data-elem]'));
+const elemToolSeg = $('elemToolSeg');
+const elemToolBtns = Array.from(elemToolSeg.querySelectorAll<HTMLButtonElement>('[data-tool]'));
 const elemStatus = $('elemStatus');
+const areaSvg = $('areaSvg') as unknown as SVGSVGElement;
 
 // Enlarged texture preview: clone the (up-to-1024px) card canvas into a modal,
 // compositing the UV overlay on top when it's currently shown.
@@ -328,6 +331,15 @@ for (const b of elemModeBtns) {
   b.addEventListener('click', () => setElementMode(b.dataset.elem as ElementMode));
 }
 
+let elemTool: AreaTool = 'box';
+for (const b of elemToolBtns) {
+  b.addEventListener('click', () => {
+    elemTool = b.dataset.tool as AreaTool;
+    for (const o of elemToolBtns) o.classList.toggle('active', o === b);
+    rebuildElementContext();
+  });
+}
+
 /** The selection follows the mesh whose UVs the texture card is showing. */
 function syncElementMesh(): void {
   const entry = textureEntries[activeTextureIdx];
@@ -341,24 +353,32 @@ const ELEM_NOUN: Record<string, [string, string]> = {
   face: ['face', 'faces'],
 };
 
-elementSelection.onChange(() => {
+function rebuildElementContext(): void {
   const st = elementSelection;
-  // 3D side.
-  viewer.updateElementOverlay(st.mesh, st.topo, st.mode, st.selected, st.hovered);
-  // UV side.
   let ctx: UVElementContext | null = null;
   if (st.mode !== 'off' && st.mesh && st.topo) {
     ctx = {
       mode: st.mode,
+      tool: elemTool,
       topo: st.topo,
       geometry: st.mesh.geometry as THREE.BufferGeometry,
       selected: st.selected,
       hovered: st.hovered,
       onHover: (id) => elementSelection.hover(id),
       onClick: (id, extend) => elementSelection.click(id, extend),
+      onArea: (ids, extend) => elementSelection.applyArea(ids, extend),
+      onLinked: (id, extend) => elementSelection.selectLinked(id, 'uv', extend),
     };
   }
   uvView.setElementContext(ctx);
+}
+
+elementSelection.onChange(() => {
+  const st = elementSelection;
+  // 3D side.
+  viewer.updateElementOverlay(st.mesh, st.topo, st.mode, st.selected, st.hovered);
+  // UV side.
+  rebuildElementContext();
   // Status line under the toolbar.
   if (st.mode === 'off') {
     elemStatus.hidden = true;
@@ -372,7 +392,7 @@ elementSelection.onChange(() => {
       elemStatus.textContent =
         `${n} ${n === 1 ? one : many} selected` +
         (st.hovered !== null ? ' · hovering' : '') +
-        ' — click to select, Shift extends, Esc clears';
+        ' — drag to area-select, Shift extends, double-click = linked, A = all/none, Esc clears';
     }
   }
 });
@@ -386,7 +406,13 @@ document.addEventListener('keydown', (ev) => {
   if (ev.code === 'Digit1') setElementMode('vertex');
   else if (ev.code === 'Digit2') setElementMode('edge');
   else if (ev.code === 'Digit3') setElementMode('face');
-  else if (ev.code === 'Escape' && texModal.classList.contains('hidden')) elementSelection.clear();
+  else if (ev.code === 'KeyA') elementSelection.selectAllToggle();
+  else if (ev.code === 'KeyB') armAreaSelect();
+  else if (ev.code === 'Escape' && texModal.classList.contains('hidden')) {
+    // An in-flight box/lasso eats the Esc; a second Esc clears the selection.
+    if (uvView.cancelArea() || cancelAreaSelect3D()) return;
+    elementSelection.clear();
+  }
 });
 
 // ---- Tabs ----
@@ -1142,6 +1168,165 @@ function retargetElementMesh(mesh: THREE.Mesh): boolean {
   elementSelection.setMesh(mesh);
   return true;
 }
+
+// ---- 3D box/lasso element selection ----
+// Shift+left-drag area-selects (extending); `B` arms the next plain drag as a
+// replacing area select. X-ray semantics: everything projecting inside the
+// region is taken, back faces and occluded parts included — no occlusion test.
+let area3D: { pts: Array<{ x: number; y: number }>; extend: boolean; pointerId: number } | null = null;
+let areaArmed = false;
+
+function armAreaSelect(): void {
+  if (elementSelection.mode === 'off' || !elementSelection.mesh) return;
+  areaArmed = true;
+  canvas.style.cursor = 'crosshair';
+}
+
+function cancelAreaSelect3D(): boolean {
+  const had = area3D !== null || areaArmed;
+  area3D = null;
+  areaArmed = false;
+  canvas.style.cursor = '';
+  areaSvg.classList.remove('active');
+  areaSvg.replaceChildren();
+  viewer.controls.enabled = true;
+  return had;
+}
+
+function drawAreaBand(): void {
+  if (!area3D || area3D.pts.length < 2) return;
+  areaSvg.classList.add('active');
+  const ns = 'http://www.w3.org/2000/svg';
+  let el: SVGElement;
+  if (elemTool === 'box') {
+    const [a, b] = [area3D.pts[0], area3D.pts[area3D.pts.length - 1]];
+    el = document.createElementNS(ns, 'rect');
+    el.setAttribute('x', String(Math.min(a.x, b.x)));
+    el.setAttribute('y', String(Math.min(a.y, b.y)));
+    el.setAttribute('width', String(Math.abs(b.x - a.x)));
+    el.setAttribute('height', String(Math.abs(b.y - a.y)));
+  } else {
+    el = document.createElementNS(ns, 'polygon');
+    el.setAttribute('points', area3D.pts.map((p) => `${p.x},${p.y}`).join(' '));
+  }
+  el.setAttribute('class', 'band');
+  areaSvg.replaceChildren(el);
+}
+
+canvas.addEventListener(
+  'pointerdown',
+  (ev) => {
+    if (ev.button !== 0 || elementSelection.mode === 'off' || !elementSelection.mesh) return;
+    if (!ev.shiftKey && !areaArmed) return;
+    // From here the drag belongs to the selection, not the camera.
+    viewer.controls.enabled = false;
+    canvas.setPointerCapture(ev.pointerId);
+    const rect = canvas.getBoundingClientRect();
+    area3D = {
+      pts: [{ x: ev.clientX - rect.left, y: ev.clientY - rect.top }],
+      extend: ev.shiftKey,
+      pointerId: ev.pointerId,
+    };
+  },
+  true,
+);
+canvas.addEventListener('pointermove', (ev) => {
+  if (!area3D || ev.pointerId !== area3D.pointerId) return;
+  const rect = canvas.getBoundingClientRect();
+  const pt = { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+  if (elemTool === 'lasso') area3D.pts.push(pt);
+  else area3D.pts[1] = pt;
+  drawAreaBand();
+});
+canvas.addEventListener(
+  'pointerup',
+  (ev) => {
+    if (!area3D || ev.pointerId !== area3D.pointerId) return;
+    const marquee = area3D;
+    const moved =
+      marquee.pts.length > 1 &&
+      Math.abs(marquee.pts[marquee.pts.length - 1].x - marquee.pts[0].x) +
+        Math.abs(marquee.pts[marquee.pts.length - 1].y - marquee.pts[0].y) >
+        4;
+    cancelAreaSelect3D();
+    if (moved) {
+      finishAreaSelect3D(marquee);
+      // The click-pick pointerup handler must not also fire for this gesture.
+      skipNextPick = true;
+    }
+  },
+  true,
+);
+
+function finishAreaSelect3D(marquee: { pts: Array<{ x: number; y: number }>; extend: boolean }): void {
+  const mesh = elementSelection.mesh;
+  const topo = elementSelection.topo;
+  const mode = elementSelection.mode;
+  if (!mesh || !topo || mode === 'off') return;
+  const rect = canvas.getBoundingClientRect();
+  // Batched local → screen projection of every buffer vertex.
+  const mvp = new THREE.Matrix4()
+    .multiplyMatrices(viewer.camera.projectionMatrix, viewer.camera.matrixWorldInverse)
+    .multiply(mesh.matrixWorld);
+  const posAttr = (mesh.geometry as THREE.BufferGeometry).getAttribute('position') as THREE.BufferAttribute;
+  const n = posAttr.count;
+  const sx = new Float32Array(n);
+  const sy = new Float32Array(n);
+  const okv = new Uint8Array(n);
+  const v = new THREE.Vector4();
+  const e = mvp.elements;
+  for (let i = 0; i < n; i++) {
+    const x = posAttr.getX(i);
+    const y = posAttr.getY(i);
+    const z = posAttr.getZ(i);
+    v.set(
+      e[0] * x + e[4] * y + e[8] * z + e[12],
+      e[1] * x + e[5] * y + e[9] * z + e[13],
+      e[2] * x + e[6] * y + e[10] * z + e[14],
+      e[3] * x + e[7] * y + e[11] * z + e[15],
+    );
+    if (v.w <= 0) continue; // behind the camera
+    okv[i] = 1;
+    sx[i] = ((v.x / v.w) * 0.5 + 0.5) * rect.width;
+    sy[i] = (0.5 - (v.y / v.w) * 0.5) * rect.height;
+  }
+  let inside: (x: number, y: number) => boolean;
+  if (elemTool === 'box') {
+    const [a, b] = [marquee.pts[0], marquee.pts[marquee.pts.length - 1]];
+    const minX = Math.min(a.x, b.x);
+    const maxX = Math.max(a.x, b.x);
+    const minY = Math.min(a.y, b.y);
+    const maxY = Math.max(a.y, b.y);
+    inside = (x, y) => x >= minX && x <= maxX && y >= minY && y <= maxY;
+  } else {
+    inside = (x, y) => pointInPolygon(x, y, marquee.pts);
+  }
+  const insideVert = (i: number): boolean => okv[i] === 1 && inside(sx[i], sy[i]);
+  const insideTri = (t: number): boolean => {
+    const a = topo.tris[t * 3];
+    const b = topo.tris[t * 3 + 1];
+    const c = topo.tris[t * 3 + 2];
+    if (!okv[a] || !okv[b] || !okv[c]) return false;
+    return inside((sx[a] + sx[b] + sx[c]) / 3, (sy[a] + sy[b] + sy[c]) / 3);
+  };
+  elementSelection.applyArea(idsInRegion(topo, mode, insideVert, insideTri), marquee.extend);
+}
+
+// Double-click in the viewport selects the 3D connected component.
+canvas.addEventListener('dblclick', (ev) => {
+  if (elementSelection.mode === 'off' || !elementSelection.mesh || !elementSelection.topo) return;
+  const rect = canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+    -(((ev.clientY - rect.top) / rect.height) * 2 - 1),
+  );
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(ndc, viewer.camera);
+  const hit = firstVisibleMeshHit(ray);
+  if (!hit || hit.object !== elementSelection.mesh) return;
+  const id = pickFromIntersection(hit, elementSelection.mode, elementSelection.topo);
+  if (id !== null) elementSelection.selectLinked(id, '3d', ev.shiftKey);
+});
 
 /** Hover mirroring for the 3D side, coalesced to one raycast per frame. */
 let hoverRaf = 0;
