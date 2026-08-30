@@ -123,7 +123,7 @@ loader is fixed.
 | --- | --- |
 | LightWave `.lwo` | LWO2 files with unused vertex maps or nested hierarchies fail to parse; polygons with more than 4 sides are dropped |
 | FBX | Some 2013-era exports fail while building animation curves; files whose NUL bytes have been mangled in transit are rejected as an unknown format |
-| Collada `.dae` | `<polygons>` meshes can collapse to a single triangle, `<tristrips>` are not read, and some skinned+morphed files fail to parse |
+| Collada `.dae` | Polygons with holes (`<ph>`) are unsupported, and some skinned+morphed files fail to parse |
 | 3MF | The volumetric extension is unsupported; beam-lattice models parse to no geometry |
 | VRML `.wrl` | Multi-line strings and some real-world files fail in the lexer |
 | USD | Composition (`references`, `payload`, `subLayer`) is not followed, so assets that rely on it load empty |
