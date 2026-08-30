@@ -30,6 +30,12 @@ A shading strip next to the corner view gizmo switches between **Wireframe, Soli
 
 ![Shading HUD in Normals mode with its hover explanation](media/shading-hud.png)
 
+## UV inspection
+
+The Textures tab pairs a **zoomable UV viewport** (wheel to individual texels, drag to pan, wireframe overlay crisp at any zoom) with Blender-style **element selection**: pick vertices, edges, or faces in either the UV view or the 3D viewport and watch the same selection light up in both — seam vertices show every UV copy across islands. Box/lasso select honors the X-ray toggle (visible-only vs through), double-click grabs a whole UV island or 3D connected part, and `F` localizes the highlight in the other view. **Isolate on model** paints any PBR map unlit on the geometry.
+
+![UV inspection: element selection synced between the UV view and the viewport](media/uv-viewer.gif)
+
 ## More features
 
 - **Wide format support** — GLB/GLTF (including DRACO- and meshopt-compressed, and KTX2/Basis textures), FBX, OBJ, USD/USDA/USDC/USDZ, STL, PLY, DAE (Collada), 3DS, 3MF, VRML, Gaussian splats (SPZ/SPLAT/KSPLAT/SOG/3DGS PLY), and more
