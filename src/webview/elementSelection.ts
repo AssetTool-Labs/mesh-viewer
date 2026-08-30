@@ -13,6 +13,9 @@ class ElementSelection {
   topo: Topology | null = null;
   readonly selected = new Set<number>();
   hovered: number | null = null;
+  /** Bumped on every change to the selection *set* (never on hover), so the
+   *  views can cache their selection renderings across hover churn. */
+  version = 0;
 
   private readonly listeners: Array<() => void> = [];
 
@@ -28,6 +31,7 @@ class ElementSelection {
     this.mode = mode;
     this.selected.clear();
     this.hovered = null;
+    this.version++;
     this.notify();
   }
 
@@ -38,6 +42,7 @@ class ElementSelection {
     this.topo = mesh ? topologyOf(mesh.geometry as THREE.BufferGeometry) : null;
     this.selected.clear();
     this.hovered = null;
+    this.version++;
     this.notify();
   }
 
@@ -45,6 +50,7 @@ class ElementSelection {
     if (id === null) {
       if (!extend && this.selected.size) {
         this.selected.clear();
+        this.version++;
         this.notify();
       }
       return;
@@ -56,6 +62,7 @@ class ElementSelection {
       this.selected.clear();
       this.selected.add(id);
     }
+    this.version++;
     this.notify();
   }
 
@@ -69,6 +76,7 @@ class ElementSelection {
   applyArea(ids: Iterable<number>, extend: boolean): void {
     if (!extend) this.selected.clear();
     for (const id of ids) this.selected.add(id);
+    this.version++;
     this.notify();
   }
 
@@ -80,6 +88,7 @@ class ElementSelection {
     } else {
       for (const id of allIds(this.topo, this.mode)) this.selected.add(id);
     }
+    this.version++;
     this.notify();
   }
 
@@ -95,6 +104,7 @@ class ElementSelection {
     if (!this.selected.size && this.hovered === null) return;
     this.selected.clear();
     this.hovered = null;
+    this.version++;
     this.notify();
   }
 }

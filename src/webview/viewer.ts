@@ -260,6 +260,12 @@ export class Viewer {
   private inspectMode: InspectMode | null = null;
   /** Element-selection highlight overlay, mounted as a child of its mesh. */
   private elementOverlay: THREE.Group | null = null;
+  /** What the current overlay's selection part was built from; hover-only
+   *  changes swap just the hover child instead of rebuilding the set. */
+  private overlayMesh: THREE.Mesh | null = null;
+  private overlayMode: ElementMode = 'off';
+  private overlayVersion = -1;
+  private overlayHover: THREE.Object3D | null = null;
   /** Maps the user has switched off in Material/Rendered shading. */
   private readonly disabledMaps = new Set<MapChannel>();
   /** Original texture slots nulled by the map toggles, keyed by material, for restore. */
@@ -1209,13 +1215,23 @@ export class Viewer {
     mode: ElementMode,
     selected: ReadonlySet<number>,
     hovered: number | null,
+    version: number,
   ): void {
-    this.clearElementOverlay();
-    if (!mesh || !topo || mode === 'off' || (selected.size === 0 && hovered === null)) return;
+    if (!mesh || !topo || mode === 'off' || (selected.size === 0 && hovered === null)) {
+      this.clearElementOverlay();
+      return;
+    }
     const pos = (mesh.geometry as THREE.BufferGeometry).getAttribute('position') as THREE.BufferAttribute;
     if (!pos) return;
-    const group = new THREE.Group();
-    group.name = '__elementOverlay';
+
+    // Hover changes come with every mouse move; only a selection change (a
+    // new version, mesh, or mode) pays for rebuilding the selection geometry.
+    const sameSelection =
+      this.elementOverlay !== null &&
+      this.overlayMesh === mesh &&
+      this.overlayMode === mode &&
+      this.overlayVersion === version;
+    if (!sameSelection) this.clearElementOverlay();
 
     const SEL = 0xff9d2e;
     const HOV = 0x4cc3f7;
@@ -1243,8 +1259,8 @@ export class Viewer {
       }
       return out;
     };
-    const mount = (coords: number[], color: number, order: number): void => {
-      if (!coords.length) return;
+    const mount = (coords: number[], color: number, order: number): THREE.Object3D | null => {
+      if (!coords.length) return null;
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.Float32BufferAttribute(coords, 3));
       let obj: THREE.Object3D;
@@ -1281,18 +1297,42 @@ export class Viewer {
       }
       obj.renderOrder = order;
       obj.raycast = () => {};
-      group.add(obj);
+      return obj;
     };
-    mount(collect(selected), SEL, 998);
-    if (hovered !== null && !selected.has(hovered)) mount(collect([hovered]), HOV, 999);
 
-    mesh.add(group);
-    this.elementOverlay = group;
+    let group = this.elementOverlay;
+    if (!sameSelection || !group) {
+      group = new THREE.Group();
+      group.name = '__elementOverlay';
+      const sel = mount(collect(selected), SEL, 998);
+      if (sel) group.add(sel);
+      mesh.add(group);
+      this.elementOverlay = group;
+      this.overlayMesh = mesh;
+      this.overlayMode = mode;
+      this.overlayVersion = version;
+      this.overlayHover = null;
+    }
+    if (this.overlayHover) {
+      group.remove(this.overlayHover);
+      disposeOverlayObject(this.overlayHover);
+      this.overlayHover = null;
+    }
+    if (hovered !== null && !selected.has(hovered)) {
+      const hov = mount(collect([hovered]), HOV, 999);
+      if (hov) {
+        group.add(hov);
+        this.overlayHover = hov;
+      }
+    }
   }
 
   /** Non-indexed copy of a geometry carrying a per-triangle id attribute,
    *  for the visibility ID pass. Cached per source geometry. */
   private readonly idMeshCache = new WeakMap<THREE.BufferGeometry, THREE.Mesh>();
+  /** Iterable twin of idMeshCache so clearAssets can free the GPU buffers —
+   *  a WeakMap entry dying never fires three's dispose path. */
+  private readonly idMeshes = new Set<THREE.Mesh>();
 
   private idMeshFor(mesh: THREE.Mesh): THREE.Mesh | null {
     const src = mesh.geometry as THREE.BufferGeometry;
@@ -1340,6 +1380,7 @@ export class Viewer {
     idMesh.matrixAutoUpdate = false;
     idMesh.frustumCulled = false;
     this.idMeshCache.set(src, idMesh);
+    this.idMeshes.add(idMesh);
     return idMesh;
   }
 
@@ -1393,23 +1434,27 @@ export class Viewer {
     const prevClear = this.renderer.getClearColor(new THREE.Color());
     const prevAlpha = this.renderer.getClearAlpha();
     const prevAuto = this.renderer.autoClear;
-    this.renderer.setRenderTarget(rt);
-    this.renderer.setClearColor(0x000000, 1);
-    this.renderer.clear();
-    this.renderer.autoClear = false;
-    this.renderer.render(occluders, this.camera);
-    // Same depth as the black copy of itself; LessEqualDepth lets the ids win.
-    this.renderer.render(idScene, this.camera);
     const buf = new Uint8Array(rw * rh * 4);
-    this.renderer.readRenderTargetPixels(rt, rx, height - ry - rh, rw, rh, buf);
-    this.renderer.autoClear = prevAuto;
-    this.renderer.setRenderTarget(prevTarget);
-    this.renderer.setClearColor(prevClear, prevAlpha);
-
-    this.scene.add(this.contentRoot);
-    idScene.remove(idMesh);
-    for (const o of hidden) o.visible = true;
-    rt.dispose();
+    try {
+      this.renderer.setRenderTarget(rt);
+      this.renderer.setClearColor(0x000000, 1);
+      this.renderer.clear();
+      this.renderer.autoClear = false;
+      this.renderer.render(occluders, this.camera);
+      // Same depth as the black copy of itself; LessEqualDepth lets the ids win.
+      this.renderer.render(idScene, this.camera);
+      this.renderer.readRenderTargetPixels(rt, rx, height - ry - rh, rw, rh, buf);
+    } finally {
+      // The content root must find its way home even if a render throws —
+      // otherwise the whole asset vanishes from the live scene.
+      this.renderer.autoClear = prevAuto;
+      this.renderer.setRenderTarget(prevTarget);
+      this.renderer.setClearColor(prevClear, prevAlpha);
+      this.scene.add(this.contentRoot);
+      idScene.remove(idMesh);
+      for (const o of hidden) o.visible = true;
+      rt.dispose();
+    }
     return buf;
   }
 
@@ -1417,12 +1462,12 @@ export class Viewer {
     const group = this.elementOverlay;
     if (!group) return;
     this.elementOverlay = null;
+    this.overlayMesh = null;
+    this.overlayMode = 'off';
+    this.overlayVersion = -1;
+    this.overlayHover = null;
     group.parent?.remove(group);
-    for (const child of group.children) {
-      const o = child as THREE.Mesh;
-      o.geometry?.dispose();
-      forEachMaterial(o.material as THREE.Material, (m) => m.dispose());
-    }
+    for (const child of group.children) disposeOverlayObject(child);
   }
 
   setSelected(obj: THREE.Object3D | null): void {
@@ -2138,6 +2183,11 @@ export class Viewer {
   /** Remove everything currently loaded (used by loadAsset). */
   clearAssets(): void {
     this.clearElementOverlay();
+    for (const m of this.idMeshes) {
+      m.geometry.dispose();
+      forEachMaterial(m.material as THREE.Material, (mm) => mm.dispose());
+    }
+    this.idMeshes.clear();
     this.setSelected(null);
     if (this.activeAction) {
       this.activeAction.stop();
@@ -2517,6 +2567,12 @@ function buildChannelMaterial(
             color: std?.emissive?.clone() ?? new THREE.Color(0x000000),
           });
   }
+}
+
+function disposeOverlayObject(child: THREE.Object3D): void {
+  const o = child as THREE.Mesh;
+  o.geometry?.dispose();
+  forEachMaterial(o.material as THREE.Material, (m) => m.dispose());
 }
 
 function forEachMaterial(

@@ -7,6 +7,8 @@ export type AreaTool = 'box' | 'lasso';
  *  swapped on every selection change (the sets are live references). */
 export interface UVElementContext {
   mode: Exclude<ElementMode, 'off'>;
+  /** Selection-set version from elementSelection — hover churn keeps it. */
+  version: number;
   tool: AreaTool;
   topo: Topology;
   geometry: BufferGeometry;
@@ -64,10 +66,14 @@ export class UVView {
   /** Highlight paths are rebuilt only when the selection changes, not per
    *  frame — a box-selected patch can be tens of thousands of triangles, and
    *  rebuilding that every pan/zoom frame stalls the canvas for seconds. */
-  private hlDirty = true;
+  private hlVersion = -1;
+  private hlMode: ElementMode | null = null;
   private hlSel: Path2D | null = null;
   private hlSelCount = 0;
+  private hlHovId: number | null | undefined = undefined;
   private hlHov: Path2D | null = null;
+  private hoverRaf = 0;
+  private pendingHover: { x: number; y: number } | null = null;
   /** In-progress box/lasso, in screen (CSS px) space. */
   private marquee: { tool: AreaTool; pts: Array<{ x: number; y: number }>; extend: boolean } | null = null;
   private readonly observer: ResizeObserver;
@@ -99,6 +105,8 @@ export class UVView {
     this.backingKey = key;
     this.flipped = flipY;
     this.wire = null; // texel mapping depends on size/flip
+    this.hlVersion = -1;
+    this.hlHovId = undefined;
     if (!sameView) this.fit();
     this.requestDraw();
   }
@@ -107,7 +115,12 @@ export class UVView {
   /** Enable element picking/highlighting (null while selection mode is off). */
   setElementContext(ctx: UVElementContext | null): void {
     this.elements = ctx;
-    this.hlDirty = true;
+    if (!ctx) {
+      this.hlVersion = -1;
+      this.hlSel = null;
+      this.hlHov = null;
+      this.hlHovId = undefined;
+    }
     this.root.classList.toggle('picking', !!ctx);
     this.requestDraw();
   }
@@ -214,8 +227,21 @@ export class UVView {
 
   private readonly onPointerMove = (ev: PointerEvent): void => {
     if (!this.dragging || ev.pointerId !== this.dragging.id) {
-      // Plain mouse move: element hover.
-      if (this.elements) this.elements.onHover(this.pickElement(ev.clientX, ev.clientY));
+      // Plain mouse move: element hover, coalesced to one O(triCount) pick
+      // per frame — raw pointermove can fire far faster than we can scan.
+      if (this.elements) {
+        this.pendingHover = { x: ev.clientX, y: ev.clientY };
+        if (!this.hoverRaf) {
+          this.hoverRaf = requestAnimationFrame(() => {
+            this.hoverRaf = 0;
+            const pending = this.pendingHover;
+            this.pendingHover = null;
+            if (pending && this.elements) {
+              this.elements.onHover(this.pickElement(pending.x, pending.y));
+            }
+          });
+        }
+      }
       return;
     }
     this.dragging.moved += Math.abs(ev.clientX - this.dragging.lastX) + Math.abs(ev.clientY - this.dragging.lastY);
@@ -362,15 +388,13 @@ export class UVView {
         add(t.tris[id * 3 + 1], du, dv);
         add(t.tris[id * 3 + 2], du, dv);
       } else if (ctx.mode === 'vertex') {
-        for (const i of t.repVerts.get(id) ?? []) add(i, Math.floor(uv.getX(i)), Math.floor(uv.getY(i)));
+        for (const i of t.repVerts.get(id) ?? []) add(i, t.tileU[i], t.tileV[i]);
       } else {
         const copies = t.edgeCopies.get(id);
         if (!copies) continue;
         for (let i = 0; i < copies.length; i += 2) {
-          const du = Math.floor(uv.getX(copies[i]));
-          const dv = Math.floor(uv.getY(copies[i]));
-          add(copies[i], du, dv);
-          add(copies[i + 1], du, dv);
+          add(copies[i], t.tileU[copies[i]], t.tileV[copies[i]]);
+          add(copies[i + 1], t.tileU[copies[i]], t.tileV[copies[i]]);
         }
       }
     }
@@ -436,7 +460,7 @@ export class UVView {
     const t = ctx.topo;
     const p = { x: 0, y: 0 };
     const insideVert = (i: number): boolean => {
-      this.texelOf(uv, i, Math.floor(uv.getX(i)), Math.floor(uv.getY(i)), p);
+      this.texelOf(uv, i, ctx.topo.tileU[i], ctx.topo.tileV[i], p);
       return inside(p.x, p.y);
     };
     const q = { x: 0, y: 0 };
@@ -565,10 +589,8 @@ export class UVView {
         for (let i = 0; i < copies.length; i += 2) {
           const a = copies[i];
           const c = copies[i + 1];
-          const du = Math.floor(uv.getX(a));
-          const dv = Math.floor(uv.getY(a));
-          this.texelOf(uv, a, du, dv, p);
-          this.texelOf(uv, c, du, dv, q);
+          this.texelOf(uv, a, t.tileU[a], t.tileV[a], p);
+          this.texelOf(uv, c, t.tileU[a], t.tileV[a], q);
           path.moveTo(p.x, p.y);
           path.lineTo(q.x, q.y);
         }
@@ -596,7 +618,7 @@ export class UVView {
         ctx2d.beginPath();
         for (const id of ids) {
           for (const i of t.repVerts.get(id) ?? []) {
-            this.texelOf(uv, i, Math.floor(uv.getX(i)), Math.floor(uv.getY(i)), p);
+            this.texelOf(uv, i, t.tileU[i], t.tileV[i], p);
             ctx2d.moveTo(p.x + vr, p.y);
             ctx2d.arc(p.x, p.y, vr, 0, Math.PI * 2);
           }
@@ -608,11 +630,16 @@ export class UVView {
       return;
     }
 
-    if (this.hlDirty) {
-      this.hlDirty = false;
+    if (this.hlVersion !== ctx.version || this.hlMode !== ctx.mode) {
+      this.hlVersion = ctx.version;
+      this.hlMode = ctx.mode;
       const sel = ctx.selected.size ? this.buildHighlightPath(ctx.selected) : null;
       this.hlSel = sel?.path ?? null;
       this.hlSelCount = sel?.count ?? 0;
+      this.hlHovId = undefined; // selection changed; hover path may be stale
+    }
+    if (this.hlHovId !== ctx.hovered) {
+      this.hlHovId = ctx.hovered;
       const hov =
         ctx.hovered !== null && !ctx.selected.has(ctx.hovered)
           ? this.buildHighlightPath([ctx.hovered])

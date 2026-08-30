@@ -334,30 +334,40 @@ function setElementMode(mode: ElementMode): void {
     // on afterwards; the 3D wireframe goes back off on exit *if we were the
     // ones who switched it on* — a wireframe the user chose (before or during
     // the mode) is theirs and stays.
-    if (!toggleShowUV.checked && !toggleShowUV.disabled) {
+    if (!toggleShowUV.checked && !toggleShowUV.disabled && !showUVSuppressed) {
       toggleShowUV.checked = true;
       toggleShowUV.dispatchEvent(new Event('change'));
     }
-    if (!toggleWireframeOverlay.checked) {
+    // A wireframe the user dismissed during this mode session stays dismissed
+    // across 1/2/3 mode switches — only a fresh entry re-offers it.
+    if (!toggleWireframeOverlay.checked && !wireframeSuppressed) {
       wireframeAutoBusy = true;
       toggleWireframeOverlay.checked = true;
       toggleWireframeOverlay.dispatchEvent(new Event('change'));
       wireframeAutoBusy = false;
       wireframeAutoOn = true;
     }
-  } else if (wireframeAutoOn) {
-    wireframeAutoOn = false;
-    if (toggleWireframeOverlay.checked) {
-      wireframeAutoBusy = true;
-      toggleWireframeOverlay.checked = false;
-      toggleWireframeOverlay.dispatchEvent(new Event('change'));
-      wireframeAutoBusy = false;
+  } else {
+    if (wireframeAutoOn) {
+      wireframeAutoOn = false;
+      if (toggleWireframeOverlay.checked) {
+        wireframeAutoBusy = true;
+        toggleWireframeOverlay.checked = false;
+        toggleWireframeOverlay.dispatchEvent(new Event('change'));
+        wireframeAutoBusy = false;
+      }
     }
+    wireframeSuppressed = false;
+    showUVSuppressed = false;
   }
 }
 /** True while the wireframe overlay is on only for the element mode's sake. */
 let wireframeAutoOn = false;
 let wireframeAutoBusy = false;
+/** The user dismissed an auto-enabled overlay while a mode was active; stop
+ *  re-forcing it until the mode is fully exited. */
+let wireframeSuppressed = false;
+let showUVSuppressed = false;
 for (const b of elemModeBtns) {
   b.addEventListener('click', () => setElementMode(b.dataset.elem as ElementMode));
 }
@@ -390,6 +400,7 @@ function rebuildElementContext(): void {
   if (st.mode !== 'off' && st.mesh && st.topo) {
     ctx = {
       mode: st.mode,
+      version: st.version,
       tool: elemTool,
       topo: st.topo,
       geometry: st.mesh.geometry as THREE.BufferGeometry,
@@ -407,7 +418,7 @@ function rebuildElementContext(): void {
 elementSelection.onChange(() => {
   const st = elementSelection;
   // 3D side.
-  viewer.updateElementOverlay(st.mesh, st.topo, st.mode, st.selected, st.hovered);
+  viewer.updateElementOverlay(st.mesh, st.topo, st.mode, st.selected, st.hovered, st.version);
   // UV side.
   rebuildElementContext();
   elemFrameBtn.disabled =
@@ -762,8 +773,12 @@ function renderWeightLegend(mode: WeightMode): void {
   weightLegend.style.display = html ? '' : 'none';
 }
 toggleWireframeOverlay.addEventListener('change', () => {
-  // A manual flip takes ownership: the element mode stops auto-reverting it.
-  if (!wireframeAutoBusy) wireframeAutoOn = false;
+  // A manual flip takes ownership: the element mode stops auto-reverting it,
+  // and a dismissal during a mode session stops it re-forcing on 1/2/3.
+  if (!wireframeAutoBusy) {
+    wireframeAutoOn = false;
+    wireframeSuppressed = elementSelection.mode !== 'off' && !toggleWireframeOverlay.checked;
+  }
   viewer.setWireframeOverlayVisible(toggleWireframeOverlay.checked);
   // The element mode's automatic flips are session decoration — remembering
   // them would make every future file open with the wireframe on. Only a
@@ -834,6 +849,9 @@ sidebarResizer.addEventListener('pointerdown', (ev) => {
 
 toggleShowUV.addEventListener('change', () => {
   showUV = toggleShowUV.checked;
+  // Same dismissal rule as the wireframe: unchecking during a mode session
+  // stops the mode re-forcing it (the auto-enable sets checked, clearing this).
+  showUVSuppressed = elementSelection.mode !== 'off' && !toggleShowUV.checked;
   refreshUVOverlay();
 });
 
@@ -1210,6 +1228,9 @@ function retargetElementMesh(mesh: THREE.Mesh): boolean {
     renderActiveTexture();
   }
   elementSelection.setMesh(mesh);
+  // Same entry, different mesh: the wireframe must still swap to the new
+  // mesh's unwrap so drawing and hit-testing agree.
+  refreshUVOverlay();
   return true;
 }
 
@@ -1348,6 +1369,15 @@ canvas.addEventListener('pointermove', (ev) => {
   drawAreaBand();
 });
 canvas.addEventListener(
+  'pointercancel',
+  (ev) => {
+    // An OS gesture can cancel the drag with no pointerup: restore the
+    // camera controls and drop the marquee instead of leaving them stuck.
+    if (area3D && ev.pointerId === area3D.pointerId) cancelAreaSelect3D();
+  },
+  true,
+);
+canvas.addEventListener(
   'pointerup',
   (ev) => {
     if (!area3D || ev.pointerId !== area3D.pointerId) return;
@@ -1425,7 +1455,11 @@ function finishAreaSelect3D(marquee: { pts: Array<{ x: number; y: number }>; ext
   // region names the front-most triangle, and elements keep their selection
   // only if a visible triangle backs them (the triangle itself, an adjacent
   // one for a vertex, an incident one for an edge).
-  if (!toggleXray.checked) {
+  // A posed SkinnedMesh defeats the ID pass: the id copy renders at bind pose
+  // while the skinned occluders render deformed, so the depths never match.
+  // Selection geometry is bind-pose throughout, so skinned meshes keep the
+  // through-select behavior instead.
+  if (!toggleXray.checked && !(mesh as THREE.SkinnedMesh).isSkinnedMesh) {
     const dw = Math.max(1, Math.round(rect.width));
     const dh = Math.max(1, Math.round(rect.height));
     let minX = Infinity;
@@ -1918,7 +1952,9 @@ function pushViewSettings(): void {
     upAxis: upAxisSelect.value as ViewSettings['upAxis'],
     showBounds: toggleBounds.checked,
     showSkeleton: toggleSkeleton.checked,
-    showWireframeOverlay: toggleWireframeOverlay.checked,
+    // An auto-enabled wireframe is session decoration; persist the value the
+    // user actually owns (auto-on only ever starts from unchecked).
+    showWireframeOverlay: wireframeAutoOn ? false : toggleWireframeOverlay.checked,
   };
   vscode.postMessage({ type: 'viewSettingsChanged', settings });
 }
@@ -3041,10 +3077,22 @@ function drawTextureCPU(tex: THREE.Texture, canvas: HTMLCanvasElement): boolean 
 }
 
 /** Point the zoomable view at the UVs of the mesh that should be overlaid
- *  (or at nothing when the overlay is off). */
+ *  (or at nothing when the overlay is off). While an element mode is active,
+ *  the wireframe follows the selection's mesh — element picks can retarget to
+ *  another mesh of the same texture entry, and drawing one mesh's unwrap
+ *  while hit-testing another would misplace every highlight. */
 function refreshUVOverlay(): void {
+  if (!showUV) {
+    uvView.setWireframe(null);
+    return;
+  }
+  const st = elementSelection;
+  if (st.mode !== 'off' && st.mesh) {
+    uvView.setWireframe(st.mesh.geometry as THREE.BufferGeometry);
+    return;
+  }
   const entry = textureEntries[activeTextureIdx];
-  const usage = entry && showUV ? pickUsageForUV(entry) : null;
+  const usage = entry ? pickUsageForUV(entry) : null;
   uvView.setWireframe(usage ? (usage.mesh.geometry as THREE.BufferGeometry) : null);
 }
 

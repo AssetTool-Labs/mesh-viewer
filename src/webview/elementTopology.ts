@@ -28,6 +28,12 @@ export interface Topology {
   islandOfTri: Int32Array;
   /** 3D component id per triangle (connectivity over merged positions). */
   componentOfTri: Int32Array;
+  /** Per-buffer-vertex UV tile shift (floor of the first referencing
+   *  triangle's first corner), so dots, area tests and framing land on the
+   *  same tile as the wireframe — a per-vertex fract puts vertices sitting
+   *  exactly on an integer UV a whole tile away from their triangle. */
+  tileU: Float32Array;
+  tileV: Float32Array;
 }
 
 export function edgeKeyOf(topo: Topology, a: number, b: number): number {
@@ -135,7 +141,33 @@ function build(geom: THREE.BufferGeometry): Topology | null {
     componentOfTri[t] = comps.find(rep[tris[t * 3]]);
   }
 
-  return { vertCount, triCount, tris, rep, repVerts, edgeCopies, islandOfTri, componentOfTri };
+  const tileU = new Float32Array(vertCount);
+  const tileV = new Float32Array(vertCount);
+  const uv = geom.getAttribute('uv') as THREE.BufferAttribute | undefined;
+  if (uv) {
+    const assigned = new Uint8Array(vertCount);
+    for (let t = 0; t < triCount; t++) {
+      const a = tris[t * 3];
+      const du = Math.floor(uv.getX(a));
+      const dv = Math.floor(uv.getY(a));
+      for (let k = 0; k < 3; k++) {
+        const i = tris[t * 3 + k];
+        if (!assigned[i]) {
+          assigned[i] = 1;
+          tileU[i] = du;
+          tileV[i] = dv;
+        }
+      }
+    }
+    for (let i = 0; i < vertCount; i++) {
+      if (!assigned[i]) {
+        tileU[i] = Math.floor(uv.getX(i));
+        tileV[i] = Math.floor(uv.getY(i));
+      }
+    }
+  }
+
+  return { vertCount, triCount, tris, rep, repVerts, edgeCopies, islandOfTri, componentOfTri, tileU, tileV };
 }
 
 const vA = new THREE.Vector3();
