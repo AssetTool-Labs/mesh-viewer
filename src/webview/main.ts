@@ -326,7 +326,16 @@ let showUV = false;
 function setElementMode(mode: ElementMode): void {
   elementSelection.setMode(mode);
   for (const b of elemModeBtns) b.classList.toggle('active', b.dataset.elem === mode);
-  if (mode !== 'off') syncElementMesh();
+  if (mode !== 'off') {
+    syncElementMesh();
+    // Element work reads against the wireframe; switch the overlay on for the
+    // user (through the checkbox, so state stays single-sourced). Leaving the
+    // mode keeps it on — turning it back off is a deliberate act.
+    if (!toggleShowUV.checked && !toggleShowUV.disabled) {
+      toggleShowUV.checked = true;
+      toggleShowUV.dispatchEvent(new Event('change'));
+    }
+  }
 }
 for (const b of elemModeBtns) {
   b.addEventListener('click', () => setElementMode(b.dataset.elem as ElementMode));
