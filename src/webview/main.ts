@@ -136,6 +136,8 @@ const resetPoseBtn = $<HTMLButtonElement>('resetPose');
 const frameSelectionBtn = $<HTMLButtonElement>('frameSelection');
 const sidebarToggle = $<HTMLButtonElement>('sidebarToggle');
 const importMeshBtn = $<HTMLButtonElement>('importMeshBtn');
+const saveCopyBtn = $<HTMLButtonElement>('saveCopyBtn');
+const revealBtn = $<HTMLButtonElement>('revealBtn');
 const blendshapesTab = $<HTMLButtonElement>('blendshapesTab');
 const blendshapeList = $('blendshapeList');
 const bsResetBtn = $<HTMLButtonElement>('bsReset');
@@ -173,6 +175,10 @@ document.addEventListener('keydown', (ev) => {
 });
 
 importMeshBtn.addEventListener('click', () => requestPickAndImport());
+
+// Both act on the primary file; the host owns its URI, so these carry no payload.
+saveCopyBtn.addEventListener('click', () => vscode.postMessage({ type: 'saveSourceCopy' }));
+revealBtn.addEventListener('click', () => vscode.postMessage({ type: 'revealSource' }));
 
 // ---- Blender-style timeline / dope sheet (bottom dock) ----
 // The panel is a read-only visualization: it scrubs/steps/plays through the
@@ -1181,6 +1187,7 @@ vscode.postMessage({ type: 'ready' });
 async function handleInit(msg: InitMessage): Promise<void> {
   applyViewSettings(msg.settings);
   primaryFile = { name: msg.fileName, ext: msg.fileExtension, size: msg.fileSizeBytes };
+  revealBtn.hidden = !msg.canReveal;
   fileNameEl.textContent = msg.fileName;
   fileSubtitleEl.textContent = `${msg.fileExtension.toUpperCase()} · ${formatBytes(msg.fileSizeBytes)}`;
   document.title = `${msg.fileName} — 3D Mesh Viewer`;

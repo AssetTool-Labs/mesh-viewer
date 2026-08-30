@@ -134,6 +134,7 @@ loader is fixed.
 
 - **Multi-format rendering** — every loader from Three.js' `examples/jsm/loaders` is wired in, lazy-imported on demand.
 - **Add more meshes to a scene** — click `+ Import Mesh…` in the sidebar, *or* drag-and-drop more files onto the viewport (see the note about *Drop into Editor* below). Each import becomes its own root in the hierarchy, with its animations listed under the file's name.
+- **Save a copy / reveal the file** — two icon buttons in the sidebar header next to `+ Import Mesh…`. The download button saves a copy of the opened file wherever you pick (this is also how you extract a real file from a virtual document, e.g. the left pane of a git diff). The folder button reveals the file in the Explorer view when it's inside the workspace, or in Finder / File Explorer when it isn't; it's hidden for virtual documents, which have nothing on disk to reveal.
 - **Scene hierarchy panel** — collapsible tree with type icons (mesh / group / bone / light / camera / points / line segments), search filter, expand-all / collapse-all, and an eye toggle on every row to hide or unhide any subtree.
 - **Selection inspector** — click a node in the tree *or* directly in the viewport to see name, type, transform, vertex / triangle / index counts, attribute list, material list, bone count, blendshape count, and bounding box.
 - **File info panel** — format, size, parse time, glTF generator/version, scene totals, geometry totals, unique materials by type, texture count, light/camera summaries. Updates as you import more meshes.

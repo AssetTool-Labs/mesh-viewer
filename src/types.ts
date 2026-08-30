@@ -47,6 +47,8 @@ export interface FilePayload {
 export interface InitMessage extends FilePayload {
   type: 'init';
   settings: InitViewSettings;
+  /** False for virtual documents (e.g. git diff panes) — nothing on disk to reveal. */
+  canReveal: boolean;
 }
 
 /** Message: extension -> webview, sent for each additional file imported via drag-and-drop. */
@@ -129,6 +131,10 @@ export type FromWebviewMessage =
   /** The link toggle was flipped — mirror it (and its mode) to the other viewers. */
   | { type: 'cameraLinkChanged'; enabled: boolean; mode: CameraLinkMode }
   /** Ask the host to write the given PNG data URL to a file the user picks. */
-  | { type: 'savePng'; dataUrl: string; suggestedName: string };
+  | { type: 'savePng'; dataUrl: string; suggestedName: string }
+  /** Ask the host to save a copy of the primary file somewhere the user picks. */
+  | { type: 'saveSourceCopy' }
+  /** Ask the host to reveal the primary file in the Explorer (or the OS file manager). */
+  | { type: 'revealSource' };
 
 
