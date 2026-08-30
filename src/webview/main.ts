@@ -328,12 +328,17 @@ function setElementMode(mode: ElementMode): void {
   for (const b of elemModeBtns) b.classList.toggle('active', b.dataset.elem === mode);
   if (mode !== 'off') {
     syncElementMesh();
-    // Element work reads against the wireframe; switch the overlay on for the
-    // user (through the checkbox, so state stays single-sourced). Leaving the
-    // mode keeps it on — turning it back off is a deliberate act.
+    // Element work reads against wireframes — Blender edit-mode style. Switch
+    // the UV overlay and the 3D wireframe overlay on for the user (through
+    // their checkboxes, so state stays single-sourced). Leaving the mode keeps
+    // them on — turning them back off is a deliberate act.
     if (!toggleShowUV.checked && !toggleShowUV.disabled) {
       toggleShowUV.checked = true;
       toggleShowUV.dispatchEvent(new Event('change'));
+    }
+    if (!toggleWireframeOverlay.checked) {
+      toggleWireframeOverlay.checked = true;
+      toggleWireframeOverlay.dispatchEvent(new Event('change'));
     }
   }
 }

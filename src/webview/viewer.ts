@@ -1249,14 +1249,22 @@ export class Viewer {
       geo.setAttribute('position', new THREE.Float32BufferAttribute(coords, 3));
       let obj: THREE.Object3D;
       if (mode === 'face') {
+        // Blender edit-mode look: a translucent tint over the shaded texture.
+        // With X-ray off the fill is depth-tested (pulled off the surface by a
+        // polygon offset), so occluded faces don't bleed through; with X-ray
+        // on it stays visible through the mesh, matching select-through.
         obj = new THREE.Mesh(
           geo,
           new THREE.MeshBasicMaterial({
             color,
             transparent: true,
-            opacity: 0.4,
+            opacity: 0.35,
             side: THREE.DoubleSide,
-            depthTest: false,
+            depthTest: !this.xrayOn,
+            depthWrite: false,
+            polygonOffset: true,
+            polygonOffsetFactor: -2,
+            polygonOffsetUnits: -2,
             toneMapped: false,
           }),
         );
@@ -1719,6 +1727,14 @@ export class Viewer {
   setXray(v: boolean): void {
     if (this.xrayOn === v) return;
     this.xrayOn = v;
+    // Element face highlights switch between occluded and see-through styles.
+    for (const child of this.elementOverlay?.children ?? []) {
+      const m = (child as THREE.Mesh).material as THREE.MeshBasicMaterial;
+      if ((child as THREE.Mesh).isMesh && m) {
+        m.depthTest = !v;
+        m.needsUpdate = true;
+      }
+    }
     this.applyAllShading();
   }
 
