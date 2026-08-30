@@ -429,7 +429,8 @@ button.group-title:hover { color: var(--fg); }
   font-size: 11px;
 }
 /* Jump from the 2D preview to the matching Inspect mode in the viewport. */
-#texIsolate {
+#texIsolate,
+#elemFrame {
   align-self: flex-start;
   background: transparent;
   color: var(--fg);
@@ -438,8 +439,18 @@ button.group-title:hover { color: var(--fg); }
   padding: 4px 8px;
   cursor: pointer;
 }
-#texIsolate:hover:not(:disabled) { background: var(--hover); }
-#texIsolate:disabled { opacity: 0.45; cursor: default; }
+#texIsolate:hover:not(:disabled), #elemFrame:hover:not(:disabled) { background: var(--hover); }
+#texIsolate:disabled, #elemFrame:disabled { opacity: 0.45; cursor: default; }
+.kbd {
+  display: inline-block;
+  padding: 0 4px;
+  margin-left: 4px;
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  font-size: 10px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  color: var(--muted);
+}
 #texIsolate.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 /* Vert/Edge/Face segmented switch. */
 .elem-seg { display: flex; gap: 2px; flex: 1; }

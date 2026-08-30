@@ -163,6 +163,7 @@ const elemModeBtns = Array.from(elemModeSeg.querySelectorAll<HTMLButtonElement>(
 const elemToolSeg = $('elemToolSeg');
 const elemToolBtns = Array.from(elemToolSeg.querySelectorAll<HTMLButtonElement>('[data-tool]'));
 const elemStatus = $('elemStatus');
+const elemFrameBtn = $<HTMLButtonElement>('elemFrame');
 const areaSvg = $('areaSvg') as unknown as SVGSVGElement;
 
 // Enlarged texture preview: clone the (up-to-1024px) card canvas into a modal,
@@ -379,6 +380,8 @@ elementSelection.onChange(() => {
   viewer.updateElementOverlay(st.mesh, st.topo, st.mode, st.selected, st.hovered);
   // UV side.
   rebuildElementContext();
+  elemFrameBtn.disabled =
+    st.mode === 'off' || !st.mesh || (st.selected.size === 0 && st.hovered === null);
   // Status line under the toolbar.
   if (st.mode === 'off') {
     elemStatus.hidden = true;
@@ -407,6 +410,7 @@ document.addEventListener('keydown', (ev) => {
   else if (ev.code === 'Digit2') setElementMode('edge');
   else if (ev.code === 'Digit3') setElementMode('face');
   else if (ev.code === 'KeyA') elementSelection.selectAllToggle();
+  else if (ev.code === 'KeyF') frameElementViews();
   else if (ev.code === 'KeyB') armAreaSelect();
   else if (ev.code === 'Escape' && texModal.classList.contains('hidden')) {
     // An in-flight box/lasso eats the Esc; a second Esc clears the selection.
@@ -1157,8 +1161,10 @@ function firstVisibleMeshHit(ray: THREE.Raycaster): THREE.Intersection | null {
  */
 function retargetElementMesh(mesh: THREE.Mesh): boolean {
   if (elementSelection.mesh === mesh) return true;
-  const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-  const idx = textureEntries.findIndex((e) => e.usages.some((u) => mats.includes(u.material)));
+  // Match by mesh, not by mesh.material: solid/normals/Inspect/weights swap in
+  // transient materials that no texture entry knows about, and clicks in those
+  // states must still land.
+  const idx = textureEntries.findIndex((e) => e.usages.some((u) => u.mesh === mesh));
   if (idx < 0) return false;
   if (idx !== activeTextureIdx) {
     activeTextureIdx = idx;
@@ -1168,6 +1174,64 @@ function retargetElementMesh(mesh: THREE.Mesh): boolean {
   elementSelection.setMesh(mesh);
   return true;
 }
+
+// ---- F: localize the highlight in the other view ----
+
+/** World-space bounds of the selected (else hovered) elements. */
+function selectionBox3D(): THREE.Box3 | null {
+  const st = elementSelection;
+  if (st.mode === 'off' || !st.mesh || !st.topo) return null;
+  const ids = st.selected.size ? st.selected : st.hovered !== null ? [st.hovered] : null;
+  if (!ids) return null;
+  const pos = (st.mesh.geometry as THREE.BufferGeometry).getAttribute('position') as THREE.BufferAttribute;
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  let any = false;
+  const add = (i: number): void => {
+    v.fromBufferAttribute(pos, i).applyMatrix4(st.mesh!.matrixWorld);
+    box.expandByPoint(v);
+    any = true;
+  };
+  for (const id of ids) {
+    if (st.mode === 'face') {
+      if (id < 0 || id >= st.topo.triCount) continue;
+      add(st.topo.tris[id * 3]);
+      add(st.topo.tris[id * 3 + 1]);
+      add(st.topo.tris[id * 3 + 2]);
+    } else if (st.mode === 'vertex') {
+      add(id);
+    } else {
+      const copies = st.topo.edgeCopies.get(id);
+      if (copies) {
+        add(copies[0]);
+        add(copies[1]);
+      }
+    }
+  }
+  return any ? box : null;
+}
+
+/**
+ * F over the UV view localizes the 3D camera on the highlight; F over the 3D
+ * viewport localizes the UV view; F anywhere else (or the toolbar button)
+ * does both.
+ */
+function frameElementViews(): void {
+  const overUV = uvView.root.matches(':hover');
+  const over3D = canvas.matches(':hover');
+  if (!overUV || !over3D) {
+    if (!over3D) {
+      const box = selectionBox3D();
+      if (box) viewer.frameElementBox(box);
+    }
+    if (!overUV) uvView.frameElements();
+  }
+}
+elemFrameBtn.addEventListener('click', () => {
+  const box = selectionBox3D();
+  if (box) viewer.frameElementBox(box);
+  uvView.frameElements();
+});
 
 // ---- 3D box/lasso element selection ----
 // Shift+left-drag area-selects (extending); `B` arms the next plain drag as a

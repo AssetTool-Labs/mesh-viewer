@@ -2038,6 +2038,32 @@ export class Viewer {
     this.frameObject(this.contentRoot);
   }
 
+  /**
+   * Center the camera on a world-space box while keeping the current viewing
+   * direction (unlike frameObject's canned angle) — used to localize an
+   * element selection without disorienting the user. Tiny boxes (a single
+   * vertex) are clamped to a fraction of the content size so F never zooms
+   * into a microscopic frustum.
+   */
+  frameElementBox(box: THREE.Box3): void {
+    if (box.isEmpty() || !isFiniteBox(box)) return;
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const content = contentBounds(this.contentRoot).getSize(new THREE.Vector3());
+    const contentDim = Math.max(content.x, content.y, content.z) || 1;
+    const maxDim = Math.max(size.x, size.y, size.z, contentDim * 0.05);
+    const dist = maxDim / (2 * Math.tan((Math.PI * this.camera.fov) / 360));
+    const dir = this.camera.position.clone().sub(this.controls.target);
+    if (dir.lengthSq() < 1e-12) dir.set(1, 0.7, 1);
+    dir.normalize();
+    this.camera.position.copy(center).addScaledVector(dir, dist * 1.6);
+    this.camera.near = Math.max(0.001, maxDim / 1000);
+    this.camera.far = Math.max(100, dist * 100);
+    this.camera.updateProjectionMatrix();
+    this.controls.target.copy(center);
+    this.controls.update();
+  }
+
   frameObject(obj: THREE.Object3D): void {
     const box = contentBounds(obj);
     if (box.isEmpty()) return;

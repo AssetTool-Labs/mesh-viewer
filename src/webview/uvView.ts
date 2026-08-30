@@ -322,6 +322,65 @@ export class UVView {
     this.zoomLabel.textContent = zoom >= 10 ? `${zoom.toFixed(0)}×` : `${zoom.toFixed(2)}×`;
   }
 
+  /** Zoom/center onto the selected (else hovered) elements' UV bounds (F). */
+  frameElements(): boolean {
+    const ctx = this.elements;
+    const b = this.backing;
+    if (!ctx || !b) return false;
+    const uv = ctx.geometry.getAttribute('uv') as BufferAttribute | undefined;
+    if (!uv) return false;
+    const ids = ctx.selected.size ? ctx.selected : ctx.hovered !== null ? [ctx.hovered] : null;
+    if (!ids) return false;
+    const t = ctx.topo;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    const p = { x: 0, y: 0 };
+    const add = (i: number, du: number, dv: number): void => {
+      this.texelOf(uv, i, du, dv, p);
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    };
+    for (const id of ids) {
+      if (ctx.mode === 'face') {
+        if (id < 0 || id >= t.triCount) continue;
+        const a = t.tris[id * 3];
+        const du = Math.floor(uv.getX(a));
+        const dv = Math.floor(uv.getY(a));
+        add(a, du, dv);
+        add(t.tris[id * 3 + 1], du, dv);
+        add(t.tris[id * 3 + 2], du, dv);
+      } else if (ctx.mode === 'vertex') {
+        for (const i of t.repVerts.get(id) ?? []) add(i, Math.floor(uv.getX(i)), Math.floor(uv.getY(i)));
+      } else {
+        const copies = t.edgeCopies.get(id);
+        if (!copies) continue;
+        for (let i = 0; i < copies.length; i += 2) {
+          const du = Math.floor(uv.getX(copies[i]));
+          const dv = Math.floor(uv.getY(copies[i]));
+          add(copies[i], du, dv);
+          add(copies[i + 1], du, dv);
+        }
+      }
+    }
+    if (minX > maxX) return false;
+    // Pad, clamp to the zoom range, and center; a single vertex gets a sane
+    // close-up rather than an infinite zoom.
+    const w = Math.max(maxX - minX, b.width * 0.01);
+    const h = Math.max(maxY - minY, b.height * 0.01);
+    const target = Math.min(this.cssW / w, this.cssH / h) * 0.7;
+    const min = this.fitScale / 256;
+    const max = Math.max(4096, this.fitScale * 1024);
+    this.scale = Math.min(max, Math.max(min, target));
+    this.offX = this.cssW / 2 - ((minX + maxX) / 2) * this.scale;
+    this.offY = this.cssH / 2 - ((minY + maxY) / 2) * this.scale;
+    this.requestDraw();
+    return true;
+  }
+
   /** Cancel an in-progress box/lasso (Esc). True if one was active. */
   cancelArea(): boolean {
     if (!this.marquee) return false;
