@@ -662,6 +662,30 @@ frameSelectionBtn.addEventListener('click', () => {
 });
 sidebarToggle.addEventListener('click', () => app.classList.toggle('sidebar-collapsed'));
 
+// Drag the panel edge to resize the sidebar. Width lives in --sidebar-width so
+// the toggle button, collapse offset, and this handle all move together; the
+// 3D canvas and the UV viewport resize themselves via their ResizeObservers.
+const sidebarResizer = $('sidebarResizer');
+sidebarResizer.addEventListener('pointerdown', (ev) => {
+  ev.preventDefault();
+  sidebarResizer.setPointerCapture(ev.pointerId);
+  sidebarResizer.classList.add('dragging');
+  const move = (m: PointerEvent): void => {
+    const max = Math.max(280, Math.round(window.innerWidth * 0.6));
+    const w = Math.min(Math.max(Math.round(m.clientX), 220), max);
+    document.documentElement.style.setProperty('--sidebar-width', `${w}px`);
+  };
+  const up = (): void => {
+    sidebarResizer.classList.remove('dragging');
+    sidebarResizer.removeEventListener('pointermove', move);
+    sidebarResizer.removeEventListener('pointerup', up);
+    sidebarResizer.removeEventListener('pointercancel', up);
+  };
+  sidebarResizer.addEventListener('pointermove', move);
+  sidebarResizer.addEventListener('pointerup', up);
+  sidebarResizer.addEventListener('pointercancel', up);
+});
+
 toggleShowUV.addEventListener('change', () => {
   showUV = toggleShowUV.checked;
   refreshUVOverlay();

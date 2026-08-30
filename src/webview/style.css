@@ -51,6 +51,20 @@ html, body {
 }
 
 #app.sidebar-collapsed #sidebar { margin-left: calc(-1 * var(--sidebar-width)); }
+#app.sidebar-collapsed #sidebarResizer { display: none; }
+
+/* Invisible until hovered/dragged; straddles the sidebar/viewport border. */
+#sidebarResizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--sidebar-width);
+  width: 7px;
+  margin-left: -4px;
+  cursor: col-resize;
+  z-index: 10;
+}
+#sidebarResizer:hover, #sidebarResizer.dragging { background: var(--accent); opacity: 0.35; }
 #app.sidebar-collapsed #sidebarToggle { transform: rotate(180deg); }
 
 #sidebarToggle {

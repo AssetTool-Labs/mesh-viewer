@@ -338,6 +338,9 @@
       </div>
 
       <button id="sidebarToggle" aria-label="Toggle panel" title="Toggle panel">⮜</button>
+      <!-- Drag handle on the panel edge; the 3D canvas and the UV viewport both
+           watch their own boxes, so they follow the drag live. -->
+      <div id="sidebarResizer" title="Drag to resize the panel"></div>
     </div>
 
     <div id="texModal" class="hidden" role="dialog" aria-label="Texture preview">

@@ -244,37 +244,38 @@ export class UVView {
     const uv = geom.getAttribute('uv') as BufferAttribute | undefined;
     if (!uv) return null;
 
-    // Textures repeat, and some meshes place UVs in a non-zero tile; wrap into
-    // [0,1) so the layout lands on the previewed tile.
-    const fract = (x: number): number => x - Math.floor(x);
-    const tx = (i: number): number => fract(uv.getX(i)) * b.width;
-    const ty = (i: number): number => {
-      const fv = fract(uv.getY(i));
+    // UVs may live outside [0, 1] and rely on wrapping at sample time (e.g.
+    // DamagedHelmet's V spans [1, 2]). Like the modal overlay, translate each
+    // triangle by the integer part of its first corner so it lands on the
+    // visible tile; shifting per-triangle keeps seam-crossing triangles intact.
+    const tx = (i: number, du: number): number => (uv.getX(i) - du) * b.width;
+    const ty = (i: number, dv: number): number => {
+      const fv = uv.getY(i) - dv;
       return (flipped ? 1 - fv : fv) * b.height;
     };
 
     const path = new Path2D();
     const seen = new Set<number>();
     const n = uv.count;
-    const edge = (a: number, c: number): void => {
+    const edge = (a: number, c: number, du: number, dv: number): void => {
       const lo = a < c ? a : c;
       const hi = a < c ? c : a;
       const id = lo * n + hi;
       if (seen.has(id)) return;
       seen.add(id);
-      path.moveTo(tx(a), ty(a));
-      path.lineTo(tx(c), ty(c));
+      path.moveTo(tx(a, du), ty(a, dv));
+      path.lineTo(tx(c, du), ty(c, dv));
+    };
+    const tri = (a: number, c: number, d: number): void => {
+      const du = Math.floor(uv.getX(a));
+      const dv = Math.floor(uv.getY(a));
+      edge(a, c, du, dv); edge(c, d, du, dv); edge(d, a, du, dv);
     };
     const idx = geom.getIndex();
     if (idx) {
-      for (let i = 0; i + 2 < idx.count; i += 3) {
-        const a = idx.getX(i), c = idx.getX(i + 1), d = idx.getX(i + 2);
-        edge(a, c); edge(c, d); edge(d, a);
-      }
+      for (let i = 0; i + 2 < idx.count; i += 3) tri(idx.getX(i), idx.getX(i + 1), idx.getX(i + 2));
     } else {
-      for (let i = 0; i + 2 < n; i += 3) {
-        edge(i, i + 1); edge(i + 1, i + 2); edge(i + 2, i);
-      }
+      for (let i = 0; i + 2 < n; i += 3) tri(i, i + 1, i + 2);
     }
     this.wire = { key, path };
     return path;
