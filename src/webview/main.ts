@@ -28,7 +28,9 @@ import {
   type MorphMeshInfo,
   type HudInfo,
 } from './viewer';
-import { UVView, type UVBacking } from './uvView';
+import { UVView, type UVBacking, type UVElementContext } from './uvView';
+import { elementSelection, type ElementMode } from './elementSelection';
+import { pickFromIntersection } from './elementTopology';
 import { TimelinePanel, type TimelineClip } from './timeline';
 
 declare function acquireVsCodeApi(): {
@@ -156,6 +158,9 @@ const texIsolateBtn = $<HTMLButtonElement>('texIsolate');
 const viewStateChip = $('viewStateChip');
 const viewStateChipLabel = $('viewStateChipLabel');
 const viewStateChipClose = $<HTMLButtonElement>('viewStateChipClose');
+const elemModeSeg = $('elemModeSeg');
+const elemModeBtns = Array.from(elemModeSeg.querySelectorAll<HTMLButtonElement>('[data-elem]'));
+const elemStatus = $('elemStatus');
 
 // Enlarged texture preview: clone the (up-to-1024px) card canvas into a modal,
 // compositing the UV overlay on top when it's currently shown.
@@ -310,6 +315,79 @@ let activeTextureIdx = 0;
  *  mounted, so zoom state survives texture switches and panel rebuilds. */
 const uvView = new UVView();
 let showUV = false;
+
+// ---- Element selection (one selection, two views) ----
+// The UV canvas and the 3D viewport render and mutate the same state; ids are
+// seam-aware (see elementTopology), so a seam vertex lights all its UV copies.
+function setElementMode(mode: ElementMode): void {
+  elementSelection.setMode(mode);
+  for (const b of elemModeBtns) b.classList.toggle('active', b.dataset.elem === mode);
+  if (mode !== 'off') syncElementMesh();
+}
+for (const b of elemModeBtns) {
+  b.addEventListener('click', () => setElementMode(b.dataset.elem as ElementMode));
+}
+
+/** The selection follows the mesh whose UVs the texture card is showing. */
+function syncElementMesh(): void {
+  const entry = textureEntries[activeTextureIdx];
+  const usage = entry ? pickUsageForUV(entry) : null;
+  elementSelection.setMesh(usage?.mesh ?? null);
+}
+
+const ELEM_NOUN: Record<string, [string, string]> = {
+  vertex: ['vertex', 'vertices'],
+  edge: ['edge', 'edges'],
+  face: ['face', 'faces'],
+};
+
+elementSelection.onChange(() => {
+  const st = elementSelection;
+  // 3D side.
+  viewer.updateElementOverlay(st.mesh, st.topo, st.mode, st.selected, st.hovered);
+  // UV side.
+  let ctx: UVElementContext | null = null;
+  if (st.mode !== 'off' && st.mesh && st.topo) {
+    ctx = {
+      mode: st.mode,
+      topo: st.topo,
+      geometry: st.mesh.geometry as THREE.BufferGeometry,
+      selected: st.selected,
+      hovered: st.hovered,
+      onHover: (id) => elementSelection.hover(id),
+      onClick: (id, extend) => elementSelection.click(id, extend),
+    };
+  }
+  uvView.setElementContext(ctx);
+  // Status line under the toolbar.
+  if (st.mode === 'off') {
+    elemStatus.hidden = true;
+  } else {
+    elemStatus.hidden = false;
+    if (!st.mesh || !st.topo) {
+      elemStatus.textContent = 'No mesh with UVs to select on.';
+    } else {
+      const [one, many] = ELEM_NOUN[st.mode];
+      const n = st.selected.size;
+      elemStatus.textContent =
+        `${n} ${n === 1 ? one : many} selected` +
+        (st.hovered !== null ? ' · hovering' : '') +
+        ' — click to select, Shift extends, Esc clears';
+    }
+  }
+});
+
+// Keys 1/2/3 switch element kind while selection is active; Esc clears.
+document.addEventListener('keydown', (ev) => {
+  const target = ev.target as HTMLElement | null;
+  if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  if (elementSelection.mode === 'off') return;
+  if (ev.code === 'Digit1') setElementMode('vertex');
+  else if (ev.code === 'Digit2') setElementMode('edge');
+  else if (ev.code === 'Digit3') setElementMode('face');
+  else if (ev.code === 'Escape' && texModal.classList.contains('hidden')) elementSelection.clear();
+});
 
 // ---- Tabs ----
 function selectTab(which: string): void {
@@ -1032,6 +1110,69 @@ canvas.addEventListener('pointercancel', () => {
   pressStart = null;
 });
 
+/** First raycast hit on a visible mesh (skips helpers/hidden branches). */
+function firstVisibleMeshHit(ray: THREE.Raycaster): THREE.Intersection | null {
+  const hits = ray.intersectObject(viewer.contentRoot, true);
+  return (
+    hits.find((h) => {
+      if (!(h.object as THREE.Mesh).isMesh) return false;
+      for (let o: THREE.Object3D | null = h.object; o; o = o.parent) {
+        if (o.visible === false) return false;
+      }
+      return true;
+    }) ?? null
+  );
+}
+
+/**
+ * Point the selection at the mesh that was hit. If it is not the active mesh,
+ * switch the Textures tab to an entry that this mesh's material uses so the UV
+ * view matches; a mesh no texture entry knows about is not selectable.
+ */
+function retargetElementMesh(mesh: THREE.Mesh): boolean {
+  if (elementSelection.mesh === mesh) return true;
+  const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  const idx = textureEntries.findIndex((e) => e.usages.some((u) => mats.includes(u.material)));
+  if (idx < 0) return false;
+  if (idx !== activeTextureIdx) {
+    activeTextureIdx = idx;
+    textureSelect.value = String(idx);
+    renderActiveTexture();
+  }
+  elementSelection.setMesh(mesh);
+  return true;
+}
+
+/** Hover mirroring for the 3D side, coalesced to one raycast per frame. */
+let hoverRaf = 0;
+canvas.addEventListener('pointermove', (ev) => {
+  if (elementSelection.mode === 'off' || !elementSelection.mesh) return;
+  if (ev.buttons !== 0) return; // dragging the camera
+  if (hoverRaf) return;
+  const cx = ev.clientX;
+  const cy = ev.clientY;
+  hoverRaf = requestAnimationFrame(() => {
+    hoverRaf = 0;
+    if (elementSelection.mode === 'off') return;
+    const rect = canvas.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((cx - rect.left) / rect.width) * 2 - 1,
+      -(((cy - rect.top) / rect.height) * 2 - 1),
+    );
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, viewer.camera);
+    const hit = firstVisibleMeshHit(ray);
+    if (!hit || hit.object !== elementSelection.mesh || !elementSelection.topo) {
+      elementSelection.hover(null);
+      return;
+    }
+    elementSelection.hover(pickFromIntersection(hit, elementSelection.mode, elementSelection.topo));
+  });
+});
+canvas.addEventListener('pointerleave', () => {
+  if (elementSelection.mode !== 'off') elementSelection.hover(null);
+});
+
 function pickAt(ev: PointerEvent): void {
   if (!viewer.entries.length) return;
   if (viewer.isPoseGizmoBusy()) return;
@@ -1049,6 +1190,21 @@ function pickAt(ev: PointerEvent): void {
   const r = Math.max(dist * 0.005, 1e-4);
   ray.params.Points = { threshold: r };
   ray.params.Line = { threshold: r };
+
+  // Element mode takes over viewport clicks entirely: clicks pick elements on
+  // the active mesh (or switch the active mesh), not scene objects.
+  if (elementSelection.mode !== 'off') {
+    const hit = firstVisibleMeshHit(ray);
+    if (!hit) {
+      elementSelection.click(null, ev.shiftKey);
+      return;
+    }
+    if (!retargetElementMesh(hit.object as THREE.Mesh)) return;
+    const topo = elementSelection.topo;
+    if (!topo) return;
+    elementSelection.click(pickFromIntersection(hit, elementSelection.mode, topo), ev.shiftKey);
+    return;
+  }
 
   const joint = viewer.pickSkeletonJoint(ray);
   if (joint) {
@@ -2220,11 +2376,15 @@ function populateTextures(): void {
     textureSelect.disabled = true;
     toggleShowUV.disabled = true;
     texIsolateBtn.disabled = true;
+    setElementMode('off');
+    elementSelection.setMesh(null);
+    for (const b of elemModeBtns) b.disabled = b.dataset.elem !== 'off';
     textureView.innerHTML = '<div class="kv-empty">No textures in this scene.</div>';
     return;
   }
   textureSelect.disabled = false;
   toggleShowUV.disabled = false;
+  for (const b of elemModeBtns) b.disabled = false;
 
   // Sort: base color first, then normal/roughness/metalness, then the rest.
   const slotPriority = (slot: string): number => {
@@ -2347,6 +2507,7 @@ function renderActiveTexture(): void {
 
   syncTexIsolateButton();
   refreshUVOverlay();
+  if (elementSelection.mode !== 'off') syncElementMesh();
 }
 
 /** Material slot → Inspect mode, for the Textures tab's "Isolate on model". */

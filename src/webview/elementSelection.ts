@@ -1,0 +1,77 @@
+import type * as THREE from 'three';
+import { topologyOf, type ElementMode, type Topology } from './elementTopology';
+
+/**
+ * One selection, two views: the UV canvas and the 3D viewport both render this
+ * state and both mutate it, so hover and selection stay mirrored for free.
+ * Ids are mode-dependent (triangle index / canonical vertex / canonical edge
+ * key — see elementTopology). Session-local; cleared on mode or mesh changes.
+ */
+class ElementSelection {
+  mode: ElementMode = 'off';
+  mesh: THREE.Mesh | null = null;
+  topo: Topology | null = null;
+  readonly selected = new Set<number>();
+  hovered: number | null = null;
+
+  private readonly listeners: Array<() => void> = [];
+
+  onChange(fn: () => void): void {
+    this.listeners.push(fn);
+  }
+  private notify(): void {
+    for (const fn of this.listeners) fn();
+  }
+
+  setMode(mode: ElementMode): void {
+    if (this.mode === mode) return;
+    this.mode = mode;
+    this.selected.clear();
+    this.hovered = null;
+    this.notify();
+  }
+
+  /** Selection follows one mesh at a time; switching meshes starts fresh. */
+  setMesh(mesh: THREE.Mesh | null): void {
+    if (this.mesh === mesh) return;
+    this.mesh = mesh;
+    this.topo = mesh ? topologyOf(mesh.geometry as THREE.BufferGeometry) : null;
+    this.selected.clear();
+    this.hovered = null;
+    this.notify();
+  }
+
+  click(id: number | null, extend: boolean): void {
+    if (id === null) {
+      if (!extend && this.selected.size) {
+        this.selected.clear();
+        this.notify();
+      }
+      return;
+    }
+    if (extend) {
+      if (this.selected.has(id)) this.selected.delete(id);
+      else this.selected.add(id);
+    } else {
+      this.selected.clear();
+      this.selected.add(id);
+    }
+    this.notify();
+  }
+
+  hover(id: number | null): void {
+    if (this.hovered === id) return;
+    this.hovered = id;
+    this.notify();
+  }
+
+  clear(): void {
+    if (!this.selected.size && this.hovered === null) return;
+    this.selected.clear();
+    this.hovered = null;
+    this.notify();
+  }
+}
+
+export const elementSelection = new ElementSelection();
+export type { ElementMode };

@@ -11,6 +11,7 @@ import { SparkRenderer } from '@sparkjsdev/spark';
 import type { CameraState, OrbitDelta } from '../types';
 import { setViewerRenderer, type LoadedAsset } from './loaders';
 import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
+import type { ElementMode, Topology } from './elementTopology';
 export type { WeightMode } from './weightMaterial';
 
 export type ShadingMode = 'solid' | 'material' | 'rendered' | 'wireframe' | 'points' | 'normals';
@@ -257,6 +258,8 @@ export class Viewer {
   private shadingMode: ShadingMode = 'material';
   /** Active Inspect channel; overrides the shading mode on meshes until null. */
   private inspectMode: InspectMode | null = null;
+  /** Element-selection highlight overlay, mounted as a child of its mesh. */
+  private elementOverlay: THREE.Group | null = null;
   /** Maps the user has switched off in Material/Rendered shading. */
   private readonly disabledMaps = new Set<MapChannel>();
   /** Original texture slots nulled by the map toggles, keyed by material, for restore. */
@@ -1193,6 +1196,104 @@ export class Viewer {
    *  - follows animations / skinning automatically every frame
    *  - covers groups: descendant meshes are merged into one silhouette
    */
+  /**
+   * Rebuild the element highlight overlay (selected + hovered verts/edges/faces)
+   * as a child of `mesh`, so it follows the mesh transform. Geometry is built in
+   * the mesh's local space from the topology's buffer indices; overlays draw on
+   * top (no depth test) like the measurement overlay. Pass a null mesh or an
+   * empty selection to remove it.
+   */
+  updateElementOverlay(
+    mesh: THREE.Mesh | null,
+    topo: Topology | null,
+    mode: ElementMode,
+    selected: ReadonlySet<number>,
+    hovered: number | null,
+  ): void {
+    this.clearElementOverlay();
+    if (!mesh || !topo || mode === 'off' || (selected.size === 0 && hovered === null)) return;
+    const pos = (mesh.geometry as THREE.BufferGeometry).getAttribute('position') as THREE.BufferAttribute;
+    if (!pos) return;
+    const group = new THREE.Group();
+    group.name = '__elementOverlay';
+
+    const SEL = 0xff9d2e;
+    const HOV = 0x4cc3f7;
+    const push = (arr: number[], i: number): void => {
+      arr.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+    };
+    const collect = (ids: Iterable<number>): number[] => {
+      const out: number[] = [];
+      for (const id of ids) {
+        if (mode === 'face') {
+          if (id < 0 || id >= topo.triCount) continue;
+          push(out, topo.tris[id * 3]);
+          push(out, topo.tris[id * 3 + 1]);
+          push(out, topo.tris[id * 3 + 2]);
+        } else if (mode === 'vertex') {
+          // One point per canonical vertex — copies share the position.
+          push(out, id);
+        } else {
+          const copies = topo.edgeCopies.get(id);
+          if (!copies) continue;
+          // Copies coincide in 3D; the first pair is enough.
+          push(out, copies[0]);
+          push(out, copies[1]);
+        }
+      }
+      return out;
+    };
+    const mount = (coords: number[], color: number, order: number): void => {
+      if (!coords.length) return;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(coords, 3));
+      let obj: THREE.Object3D;
+      if (mode === 'face') {
+        obj = new THREE.Mesh(
+          geo,
+          new THREE.MeshBasicMaterial({
+            color,
+            transparent: true,
+            opacity: 0.4,
+            side: THREE.DoubleSide,
+            depthTest: false,
+            toneMapped: false,
+          }),
+        );
+      } else if (mode === 'vertex') {
+        obj = new THREE.Points(
+          geo,
+          new THREE.PointsMaterial({ color, size: 7, sizeAttenuation: false, depthTest: false, toneMapped: false }),
+        );
+      } else {
+        obj = new THREE.LineSegments(
+          geo,
+          new THREE.LineBasicMaterial({ color, depthTest: false, toneMapped: false }),
+        );
+      }
+      obj.renderOrder = order;
+      obj.raycast = () => {};
+      group.add(obj);
+    };
+    mount(collect(selected), SEL, 998);
+    if (hovered !== null && !selected.has(hovered)) mount(collect([hovered]), HOV, 999);
+
+    mesh.add(group);
+    this.elementOverlay = group;
+  }
+
+  clearElementOverlay(): void {
+    const group = this.elementOverlay;
+    if (!group) return;
+    this.elementOverlay = null;
+    group.parent?.remove(group);
+    for (const child of group.children) {
+      const o = child as THREE.Mesh;
+      o.geometry?.dispose();
+      forEachMaterial(o.material as THREE.Material, (m) => m.dispose());
+    }
+  }
+
   setSelected(obj: THREE.Object3D | null): void {
     if (this.selectedObj === obj) return;
     this.cancelRotateModal();
@@ -1897,6 +1998,7 @@ export class Viewer {
 
   /** Remove everything currently loaded (used by loadAsset). */
   clearAssets(): void {
+    this.clearElementOverlay();
     this.setSelected(null);
     if (this.activeAction) {
       this.activeAction.stop();

@@ -56,6 +56,18 @@
               <span>Show UV map overlay</span>
             </label>
             <button type="button" id="texIsolate" disabled>Isolate on model</button>
+            <label class="row" id="elemModeRow">
+              <span>Select</span>
+              <!-- Element-selection mode, mirrored between the UV view and the
+                   3D viewport (keys 1/2/3 switch, Esc clears). -->
+              <div class="elem-seg" id="elemModeSeg" role="group">
+                <button type="button" data-elem="off" class="active">Off</button>
+                <button type="button" data-elem="vertex" title="Vertices (1)">Vert</button>
+                <button type="button" data-elem="edge" title="Edges (2)">Edge</button>
+                <button type="button" data-elem="face" title="Faces (3)">Face</button>
+              </div>
+            </label>
+            <div id="elemStatus" class="tex-summary" hidden></div>
             <div id="textureSummary" class="tex-summary"></div>
           </div>
           <div id="textureView" class="tex-view">

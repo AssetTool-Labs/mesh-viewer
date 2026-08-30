@@ -1,4 +1,17 @@
 import type { BufferGeometry, BufferAttribute } from 'three';
+import { edgeKeyOf, type ElementMode, type Topology } from './elementTopology';
+
+/** Everything the view needs to draw and pick elements; owned by main.ts and
+ *  swapped on every selection change (the sets are live references). */
+export interface UVElementContext {
+  mode: Exclude<ElementMode, 'off'>;
+  topo: Topology;
+  geometry: BufferGeometry;
+  selected: ReadonlySet<number>;
+  hovered: number | null;
+  onHover(id: number | null): void;
+  onClick(id: number | null, extend: boolean): void;
+}
 
 /** Full-resolution image the view paints; whatever the texture already holds
  *  (no copy) or a GPU read-back canvas for compressed textures. */
@@ -41,7 +54,8 @@ export class UVView {
   private cssH = 1;
 
   private drawQueued = false;
-  private dragging: { id: number; lastX: number; lastY: number } | null = null;
+  private dragging: { id: number; lastX: number; lastY: number; moved: number } | null = null;
+  private elements: UVElementContext | null = null;
   private readonly observer: ResizeObserver;
 
   constructor() {
@@ -57,6 +71,7 @@ export class UVView {
     this.canvas.addEventListener('pointermove', this.onPointerMove);
     this.canvas.addEventListener('pointerup', this.onPointerUp);
     this.canvas.addEventListener('pointercancel', this.onPointerUp);
+    this.canvas.addEventListener('pointerleave', this.onPointerLeave);
     this.canvas.addEventListener('dblclick', () => this.resetView());
     this.observer = new ResizeObserver(() => this.onResize());
     this.observer.observe(this.root);
@@ -75,6 +90,13 @@ export class UVView {
   }
 
   /** Geometry whose `uv` attribute is overlaid, or null to draw none. */
+  /** Enable element picking/highlighting (null while selection mode is off). */
+  setElementContext(ctx: UVElementContext | null): void {
+    this.elements = ctx;
+    this.root.classList.toggle('picking', !!ctx);
+    this.requestDraw();
+  }
+
   setWireframe(geometry: BufferGeometry | null): void {
     this.geometry = geometry;
     this.showWire = geometry !== null;
@@ -160,12 +182,17 @@ export class UVView {
   private readonly onPointerDown = (ev: PointerEvent): void => {
     if (ev.button !== 0 && ev.button !== 1) return;
     this.canvas.setPointerCapture(ev.pointerId);
-    this.dragging = { id: ev.pointerId, lastX: ev.clientX, lastY: ev.clientY };
+    this.dragging = { id: ev.pointerId, lastX: ev.clientX, lastY: ev.clientY, moved: 0 };
     this.root.classList.add('dragging');
   };
 
   private readonly onPointerMove = (ev: PointerEvent): void => {
-    if (!this.dragging || ev.pointerId !== this.dragging.id) return;
+    if (!this.dragging || ev.pointerId !== this.dragging.id) {
+      // Plain mouse move: element hover.
+      if (this.elements) this.elements.onHover(this.pickElement(ev.clientX, ev.clientY));
+      return;
+    }
+    this.dragging.moved += Math.abs(ev.clientX - this.dragging.lastX) + Math.abs(ev.clientY - this.dragging.lastY);
     this.offX += ev.clientX - this.dragging.lastX;
     this.offY += ev.clientY - this.dragging.lastY;
     this.dragging.lastX = ev.clientX;
@@ -175,9 +202,18 @@ export class UVView {
 
   private readonly onPointerUp = (ev: PointerEvent): void => {
     if (!this.dragging || ev.pointerId !== this.dragging.id) return;
+    const wasClick = this.dragging.moved < 5;
     this.canvas.releasePointerCapture(ev.pointerId);
     this.dragging = null;
     this.root.classList.remove('dragging');
+    // A stationary press is a pick, a real drag stays a pan.
+    if (wasClick && ev.button === 0 && this.elements) {
+      this.elements.onClick(this.pickElement(ev.clientX, ev.clientY), ev.shiftKey);
+    }
+  };
+
+  private readonly onPointerLeave = (): void => {
+    if (this.elements) this.elements.onHover(null);
   };
 
   // ---- Drawing ----
@@ -232,9 +268,159 @@ export class UVView {
         ctx.stroke(wire);
       }
     }
+    this.drawElements(ctx);
 
     const zoom = s / this.fitScale;
     this.zoomLabel.textContent = zoom >= 10 ? `${zoom.toFixed(0)}×` : `${zoom.toFixed(2)}×`;
+  }
+
+  // ---- Element picking & highlights ----
+
+  /** Texel coords of buffer vertex i, shifted into the tile of du/dv. */
+  private texelOf(uv: BufferAttribute, i: number, du: number, dv: number, out: { x: number; y: number }): void {
+    const b = this.backing!;
+    out.x = (uv.getX(i) - du) * b.width;
+    const fv = uv.getY(i) - dv;
+    out.y = (this.flipped ? 1 - fv : fv) * b.height;
+  }
+
+  /** Element under a client-space point, using the same per-triangle tile
+   *  shift as the wireframe so picking matches what is drawn. */
+  private pickElement(clientX: number, clientY: number): number | null {
+    const ctx = this.elements;
+    const b = this.backing;
+    if (!ctx || !b) return null;
+    const uv = ctx.geometry.getAttribute('uv') as BufferAttribute | undefined;
+    if (!uv) return null;
+    const rect = this.canvas.getBoundingClientRect();
+    const px = (clientX - rect.left - this.offX) / this.scale;
+    const py = (clientY - rect.top - this.offY) / this.scale;
+    const tol = 8 / this.scale; // 8 CSS px, in texel units
+    const tol2 = tol * tol;
+    const t = ctx.topo;
+    const p0 = { x: 0, y: 0 };
+    const p1 = { x: 0, y: 0 };
+    const p2 = { x: 0, y: 0 };
+    let best: number | null = null;
+    let bestD = tol2;
+    for (let f = 0; f < t.triCount; f++) {
+      const a = t.tris[f * 3];
+      const c = t.tris[f * 3 + 1];
+      const d = t.tris[f * 3 + 2];
+      const du = Math.floor(uv.getX(a));
+      const dv = Math.floor(uv.getY(a));
+      this.texelOf(uv, a, du, dv, p0);
+      this.texelOf(uv, c, du, dv, p1);
+      this.texelOf(uv, d, du, dv, p2);
+      // Cheap reject: bounding box grown by the tolerance.
+      const minX = Math.min(p0.x, p1.x, p2.x) - tol;
+      const maxX = Math.max(p0.x, p1.x, p2.x) + tol;
+      if (px < minX || px > maxX) continue;
+      const minY = Math.min(p0.y, p1.y, p2.y) - tol;
+      const maxY = Math.max(p0.y, p1.y, p2.y) + tol;
+      if (py < minY || py > maxY) continue;
+      if (ctx.mode === 'face') {
+        if (pointInTri(px, py, p0, p1, p2)) return f;
+      } else if (ctx.mode === 'vertex') {
+        const corners = [a, c, d];
+        const pts = [p0, p1, p2];
+        for (let i = 0; i < 3; i++) {
+          const dx = pts[i].x - px;
+          const dy = pts[i].y - py;
+          const dd = dx * dx + dy * dy;
+          if (dd < bestD) {
+            bestD = dd;
+            best = t.rep[corners[i]];
+          }
+        }
+      } else {
+        const corners = [a, c, d];
+        const pts = [p0, p1, p2];
+        for (let i = 0; i < 3; i++) {
+          const q0 = pts[i];
+          const q1 = pts[(i + 1) % 3];
+          const dd = distToSegSq(px, py, q0, q1);
+          if (dd < bestD) {
+            bestD = dd;
+            best = edgeKeyOf(t, corners[i], corners[(i + 1) % 3]);
+          }
+        }
+      }
+    }
+    return best;
+  }
+
+  /** Selected/hovered highlights, drawn over the wireframe in texel space. */
+  private drawElements(ctx2d: CanvasRenderingContext2D): void {
+    const ctx = this.elements;
+    const b = this.backing;
+    if (!ctx || !b) return;
+    const uv = ctx.geometry.getAttribute('uv') as BufferAttribute | undefined;
+    if (!uv) return;
+    const t = ctx.topo;
+    const s = this.scale;
+    const p = { x: 0, y: 0 };
+    const q = { x: 0, y: 0 };
+    const r = { x: 0, y: 0 };
+
+    const drawSet = (ids: Iterable<number>, color: string, emph: boolean): void => {
+      ctx2d.fillStyle = color;
+      ctx2d.strokeStyle = color;
+      ctx2d.lineWidth = (emph ? 2.5 : 1.8) / s;
+      const vr = (emph ? 5 : 4) / s;
+      ctx2d.beginPath();
+      for (const id of ids) {
+        if (ctx.mode === 'face') {
+          if (id < 0 || id >= t.triCount) continue;
+          const a = t.tris[id * 3];
+          const c = t.tris[id * 3 + 1];
+          const d = t.tris[id * 3 + 2];
+          const du = Math.floor(uv.getX(a));
+          const dv = Math.floor(uv.getY(a));
+          this.texelOf(uv, a, du, dv, p);
+          this.texelOf(uv, c, du, dv, q);
+          this.texelOf(uv, d, du, dv, r);
+          ctx2d.moveTo(p.x, p.y);
+          ctx2d.lineTo(q.x, q.y);
+          ctx2d.lineTo(r.x, r.y);
+          ctx2d.closePath();
+        } else if (ctx.mode === 'vertex') {
+          // Every buffer copy of the canonical vertex — that is the point of
+          // the seam-aware ids: one 3D vertex lights all its UV copies.
+          for (const i of t.repVerts.get(id) ?? []) {
+            this.texelOf(uv, i, Math.floor(uv.getX(i)), Math.floor(uv.getY(i)), p);
+            ctx2d.moveTo(p.x + vr, p.y);
+            ctx2d.arc(p.x, p.y, vr, 0, Math.PI * 2);
+          }
+        } else {
+          const copies = t.edgeCopies.get(id);
+          if (!copies) continue;
+          for (let i = 0; i < copies.length; i += 2) {
+            const a = copies[i];
+            const c = copies[i + 1];
+            const du = Math.floor(uv.getX(a));
+            const dv = Math.floor(uv.getY(a));
+            this.texelOf(uv, a, du, dv, p);
+            this.texelOf(uv, c, du, dv, q);
+            ctx2d.moveTo(p.x, p.y);
+            ctx2d.lineTo(q.x, q.y);
+          }
+        }
+      }
+      if (ctx.mode === 'face') {
+        ctx2d.globalAlpha = emph ? 0.5 : 0.35;
+        ctx2d.fill();
+        ctx2d.globalAlpha = 1;
+        ctx2d.stroke();
+      } else if (ctx.mode === 'vertex') {
+        ctx2d.fill();
+      } else {
+        ctx2d.stroke();
+      }
+    };
+
+    if (ctx.selected.size) drawSet(ctx.selected, '#ff9d2e', false);
+    if (ctx.hovered !== null && !ctx.selected.has(ctx.hovered)) drawSet([ctx.hovered], '#4cc3f7', true);
   }
 
   /** Deduped-edge wireframe in texel space, cached per geometry/size/flip. */
@@ -280,4 +466,35 @@ export class UVView {
     this.wire = { key, path };
     return path;
   }
+}
+
+function pointInTri(
+  x: number,
+  y: number,
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  c: { x: number; y: number },
+): boolean {
+  const s1 = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x);
+  const s2 = (c.x - b.x) * (y - b.y) - (c.y - b.y) * (x - b.x);
+  const s3 = (a.x - c.x) * (y - c.y) - (a.y - c.y) * (x - c.x);
+  const hasNeg = s1 < 0 || s2 < 0 || s3 < 0;
+  const hasPos = s1 > 0 || s2 > 0 || s3 > 0;
+  return !(hasNeg && hasPos);
+}
+
+function distToSegSq(
+  x: number,
+  y: number,
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 === 0 ? 0 : ((x - a.x) * dx + (y - a.y) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  const px = a.x + t * dx - x;
+  const py = a.y + t * dy - y;
+  return px * px + py * py;
 }

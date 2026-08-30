@@ -441,6 +441,23 @@ button.group-title:hover { color: var(--fg); }
 #texIsolate:hover:not(:disabled) { background: var(--hover); }
 #texIsolate:disabled { opacity: 0.45; cursor: default; }
 #texIsolate.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+/* Vert/Edge/Face segmented switch. */
+.elem-seg { display: flex; gap: 2px; flex: 1; }
+.elem-seg button {
+  flex: 1;
+  padding: 3px 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 11px;
+  cursor: pointer;
+}
+.elem-seg button:hover:not(.active) { background: var(--hover); }
+.elem-seg button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.elem-seg button:disabled { opacity: 0.45; cursor: default; }
+.uv-view.picking { cursor: crosshair; }
+.uv-view.picking.dragging { cursor: grabbing; }
 .tex-view {
   flex: 1 1 auto;
   display: flex;
