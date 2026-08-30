@@ -30,7 +30,7 @@ import {
 } from './viewer';
 import { UVView, type AreaTool, type UVBacking, type UVElementContext } from './uvView';
 import { elementSelection, type ElementMode } from './elementSelection';
-import { idsInRegion, pickFromIntersection, pointInPolygon } from './elementTopology';
+import { edgeKeyOf, idsInRegion, pickFromIntersection, pointInPolygon } from './elementTopology';
 import { TimelinePanel, type TimelineClip } from './timeline';
 
 declare function acquireVsCodeApi(): {
@@ -1350,7 +1350,6 @@ function finishAreaSelect3D(marquee: { pts: Array<{ x: number; y: number }>; ext
   const n = posAttr.count;
   const sx = new Float32Array(n);
   const sy = new Float32Array(n);
-  const sz = new Float32Array(n);
   const okv = new Uint8Array(n);
   const v = new THREE.Vector4();
   const e = mvp.elements;
@@ -1368,30 +1367,6 @@ function finishAreaSelect3D(marquee: { pts: Array<{ x: number; y: number }>; ext
     okv[i] = 1;
     sx[i] = ((v.x / v.w) * 0.5 + 0.5) * rect.width;
     sy[i] = (0.5 - (v.y / v.w) * 0.5) * rect.height;
-    // Clip w = -viewZ for a perspective projection: linear depth, normalized
-    // by `far` to match what renderSelectionDepth's shader writes.
-    sz[i] = v.w / viewer.camera.far;
-  }
-
-  // X-ray display on = select through; off = only what the camera can see,
-  // judged against a one-shot depth snapshot (Blender's box-select rule).
-  let visAt: (x: number, y: number, depth01: number) => boolean = () => true;
-  if (!toggleXray.checked) {
-    const dw = Math.max(1, Math.round(rect.width));
-    const dh = Math.max(1, Math.round(rect.height));
-    const depth = viewer.renderSelectionDepth(dw, dh);
-    if (depth) {
-      visAt = (x, y, depthLin) => {
-        const px = Math.round(x);
-        const py = Math.round(y);
-        if (px < 0 || py < 0 || px >= dw || py >= dh) return false;
-        const o = ((dh - 1 - py) * dw + px) * 4; // GL read-back is bottom-up
-        const d = (depth[o] + depth[o + 1] / 255) / 255;
-        // Relative bias: forgiving of interpolation, far under the front/back
-        // separation of real geometry.
-        return depthLin <= d + depthLin * 0.01 + 5e-4;
-      };
-    }
   }
   let inside: (x: number, y: number) => boolean;
   if (elemTool === 'box') {
@@ -1404,18 +1379,74 @@ function finishAreaSelect3D(marquee: { pts: Array<{ x: number; y: number }>; ext
   } else {
     inside = (x, y) => pointInPolygon(x, y, marquee.pts);
   }
-  const insideVert = (i: number): boolean =>
-    okv[i] === 1 && inside(sx[i], sy[i]) && visAt(sx[i], sy[i], sz[i]);
+  const insideVert = (i: number): boolean => okv[i] === 1 && inside(sx[i], sy[i]);
   const insideTri = (t: number): boolean => {
     const a = topo.tris[t * 3];
     const b = topo.tris[t * 3 + 1];
     const c = topo.tris[t * 3 + 2];
     if (!okv[a] || !okv[b] || !okv[c]) return false;
-    const cx = (sx[a] + sx[b] + sx[c]) / 3;
-    const cy = (sy[a] + sy[b] + sy[c]) / 3;
-    return inside(cx, cy) && visAt(cx, cy, (sz[a] + sz[b] + sz[c]) / 3);
+    return inside((sx[a] + sx[b] + sx[c]) / 3, (sy[a] + sy[b] + sy[c]) / 3);
   };
-  elementSelection.applyArea(idsInRegion(topo, mode, insideVert, insideTri), marquee.extend);
+  let ids = idsInRegion(topo, mode, insideVert, insideTri);
+
+  // X-ray on = select straight through. X-ray off = Blender's rule: only what
+  // the camera actually sees, decided by an ID pass — every pixel of the
+  // region names the front-most triangle, and elements keep their selection
+  // only if a visible triangle backs them (the triangle itself, an adjacent
+  // one for a vertex, an incident one for an edge).
+  if (!toggleXray.checked) {
+    const dw = Math.max(1, Math.round(rect.width));
+    const dh = Math.max(1, Math.round(rect.height));
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const p of marquee.pts) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const bx = Math.max(0, Math.floor(minX));
+    const by = Math.max(0, Math.floor(minY));
+    const bw = Math.min(dw - 1, Math.ceil(maxX)) - bx + 1;
+    const bh = Math.min(dh - 1, Math.ceil(maxY)) - by + 1;
+    const buf = viewer.renderSelectionIds(mesh, dw, dh, bx, by, bw, bh);
+    if (buf) {
+      const visTris = new Set<number>();
+      for (let yy = 0; yy < bh; yy++) {
+        for (let xx = 0; xx < bw; xx++) {
+          if (!inside(bx + xx, by + yy)) continue;
+          const o = ((bh - 1 - yy) * bw + xx) * 4; // GL read-back is bottom-up
+          const id = buf[o] * 65536 + buf[o + 1] * 256 + buf[o + 2];
+          if (id > 0 && id <= topo.triCount) visTris.add(id - 1);
+        }
+      }
+      if (mode === 'face') {
+        ids = visTris;
+      } else if (mode === 'vertex') {
+        const visReps = new Set<number>();
+        for (const t of visTris) {
+          visReps.add(topo.rep[topo.tris[t * 3]]);
+          visReps.add(topo.rep[topo.tris[t * 3 + 1]]);
+          visReps.add(topo.rep[topo.tris[t * 3 + 2]]);
+        }
+        ids = new Set([...ids].filter((r) => visReps.has(r)));
+      } else {
+        const visEdges = new Set<number>();
+        for (const t of visTris) {
+          const a = topo.tris[t * 3];
+          const b = topo.tris[t * 3 + 1];
+          const c = topo.tris[t * 3 + 2];
+          visEdges.add(edgeKeyOf(topo, a, b));
+          visEdges.add(edgeKeyOf(topo, b, c));
+          visEdges.add(edgeKeyOf(topo, c, a));
+        }
+        ids = new Set([...ids].filter((k) => visEdges.has(k)));
+      }
+    }
+  }
+  elementSelection.applyArea(ids, marquee.extend);
 }
 
 // Double-click in the viewport selects the 3D connected component.

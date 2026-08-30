@@ -1290,71 +1290,125 @@ export class Viewer {
     this.elementOverlay = group;
   }
 
-  private selectionDepthMat: THREE.ShaderMaterial | null = null;
+  /** Non-indexed copy of a geometry carrying a per-triangle id attribute,
+   *  for the visibility ID pass. Cached per source geometry. */
+  private readonly idMeshCache = new WeakMap<THREE.BufferGeometry, THREE.Mesh>();
+
+  private idMeshFor(mesh: THREE.Mesh): THREE.Mesh | null {
+    const src = mesh.geometry as THREE.BufferGeometry;
+    const cached = this.idMeshCache.get(src);
+    if (cached) return cached;
+    const pos = src.getAttribute('position') as THREE.BufferAttribute | undefined;
+    if (!pos) return null;
+    const index = src.getIndex();
+    const n = index ? index.count : pos.count;
+    const flat = new Float32Array(n * 3);
+    const tri = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const v = index ? index.getX(i) : i;
+      flat[i * 3] = pos.getX(v);
+      flat[i * 3 + 1] = pos.getY(v);
+      flat[i * 3 + 2] = pos.getZ(v);
+      tri[i] = Math.floor(i / 3);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(flat, 3));
+    geo.setAttribute('aTri', new THREE.BufferAttribute(tri, 1));
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: `
+        attribute float aTri;
+        varying float vTri;
+        void main() {
+          vTri = aTri;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      // Triangle id + 1 in RGB (0 = background/other meshes). vTri is constant
+      // across each triangle, so the varying interpolates to itself.
+      fragmentShader: `
+        varying float vTri;
+        void main() {
+          float id = floor(vTri + 0.5) + 1.0;
+          float r = floor(id / 65536.0);
+          float g = floor(mod(id, 65536.0) / 256.0);
+          float b = mod(id, 256.0);
+          gl_FragColor = vec4(r, g, b, 255.0) / 255.0;
+        }`,
+      blending: THREE.NoBlending,
+      side: THREE.DoubleSide,
+    });
+    const idMesh = new THREE.Mesh(geo, mat);
+    idMesh.matrixAutoUpdate = false;
+    idMesh.frustumCulled = false;
+    this.idMeshCache.set(src, idMesh);
+    return idMesh;
+  }
+
+  private idBlackMat: THREE.MeshBasicMaterial | null = null;
 
   /**
-   * Depth snapshot of the asset content for occlusion-aware area select:
-   * one render with a depth override, read back once, then every candidate
-   * vertex compares its depth against it. A hand-rolled shader writes
-   * *linear* view depth (viewZ / far) into two 8-bit channels — linear
-   * because window depth crams everything against 1.0 under tiny near
-   * planes, and hand-rolled so the packing convention can't drift with
-   * three's depth-material internals, tone mapping, or color-space handling.
-   * Unpack with (r + g/255) / 255. Helpers, grid and the highlight overlay
-   * are excluded — only real content occludes. With a skinned mesh
-   * mid-animation the pass sees the bind pose (override materials don't bind
-   * skeletons), matching the selection geometry itself, so the comparison
-   * stays self-consistent.
+   * Visibility ID pass for occlusion-aware area select, Blender-style: the
+   * whole content is laid down as depth-writing black, then `mesh` is drawn
+   * again as per-triangle color ids over it — a pixel holds a triangle id iff
+   * that triangle is what the camera actually sees there. No depth compare,
+   * no bias. Returns the RGBA read-back of the `rx,ry,rw,rh` region (CSS px,
+   * y down); decode ids as r*65536 + g*256 + b, minus 1 (0 = nothing).
+   * Lines, points, splats and the highlight overlay neither occlude nor id.
    */
-  renderSelectionDepth(width: number, height: number): Uint8Array | null {
-    if (width <= 0 || height <= 0) return null;
-    if (!this.selectionDepthMat) {
-      this.selectionDepthMat = new THREE.ShaderMaterial({
-        uniforms: { uFar: { value: 1 } },
-        vertexShader: `
-          varying float vDist;
-          void main() {
-            vec4 mv = modelViewMatrix * vec4(position, 1.0);
-            vDist = -mv.z;
-            gl_Position = projectionMatrix * mv;
-          }`,
-        fragmentShader: `
-          uniform float uFar;
-          varying float vDist;
-          void main() {
-            float z = clamp(vDist / uFar, 0.0, 1.0);
-            float hi = floor(z * 255.0);
-            float lo = floor(fract(z * 255.0) * 255.0);
-            gl_FragColor = vec4(hi / 255.0, lo / 255.0, 0.0, 1.0);
-          }`,
-        blending: THREE.NoBlending,
-        side: THREE.DoubleSide,
-      });
+  renderSelectionIds(
+    mesh: THREE.Mesh,
+    width: number,
+    height: number,
+    rx: number,
+    ry: number,
+    rw: number,
+    rh: number,
+  ): Uint8Array | null {
+    if (width <= 0 || height <= 0 || rw <= 0 || rh <= 0) return null;
+    const idMesh = this.idMeshFor(mesh);
+    if (!idMesh) return null;
+    idMesh.matrix.copy(mesh.matrixWorld);
+    if (!this.idBlackMat) {
+      this.idBlackMat = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide });
     }
-    this.selectionDepthMat.uniforms.uFar.value = this.camera.far;
-    const rt = new THREE.WebGLRenderTarget(width, height);
-    const temp = new THREE.Scene();
-    temp.overrideMaterial = this.selectionDepthMat;
-    const overlayVisible = this.elementOverlay?.visible ?? true;
-    if (this.elementOverlay) this.elementOverlay.visible = false;
-    // Reparent the content for the pass; world matrices are unchanged.
-    temp.add(this.contentRoot);
 
+    // Hide everything that should neither occlude nor produce ids.
+    const hidden: THREE.Object3D[] = [];
+    this.contentRoot.traverse((o) => {
+      const anyO = o as THREE.Mesh;
+      const isLineOrPoints = (o as THREE.Points).isPoints || (o as THREE.Line).isLine;
+      if ((isLineOrPoints || isSplat(o) || o === this.elementOverlay) && o.visible) {
+        o.visible = false;
+        hidden.push(o);
+      }
+    });
+
+    const occluders = new THREE.Scene();
+    occluders.overrideMaterial = this.idBlackMat;
+    occluders.add(this.contentRoot);
+    const idScene = new THREE.Scene();
+    idScene.add(idMesh);
+
+    const rt = new THREE.WebGLRenderTarget(width, height);
     const prevTarget = this.renderer.getRenderTarget();
     const prevClear = this.renderer.getClearColor(new THREE.Color());
     const prevAlpha = this.renderer.getClearAlpha();
+    const prevAuto = this.renderer.autoClear;
     this.renderer.setRenderTarget(rt);
-    // White unpacks to ~1.0 = far plane, so empty pixels never occlude.
-    this.renderer.setClearColor(0xffffff, 1);
+    this.renderer.setClearColor(0x000000, 1);
     this.renderer.clear();
-    this.renderer.render(temp, this.camera);
-    const buf = new Uint8Array(width * height * 4);
-    this.renderer.readRenderTargetPixels(rt, 0, 0, width, height, buf);
+    this.renderer.autoClear = false;
+    this.renderer.render(occluders, this.camera);
+    // Same depth as the black copy of itself; LessEqualDepth lets the ids win.
+    this.renderer.render(idScene, this.camera);
+    const buf = new Uint8Array(rw * rh * 4);
+    this.renderer.readRenderTargetPixels(rt, rx, height - ry - rh, rw, rh, buf);
+    this.renderer.autoClear = prevAuto;
     this.renderer.setRenderTarget(prevTarget);
     this.renderer.setClearColor(prevClear, prevAlpha);
 
     this.scene.add(this.contentRoot);
-    if (this.elementOverlay) this.elementOverlay.visible = overlayVisible;
+    idScene.remove(idMesh);
+    for (const o of hidden) o.visible = true;
     rt.dispose();
     return buf;
   }
