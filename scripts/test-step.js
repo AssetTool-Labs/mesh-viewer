@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const esbuild = require('esbuild');
+const THREE = require('three');
 
 const root = path.resolve(__dirname, '..');
 const fixtures = [
@@ -156,6 +157,29 @@ for (const fixture of fixtures) {
   }
   const triangles = result.meshes.reduce((sum, mesh) => sum + mesh.indices.length / 3, 0);
   console.log(`${fixture.file}: ${result.meshes.length} mesh(es), ${triangles} triangles, ${(performance.now() - started).toFixed(1)} ms`);
+}
+
+const resistor = tessellateStep(fs.readFileSync(path.join(root, 'test_data', 'step-resistor.step'), 'utf8'));
+const resistorMeshes = resistor.meshes.map((meshData) => {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(meshData.positions, 3));
+  geometry.setIndex(new THREE.BufferAttribute(meshData.indices, 1));
+  const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+  mesh.name = meshData.name;
+  return mesh;
+});
+const raycaster = new THREE.Raycaster();
+for (const [ringName, sampleX] of [['Ring-1', -1.33], ['Ring-2', -0.44], ['Ring-3', 0.44], ['Ring-4', 1.33]]) {
+  let visibleSamples = 0;
+  for (let index = 0; index < 72; index++) {
+    const angle = index * Math.PI * 2 / 72;
+    raycaster.set(
+      new THREE.Vector3(sampleX, 5 * Math.cos(angle), 5 * Math.sin(angle)),
+      new THREE.Vector3(0, -Math.cos(angle), -Math.sin(angle)),
+    );
+    if (raycaster.intersectObjects(resistorMeshes, false)[0]?.object.name === ringName) visibleSamples++;
+  }
+  assert.equal(visibleSamples, 72, `${ringName} remains continuously visible around the body`);
 }
 
 console.log(`STEP regression passed (${fixtures.length} files).`);

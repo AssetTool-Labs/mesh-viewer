@@ -67,6 +67,11 @@ interface AssemblyEdge {
   readonly transform: Matrix4;
 }
 
+interface CurveEvaluator {
+  readonly pointAt: (parameter: number) => Vector3;
+  readonly normalizeParameter: (nativeParameter: number) => number;
+}
+
 const DEFAULT_COLOR: readonly [number, number, number] = [0.71, 0.71, 0.71];
 const CURVE_SEGMENTS = 32;
 const EPSILON = 1e-8;
@@ -237,6 +242,7 @@ class StepResolver {
 
     const projected = bounds.map((bound) => {
       const edgeLoop = this.requireRefEntity(bound.args[1], `Boundary #${bound.id} has no edge loop.`);
+      const fullPeriodU = this.loopSpansFullPeriod(edgeLoop);
       const loop = this.edgeLoop(edgeLoop, surfaceEntity, surface);
       let points = loop.points;
       let uv = loop.uv;
@@ -244,9 +250,9 @@ class StepResolver {
         points = points.reverse();
         uv = uv.reverse();
       }
-      if (surface.periodU) uv = unwrapPeriodicLoop(uv, 'x', surface.periodU);
+      if (surface.periodU && !fullPeriodU) uv = unwrapPeriodicLoop(uv, 'x', surface.periodU);
       if (surface.periodV) uv = unwrapPeriodicLoop(uv, 'y', surface.periodV);
-      return { points, uv, area: signedArea(uv) };
+      return { points, uv, area: signedArea(uv), fullPeriodU };
     });
 
     projected.sort((left, right) => Math.abs(right.area) - Math.abs(left.area));
@@ -263,12 +269,15 @@ class StepResolver {
 
     const contour = outer.uv.map((point) => point.clone());
     const holeContours = holes.map((hole) => hole.uv.map((point) => point.clone()));
-    let triangles = ShapeUtils.triangulateShape(contour, holeContours);
+    const periodicGrid = buildPeriodicRectangle(surface, contour, holeContours, outer.fullPeriodU);
+    let triangles = periodicGrid?.triangles ?? ShapeUtils.triangulateShape(contour, holeContours);
     if (triangles.length === 0) throw new Error('boundary triangulation produced no triangles.');
 
-    let allUv = [...contour, ...holeContours.flat()];
-    ({ points: allUv, triangles } = insertSurfaceCenter(surface, allUv, triangles));
-    ({ points: allUv, triangles } = refineSurfaceTriangles(surface, allUv, triangles));
+    let allUv = periodicGrid?.points ?? [...contour, ...holeContours.flat()];
+    if (!periodicGrid) {
+      ({ points: allUv, triangles } = insertSurfaceCenter(surface, allUv, triangles));
+      ({ points: allUv, triangles } = refineSurfaceTriangles(surface, allUv, triangles));
+    }
     const positions: number[] = [];
     const normals: number[] = [];
     const colors: number[] = [];
@@ -310,9 +319,10 @@ class StepResolver {
       const curve = this.requireRefEntity(edge.args[3], `Edge #${edge.id} has no curve geometry.`);
       const sameSense = !isStepEnum(edge.args[4], 'F');
       let sampled = this.sampleCurve(curve, start, end, sameSense);
-      let sampledUv = this.samplePCurve(curve, surfaceEntity, surface, sampled, sameSense)
+      const orientedForward = !isStepEnum(oriented.args[4], 'F');
+      let sampledUv = this.samplePCurve(curve, surfaceEntity, surface, sampled, sameSense, orientedForward)
         ?? sampled.map((point) => surface.project(point));
-      if (isStepEnum(oriented.args[4], 'F')) {
+      if (!orientedForward) {
         sampled = sampled.reverse();
         sampledUv = sampledUv.reverse();
       }
@@ -331,21 +341,45 @@ class StepResolver {
     return { points, uv };
   }
 
+  private loopSpansFullPeriod(loop: StepEntity): boolean {
+    const seamEdges = new Map<number, number>();
+    for (const oriented of this.refEntities(loop.args[1])) {
+      const edge = this.refEntity(oriented.args[3]);
+      const curve = edge && this.refEntity(edge.args[3]);
+      if (edge && curve?.type === 'SEAM_CURVE') seamEdges.set(edge.id, (seamEdges.get(edge.id) ?? 0) + 1);
+    }
+    return [...seamEdges.values()].some((count) => count >= 2);
+  }
+
   private samplePCurve(
     curve: StepEntity,
     surfaceEntity: StepEntity,
     surface: Surface,
     sampled: readonly Vector3[],
     sameSense: boolean,
+    orientedForward: boolean,
   ): Vector2[] | undefined {
     if (curve.type !== 'SURFACE_CURVE' && curve.type !== 'SEAM_CURVE') return undefined;
-    const pcurve = this.refEntities(curve.args[2]).find((candidate) => {
+    const pcurves = this.refEntities(curve.args[2]).filter((candidate) => {
       const basis = candidate.type === 'PCURVE' ? candidate.args[1] : undefined;
       return isStepRef(basis) && basis.id === surfaceEntity.id;
     });
+    const pcurve = orientedForward ? pcurves[0] : pcurves[pcurves.length - 1];
     const representation = pcurve && this.refEntity(pcurve.args[2]);
     const parameterCurve = representation && this.refEntities(representation.args[1])[0];
-    if (!parameterCurve || parameterCurve.type !== 'LINE' || !surface.nativeParameter) return undefined;
+    if (!parameterCurve || !surface.nativeParameter) return undefined;
+    if (entityArgs(parameterCurve, 'B_SPLINE_CURVE') || parameterCurve.type === 'B_SPLINE_CURVE_WITH_KNOTS') {
+      const parameterPoints = this.sampleParameterBSpline(parameterCurve, sampled.length).map(surface.nativeParameter);
+      const directError = surface.pointAt(parameterPoints[0].x, parameterPoints[0].y).distanceTo(sampled[0])
+        + surface.pointAt(parameterPoints[parameterPoints.length - 1].x, parameterPoints[parameterPoints.length - 1].y)
+          .distanceTo(sampled[sampled.length - 1]);
+      const reverseError = surface.pointAt(parameterPoints[0].x, parameterPoints[0].y).distanceTo(sampled[sampled.length - 1])
+        + surface.pointAt(parameterPoints[parameterPoints.length - 1].x, parameterPoints[parameterPoints.length - 1].y)
+          .distanceTo(sampled[0]);
+      if (reverseError < directError) parameterPoints.reverse();
+      return parameterPoints;
+    }
+    if (parameterCurve.type !== 'LINE') return undefined;
     const originEntity = this.refEntity(parameterCurve.args[1]);
     const vector = this.refEntity(parameterCurve.args[2]);
     const directionEntity = vector && this.refEntity(vector.args[1]);
@@ -369,6 +403,28 @@ class StepResolver {
     adjustPeriodicEnd(first, last, direction.x, surface.periodU, 'x');
     adjustPeriodicEnd(first, last, direction.y, surface.periodV, 'y');
     return projected;
+  }
+
+  private sampleParameterBSpline(curve: StepEntity, sampleCount: number): Vector2[] {
+    const simple = curve.type === 'B_SPLINE_CURVE_WITH_KNOTS';
+    const spline = simple ? curve.args.slice(1, 6) : entityArgs(curve, 'B_SPLINE_CURVE');
+    const withKnots = simple ? curve.args.slice(6, 9) : entityArgs(curve, 'B_SPLINE_CURVE_WITH_KNOTS');
+    if (!spline || !withKnots) throw new Error(`Parameter B-spline #${curve.id} has no knot definition.`);
+    const degree = this.number(spline[0], `Parameter B-spline #${curve.id} has no degree.`);
+    const controls = this.refEntities(spline[1]).map((entity) => {
+      const values = this.numberList(entity.args[1]);
+      return new Vector4(values[0] ?? 0, values[1] ?? 0, 0, 1);
+    });
+    const knots = expandStepKnots(this.numberList(withKnots[0]), this.numberList(withKnots[1]));
+    validateStepSpline(degree, controls.length, knots.length, `Parameter B-spline #${curve.id}`);
+    const weights = this.numberList(entityArgs(curve, 'RATIONAL_B_SPLINE_CURVE')?.[0]);
+    for (let index = 0; index < controls.length; index++) controls[index].w = weights[index] ?? 1;
+    const nurbs = new NURBSCurve(degree, knots, controls, degree, knots.length - degree - 1);
+    const count = Math.max(sampleCount - 1, 1);
+    return Array.from({ length: count + 1 }, (_, index) => {
+      const point = nurbs.getPoint(index / count, new Vector3());
+      return new Vector2(point.x, point.y);
+    });
   }
 
   private sampleCurve(curve: StepEntity, start: Vector3, end: Vector3, sameSense: boolean): Vector3[] {
@@ -522,6 +578,7 @@ class StepResolver {
       const semiAngle = this.number(entity.args[3], `Cone #${entity.id} has no semi-angle.`);
       const sine = Math.sin(semiAngle);
       const cosine = Math.cos(semiAngle);
+      const tangent = Math.tan(semiAngle);
       return {
         type: entity.type,
         periodU: Math.PI * 2,
@@ -530,12 +587,12 @@ class StepResolver {
           const radial = placement.x.clone().multiplyScalar(Math.cos(u)).addScaledVector(placement.y, Math.sin(u));
           return placement.origin
             .clone()
-            .addScaledVector(radial, radius + v * sine)
-            .addScaledVector(placement.z, v * cosine);
+            .addScaledVector(radial, radius + v * tangent)
+            .addScaledVector(placement.z, v);
         },
         project: (point) => {
           const relative = point.clone().sub(placement.origin);
-          const v = Math.abs(cosine) > EPSILON ? relative.dot(placement.z) / cosine : 0;
+          const v = relative.dot(placement.z);
           return new Vector2(Math.atan2(relative.dot(placement.y), relative.dot(placement.x)), v);
         },
         normalAt: (u) => placement.x
@@ -610,7 +667,8 @@ class StepResolver {
       const axisEntity = this.requireRefEntity(entity.args[2], `Surface #${entity.id} has no axis placement.`);
       const axisOrigin = this.point(this.requireRefEntity(axisEntity.args[1], `Axis #${axisEntity.id} has no origin.`));
       const axis = this.direction(this.requireRefEntity(axisEntity.args[2], `Axis #${axisEntity.id} has no direction.`));
-      const profilePoint = this.curveEvaluator(profileEntity);
+      const profile = this.curveEvaluator(profileEntity);
+      const profilePoint = profile.pointAt;
       const pointAt = (u: number, v: number): Vector3 => {
         const profile = profilePoint(clamp(v, 0, 1));
         return profile.sub(axisOrigin).applyAxisAngle(axis, u).add(axisOrigin);
@@ -645,6 +703,7 @@ class StepResolver {
           return new Vector2(angle, bestParameter);
         },
         normalAt: (u, v) => surfaceNormal(pointAt, u, v, true),
+        nativeParameter: (point) => new Vector2(point.x, profile.normalizeParameter(point.y)),
       };
     }
     if (entityArgs(entity, 'B_SPLINE_SURFACE') || entity.type === 'B_SPLINE_SURFACE_WITH_KNOTS') {
@@ -694,19 +753,22 @@ class StepResolver {
     };
   }
 
-  private curveEvaluator(entity: StepEntity): (parameter: number) => Vector3 {
+  private curveEvaluator(entity: StepEntity): CurveEvaluator {
     if (entity.type === 'CIRCLE' || entity.type === 'ELLIPSE') {
       const placement = this.placement(this.requireRefEntity(entity.args[1], `Curve #${entity.id} has no placement.`));
       const radiusX = this.number(entity.args[2], `Curve #${entity.id} has no radius.`) * this.currentLengthScale;
       const radiusY = entity.type === 'ELLIPSE'
         ? this.number(entity.args[3], `Ellipse #${entity.id} has no minor radius.`) * this.currentLengthScale
         : radiusX;
-      return (parameter) => {
-        const angle = parameter * Math.PI * 2;
-        return placement.origin
-          .clone()
-          .addScaledVector(placement.x, Math.cos(angle) * radiusX)
-          .addScaledVector(placement.y, Math.sin(angle) * radiusY);
+      return {
+        pointAt: (parameter) => {
+          const angle = parameter * Math.PI * 2;
+          return placement.origin
+            .clone()
+            .addScaledVector(placement.x, Math.cos(angle) * radiusX)
+            .addScaledVector(placement.y, Math.sin(angle) * radiusY);
+        },
+        normalizeParameter: (nativeParameter) => nativeParameter / (Math.PI * 2),
       };
     }
     if (entityArgs(entity, 'B_SPLINE_CURVE') || entity.type === 'B_SPLINE_CURVE_WITH_KNOTS') {
@@ -719,12 +781,21 @@ class StepResolver {
       const knots = expandStepKnots(this.numberList(withKnots[0]), this.numberList(withKnots[1]));
       validateStepSpline(degree, controls.length, knots.length, `B-spline curve #${entity.id}`);
       const weights = this.numberList(entityArgs(entity, 'RATIONAL_B_SPLINE_CURVE')?.[0]);
+      const startKnot = degree;
+      const endKnot = knots.length - degree - 1;
       const nurbs = new NURBSCurve(
         degree,
         knots,
         controls.map((point, index) => new Vector4(point.x, point.y, point.z, weights[index] ?? 1)),
+        startKnot,
+        endKnot,
       );
-      return (parameter) => nurbs.getPoint(clamp(parameter, 0, 1), new Vector3());
+      const nativeStart = knots[startKnot];
+      const nativeSpan = knots[endKnot] - nativeStart;
+      return {
+        pointAt: (parameter) => nurbs.getPoint(clamp(parameter, 0, 1), new Vector3()),
+        normalizeParameter: (nativeParameter) => nativeSpan === 0 ? 0 : (nativeParameter - nativeStart) / nativeSpan,
+      };
     }
     throw new Error(`generating curve type ${entity.type} is not supported.`);
   }
@@ -1185,6 +1256,54 @@ function refineSurfaceTriangles(
       refined.push([a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]);
     }
     triangles = refined;
+  }
+  return { points, triangles };
+}
+
+function buildPeriodicRectangle(
+  surface: Surface,
+  contour: readonly Vector2[],
+  holes: readonly Vector2[][],
+  forceFullPeriod: boolean,
+): { points: Vector2[]; triangles: number[][] } | undefined {
+  if (!surface.periodU || holes.length > 0 || contour.length < 4) return undefined;
+  const minimum = contour.reduce((result, point) => result.min(point), contour[0].clone());
+  const maximum = contour.reduce((result, point) => result.max(point), contour[0].clone());
+  let spanU = maximum.x - minimum.x;
+  const spanV = maximum.y - minimum.y;
+  if (spanU < surface.periodU * 0.95 || spanV < EPSILON) return undefined;
+  if (forceFullPeriod) spanU = surface.periodU;
+  const toleranceU = Math.max(spanU * 1e-4, 1e-7);
+  const toleranceV = Math.max(spanV * 1e-4, 1e-7);
+  const followsRectangle = contour.every((point) =>
+    Math.abs(point.x - minimum.x) <= toleranceU ||
+    Math.abs(point.x - maximum.x) <= toleranceU ||
+    Math.abs(point.y - minimum.y) <= toleranceV ||
+    Math.abs(point.y - maximum.y) <= toleranceV,
+  );
+  if (!followsRectangle) return undefined;
+
+  const segmentsU = 48;
+  const segmentsV = surface.type === 'CYLINDRICAL_SURFACE' || surface.type === 'CONICAL_SURFACE' ? 1 : 8;
+  const points: Vector2[] = [];
+  for (let row = 0; row <= segmentsV; row++) {
+    for (let column = 0; column <= segmentsU; column++) {
+      points.push(new Vector2(
+        minimum.x + spanU * column / segmentsU,
+        minimum.y + spanV * row / segmentsV,
+      ));
+    }
+  }
+  const triangles: number[][] = [];
+  const stride = segmentsU + 1;
+  for (let row = 0; row < segmentsV; row++) {
+    for (let column = 0; column < segmentsU; column++) {
+      const a = row * stride + column;
+      const b = a + 1;
+      const c = a + stride;
+      const d = c + 1;
+      triangles.push([a, b, c], [b, d, c]);
+    }
   }
   return { points, triangles };
 }
