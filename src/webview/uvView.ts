@@ -61,6 +61,13 @@ export class UVView {
   private drawQueued = false;
   private dragging: { id: number; lastX: number; lastY: number; moved: number } | null = null;
   private elements: UVElementContext | null = null;
+  /** Highlight paths are rebuilt only when the selection changes, not per
+   *  frame — a box-selected patch can be tens of thousands of triangles, and
+   *  rebuilding that every pan/zoom frame stalls the canvas for seconds. */
+  private hlDirty = true;
+  private hlSel: Path2D | null = null;
+  private hlSelCount = 0;
+  private hlHov: Path2D | null = null;
   /** In-progress box/lasso, in screen (CSS px) space. */
   private marquee: { tool: AreaTool; pts: Array<{ x: number; y: number }>; extend: boolean } | null = null;
   private readonly observer: ResizeObserver;
@@ -100,6 +107,7 @@ export class UVView {
   /** Enable element picking/highlighting (null while selection mode is off). */
   setElementContext(ctx: UVElementContext | null): void {
     this.elements = ctx;
+    this.hlDirty = true;
     this.root.classList.toggle('picking', !!ctx);
     this.requestDraw();
   }
@@ -523,77 +531,110 @@ export class UVView {
     return best;
   }
 
-  /** Selected/hovered highlights, drawn over the wireframe in texel space. */
-  private drawElements(ctx2d: CanvasRenderingContext2D): void {
+  /** Faces/edges of one id set as a texel-space Path2D (zoom-independent). */
+  private buildHighlightPath(ids: Iterable<number>): { path: Path2D; count: number } | null {
     const ctx = this.elements;
-    const b = this.backing;
-    if (!ctx || !b) return;
+    if (!ctx) return null;
     const uv = ctx.geometry.getAttribute('uv') as BufferAttribute | undefined;
-    if (!uv) return;
+    if (!uv) return null;
     const t = ctx.topo;
-    const s = this.scale;
     const p = { x: 0, y: 0 };
     const q = { x: 0, y: 0 };
     const r = { x: 0, y: 0 };
-
-    const drawSet = (ids: Iterable<number>, color: string, emph: boolean): void => {
-      ctx2d.fillStyle = color;
-      ctx2d.strokeStyle = color;
-      ctx2d.lineWidth = (emph ? 2.5 : 1.8) / s;
-      const vr = (emph ? 5 : 4) / s;
-      ctx2d.beginPath();
-      for (const id of ids) {
-        if (ctx.mode === 'face') {
-          if (id < 0 || id >= t.triCount) continue;
-          const a = t.tris[id * 3];
-          const c = t.tris[id * 3 + 1];
-          const d = t.tris[id * 3 + 2];
+    const path = new Path2D();
+    let count = 0;
+    for (const id of ids) {
+      if (ctx.mode === 'face') {
+        if (id < 0 || id >= t.triCount) continue;
+        const a = t.tris[id * 3];
+        const c = t.tris[id * 3 + 1];
+        const d = t.tris[id * 3 + 2];
+        const du = Math.floor(uv.getX(a));
+        const dv = Math.floor(uv.getY(a));
+        this.texelOf(uv, a, du, dv, p);
+        this.texelOf(uv, c, du, dv, q);
+        this.texelOf(uv, d, du, dv, r);
+        path.moveTo(p.x, p.y);
+        path.lineTo(q.x, q.y);
+        path.lineTo(r.x, r.y);
+        path.closePath();
+        count++;
+      } else if (ctx.mode === 'edge') {
+        const copies = t.edgeCopies.get(id);
+        if (!copies) continue;
+        for (let i = 0; i < copies.length; i += 2) {
+          const a = copies[i];
+          const c = copies[i + 1];
           const du = Math.floor(uv.getX(a));
           const dv = Math.floor(uv.getY(a));
           this.texelOf(uv, a, du, dv, p);
           this.texelOf(uv, c, du, dv, q);
-          this.texelOf(uv, d, du, dv, r);
-          ctx2d.moveTo(p.x, p.y);
-          ctx2d.lineTo(q.x, q.y);
-          ctx2d.lineTo(r.x, r.y);
-          ctx2d.closePath();
-        } else if (ctx.mode === 'vertex') {
-          // Every buffer copy of the canonical vertex — that is the point of
-          // the seam-aware ids: one 3D vertex lights all its UV copies.
+          path.moveTo(p.x, p.y);
+          path.lineTo(q.x, q.y);
+        }
+        count++;
+      }
+    }
+    return count ? { path, count } : null;
+  }
+
+  /** Selected/hovered highlights over the wireframe. Faces/edges come from the
+   *  cached paths; vertices are few and zoom-dependent, so they draw direct. */
+  private drawElements(ctx2d: CanvasRenderingContext2D): void {
+    const ctx = this.elements;
+    const b = this.backing;
+    if (!ctx || !b) return;
+    const s = this.scale;
+
+    if (ctx.mode === 'vertex') {
+      const uv = ctx.geometry.getAttribute('uv') as BufferAttribute | undefined;
+      if (!uv) return;
+      const t = ctx.topo;
+      const p = { x: 0, y: 0 };
+      const dots = (ids: Iterable<number>, color: string, vr: number): void => {
+        ctx2d.fillStyle = color;
+        ctx2d.beginPath();
+        for (const id of ids) {
           for (const i of t.repVerts.get(id) ?? []) {
             this.texelOf(uv, i, Math.floor(uv.getX(i)), Math.floor(uv.getY(i)), p);
             ctx2d.moveTo(p.x + vr, p.y);
             ctx2d.arc(p.x, p.y, vr, 0, Math.PI * 2);
           }
-        } else {
-          const copies = t.edgeCopies.get(id);
-          if (!copies) continue;
-          for (let i = 0; i < copies.length; i += 2) {
-            const a = copies[i];
-            const c = copies[i + 1];
-            const du = Math.floor(uv.getX(a));
-            const dv = Math.floor(uv.getY(a));
-            this.texelOf(uv, a, du, dv, p);
-            this.texelOf(uv, c, du, dv, q);
-            ctx2d.moveTo(p.x, p.y);
-            ctx2d.lineTo(q.x, q.y);
-          }
         }
-      }
+        ctx2d.fill();
+      };
+      if (ctx.selected.size) dots(ctx.selected, '#ff9d2e', 4 / s);
+      if (ctx.hovered !== null && !ctx.selected.has(ctx.hovered)) dots([ctx.hovered], '#4cc3f7', 5 / s);
+      return;
+    }
+
+    if (this.hlDirty) {
+      this.hlDirty = false;
+      const sel = ctx.selected.size ? this.buildHighlightPath(ctx.selected) : null;
+      this.hlSel = sel?.path ?? null;
+      this.hlSelCount = sel?.count ?? 0;
+      const hov =
+        ctx.hovered !== null && !ctx.selected.has(ctx.hovered)
+          ? this.buildHighlightPath([ctx.hovered])
+          : null;
+      this.hlHov = hov?.path ?? null;
+    }
+    const paint = (path: Path2D, color: string, emph: boolean, count: number): void => {
+      ctx2d.fillStyle = color;
+      ctx2d.strokeStyle = color;
+      ctx2d.lineWidth = (emph ? 2.5 : 1.8) / s;
       if (ctx.mode === 'face') {
         ctx2d.globalAlpha = emph ? 0.5 : 0.35;
-        ctx2d.fill();
+        ctx2d.fill(path);
         ctx2d.globalAlpha = 1;
-        ctx2d.stroke();
-      } else if (ctx.mode === 'vertex') {
-        ctx2d.fill();
+        // Outlining tens of thousands of triangles costs more than it shows.
+        if (count <= 2000) ctx2d.stroke(path);
       } else {
-        ctx2d.stroke();
+        ctx2d.stroke(path);
       }
     };
-
-    if (ctx.selected.size) drawSet(ctx.selected, '#ff9d2e', false);
-    if (ctx.hovered !== null && !ctx.selected.has(ctx.hovered)) drawSet([ctx.hovered], '#4cc3f7', true);
+    if (this.hlSel) paint(this.hlSel, '#ff9d2e', false, this.hlSelCount);
+    if (this.hlHov) paint(this.hlHov, '#4cc3f7', true, 1);
   }
 
   /** Deduped-edge wireframe in texel space, cached per geometry/size/flip. */

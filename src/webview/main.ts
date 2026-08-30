@@ -395,7 +395,7 @@ elementSelection.onChange(() => {
       elemStatus.textContent =
         `${n} ${n === 1 ? one : many} selected` +
         (st.hovered !== null ? ' · hovering' : '') +
-        ' — drag to area-select, Shift extends, double-click = linked, A = all/none, Esc clears';
+        ' — box/lasso: drag in UV, Shift+drag (or B, then drag) in 3D · double-click = linked · A = all/none · F = frame · Esc clears';
     }
   }
 });
@@ -3008,3 +3008,7 @@ function drawUVOverlay(
   }
   ctx.stroke();
 }
+
+// Test/debug hook: lets the headless UI harness inspect the live module state
+// (the bundle is an IIFE, so nothing is reachable from the page otherwise).
+(window as unknown as Record<string, unknown>).__mv = { viewer, uvView, elementSelection };
