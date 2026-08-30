@@ -101,8 +101,9 @@ anything else renders as a mesh or point cloud as before.
 
 STEP files are parsed and tessellated locally in a dedicated worker. The built-in
 viewer-focused importer handles common AP203/AP214/AP242 B-rep solids, assemblies,
-colors, units, analytic surfaces, and rational B-splines without uploading the file
-or bundling a general-purpose CAD kernel. Coordinates are normalized to millimetres.
+colors, units, analytic surfaces, rational B-splines, and AP242 tessellated solids or
+shells made from complex triangulated faces without uploading the file or bundling a
+general-purpose CAD kernel. Coordinates are normalized to millimetres.
 
 For multi-file formats (`.gltf` + `.bin` + textures, `.obj` + `.mtl` + textures), only files with reference-able extensions (`.bin`, `.mtl`, common image types) in the same directory are loaded automatically. Unrelated files (`.glb` / `.fbx` siblings, etc.) are ignored so opening one model never drags 14 MB of unrelated bytes through the webview channel.
 
@@ -131,7 +132,7 @@ loader is fixed.
 | FBX | Some 2013-era exports fail while building animation curves; files whose NUL bytes have been mangled in transit are rejected as an unknown format |
 | Collada `.dae` | `<polygons>` meshes can collapse to a single triangle, `<tristrips>` are not read, and some skinned+morphed files fail to parse |
 | 3MF | The volumetric extension is unsupported; beam-lattice models parse to no geometry |
-| STEP | Geometry healing, PMI, and uncommon surface/curve entities are not supported; affected faces are reported as skipped instead of silently fabricated |
+| STEP | Geometry healing, PMI annotations, uncommon surface/curve entities, and tessellated item types other than complex triangulated faces are not supported; affected bodies or faces are reported as skipped instead of silently fabricated |
 | VRML `.wrl` | Multi-line strings and some real-world files fail in the lexer |
 | USD | Composition (`references`, `payload`, `subLayer`) is not followed, so assets that rely on it load empty |
 

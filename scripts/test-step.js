@@ -1,10 +1,52 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
 const esbuild = require('esbuild');
 const THREE = require('three');
+const { extractZipEntry } = require('./fetch-step-fixtures');
 
 const root = path.resolve(__dirname, '..');
+function makeZipEntry(name, content, method) {
+  const nameBytes = Buffer.from(name);
+  const compressed = method === 8 ? zlib.deflateRawSync(content) : content;
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(method, 8);
+  local.writeUInt32LE(compressed.length, 18);
+  local.writeUInt32LE(content.length, 22);
+  local.writeUInt16LE(nameBytes.length, 26);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(method, 10);
+  central.writeUInt32LE(compressed.length, 20);
+  central.writeUInt32LE(content.length, 24);
+  central.writeUInt16LE(nameBytes.length, 28);
+  const centralOffset = local.length + nameBytes.length + compressed.length;
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(central.length + nameBytes.length, 12);
+  end.writeUInt32LE(centralOffset, 16);
+  return Buffer.concat([local, nameBytes, compressed, central, nameBytes, end]);
+}
+
+const zipContent = Buffer.from('STEP fixture');
+assert.deepEqual(extractZipEntry(makeZipEntry('stored.step', zipContent, 0), 'stored.step'), zipContent);
+assert.deepEqual(extractZipEntry(makeZipEntry('deflated.step', zipContent, 8), 'deflated.step'), zipContent);
+assert.throws(() => extractZipEntry(Buffer.alloc(22), 'missing.step'), /no ZIP directory/);
+const invalidDirectory = makeZipEntry('bad.step', zipContent, 0);
+invalidDirectory.writeUInt32LE(invalidDirectory.length, invalidDirectory.length - 6);
+assert.throws(() => extractZipEntry(invalidDirectory, 'bad.step'), /directory is invalid/);
+const truncatedEntry = makeZipEntry('truncated.step', zipContent, 0);
+const centralOffset = truncatedEntry.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+truncatedEntry.writeUInt32LE(truncatedEntry.length, centralOffset + 20);
+assert.throws(() => extractZipEntry(truncatedEntry, 'truncated.step'), /is truncated/);
+
 const fixtures = [
   { file: 'step-cube.stp', faces: 6, meshes: 1, bounds: [[-160, -140, 0], [140, 160, 300]] },
   { file: 'step-rounded-cube.step', faces: 7, meshes: 1, bounds: [[0, 0, 0], [10, 10, 10]], maxTriangles: 80 },
@@ -45,6 +87,22 @@ const fixtures = [
     bounds: [[-21.15, -21.15, 0], [21.15, 21.15, 60.1]],
     tolerance: 0.05,
   },
+  {
+    file: 'step-nist-ftc08-ap242-tg.stp',
+    faces: 273,
+    meshes: 2,
+    bounds: [[-155.79726, -111.34725, 0], [155.79726, 111.34725, 48.26]],
+    exactTriangles: 3370,
+    colors: 2,
+    tolerance: 0.01,
+  },
+  {
+    file: 'step-occt-screw.step',
+    faces: 10,
+    meshes: 1,
+    bounds: [[-27.81968, -10.8263, -34.56367], [-7.97655, 9.14478, 7.73145]],
+    tolerance: 0.05,
+  },
 ];
 
 for (const fixture of fixtures) {
@@ -67,10 +125,35 @@ const {
   buildSurfaceRectangle,
   expandStepKnots,
   parsePart21,
+  projectTorusLocal,
   rectangleCoordinates,
   tessellateStep,
   validateStepSpline,
 } = compiled.exports;
+const spindleU = 0.7;
+const spindleV = Math.PI;
+const spindleRadius = 1 + 2 * Math.cos(spindleV);
+const projectedSpindle = projectTorusLocal(
+  spindleRadius * Math.cos(spindleU),
+  spindleRadius * Math.sin(spindleU),
+  2 * Math.sin(spindleV),
+  1,
+  2,
+  { axis: 'y', value: spindleV },
+);
+assert.ok(
+  Math.abs(Math.atan2(Math.sin(projectedSpindle.x - spindleU), Math.cos(projectedSpindle.x - spindleU))) <= 1e-12,
+  'negative-radius torus branch preserves periodic u',
+);
+assert.ok(Math.abs(projectedSpindle.y - spindleV) <= 1e-12, 'negative-radius torus branch preserves v');
+const singularV = Math.acos(-0.5);
+const projectedSingularity = projectTorusLocal(0, 0, 2 * Math.sin(singularV), 1, 2, {
+  axis: 'y',
+  value: singularV,
+  companion: 1.25,
+});
+assert.equal(projectedSingularity.x, 1.25, 'spindle-torus singularity preserves declared u');
+assert.equal(projectedSingularity.y, singularV, 'spindle-torus singularity preserves declared v');
 const textBuilt = esbuild.buildSync({
   entryPoints: [path.join(root, 'src/webview/textEncoding.ts')],
   bundle: true,
@@ -183,6 +266,99 @@ DATA;
 #24=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#22),#23);
 ENDSEC;
 END-ISO-10303-21;`;
+const tessellatedStripAndFan = `ISO-10303-21;
+DATA;
+#1=COORDINATES_LIST('',5,((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),(.5,.5,1.)));
+#2=COMPLEX_TRIANGULATED_FACE('',#1,5,((0.,0.,1.)),$,(1,2,3,4,5),((1,2,3,4)),((5,1,2,3)));
+#3=TESSELLATED_SOLID('',(#2),$);
+#4=GEOMETRIC_REPRESENTATION_CONTEXT(3);
+#5=TESSELLATED_SHAPE_REPRESENTATION('',(#3),#4);
+ENDSEC;
+END-ISO-10303-21;`;
+const tessellatedResult = tessellateStep(tessellatedStripAndFan);
+assert.equal(tessellatedResult.faceCount, 1, 'tessellated body face count');
+assert.equal(tessellatedResult.meshes[0].indices.length / 3, 4, 'triangle strips and fans are expanded');
+assert.deepEqual(
+  Array.from(tessellatedResult.meshes[0].indices),
+  [0, 1, 2, 2, 3, 1, 4, 0, 1, 4, 1, 2],
+  'triangle strips alternate winding and fans retain their center',
+);
+assert.ok(tessellatedResult.meshes[0].normals.every(Number.isFinite), 'tessellated normals are finite');
+assert.ok(
+  Array.from(tessellatedResult.meshes[0].normals).every((value, index) => index % 3 === 2 ? value === 1 : value === 0),
+  'tessellated faces preserve authored normals',
+);
+assert.throws(
+  () => tessellateStep(tessellatedStripAndFan.replace('((1,2,3,4))', '((1,2,.5,4))')),
+  /invalid triangle strip/,
+  'malformed tessellated indices fail cleanly',
+);
+assert.throws(
+  () => tessellateStep(tessellatedStripAndFan.replace('((1,2,3,4))', '$')),
+  /invalid triangle strips/,
+  'malformed tessellated strip containers fail cleanly',
+);
+assert.throws(
+  () => tessellateStep(tessellatedStripAndFan.replace('((1,2,3,4))', '((1,2))')),
+  /invalid triangle strips/,
+  'short tessellated strip groups fail cleanly',
+);
+assert.throws(
+  () => tessellateStep(tessellatedStripAndFan.replace("#2=COMPLEX_TRIANGULATED_FACE('',#1,5,", "#2=COMPLEX_TRIANGULATED_FACE('',#1,5.5,")),
+  /invalid point count/,
+  'noninteger tessellated point counts fail cleanly',
+);
+assert.throws(
+  () => tessellateStep(tessellatedStripAndFan.replace("#1=COORDINATES_LIST('',5,", "#1=COORDINATES_LIST('',6,")),
+  /point count does not match its coordinates/,
+  'coordinate lists validate their declared point count',
+);
+const implicitTessellated = tessellateStep(tessellatedStripAndFan.replace('(1,2,3,4,5),((1,2,3,4))', '(),((1,2,3,4))'));
+assert.equal(implicitTessellated.meshes[0].indices.length / 3, 4, 'implicit tessellated point indices use coordinate order');
+assert.throws(
+  () => tessellateStep(tessellatedStripAndFan
+    .replace("#2=COMPLEX_TRIANGULATED_FACE('',#1,5,", "#2=COMPLEX_TRIANGULATED_FACE('',#1,6,")
+    .replace('(1,2,3,4,5),((1,2,3,4))', '(),((1,2,3,4))')),
+  /implicit point count does not match/,
+  'implicit tessellated point counts must match their coordinate list',
+);
+assert.throws(
+  () => tessellateStep(tessellatedStripAndFan
+    .replace("#2=COMPLEX_TRIANGULATED_FACE('',#1,5,", "#2=COMPLEX_TRIANGULATED_FACE('',#1,6,")
+    .replace('(1,2,3,4,5),((1,2,3,4))', '(1,2,3,4,5,99),((1,2,3,4))')),
+  /outside its coordinate list/,
+  'unused out-of-range point mappings fail cleanly',
+);
+const reversedTessellated = tessellateStep(tessellatedStripAndFan.replace('((1,2,3,4))', '((1,3,2))'));
+for (let index = 0; index < reversedTessellated.meshes[0].indices.length; index += 3) {
+  const [a, b, c] = Array.from(reversedTessellated.meshes[0].indices.slice(index, index + 3));
+  const positions = reversedTessellated.meshes[0].positions;
+  const normal = new THREE.Vector3().fromArray(positions, b * 3)
+    .sub(new THREE.Vector3().fromArray(positions, a * 3))
+    .cross(new THREE.Vector3().fromArray(positions, c * 3).sub(new THREE.Vector3().fromArray(positions, a * 3)));
+  assert.ok(normal.z > 0, 'authored normals correct reversed tessellated winding');
+}
+const perPointNormals = tessellateStep(tessellatedStripAndFan.replace(
+  '((0.,0.,1.)),$,(1,2,3,4,5)',
+  '((0.,0.,1.),(0.,0.,1.),(0.,0.,1.),(0.,0.,1.),(0.,0.,1.)),$,(1,2,3,4,5)',
+));
+assert.deepEqual(perPointNormals.meshes[0].normals, tessellatedResult.meshes[0].normals, 'per-point tessellated normals are preserved');
+const computedNormals = tessellateStep(tessellatedStripAndFan.replace('((0.,0.,1.)),$', '(),$'));
+assert.ok(computedNormals.meshes[0].normals.every(Number.isFinite), 'missing tessellated normals are computed');
+const duplicateTessellatedRepresentation = tessellateStep(tessellatedStripAndFan.replace(
+  '#5=TESSELLATED_SHAPE_REPRESENTATION',
+  "#6=SHAPE_REPRESENTATION('',(#3),#4);\n#5=TESSELLATED_SHAPE_REPRESENTATION",
+));
+assert.equal(duplicateTessellatedRepresentation.meshes.length, 1, 'equivalent representations emit a tessellated body once');
+assert.equal(duplicateTessellatedRepresentation.faceCount, 1, 'equivalent representations count tessellated faces once');
+const differentlyScaledRepresentations = tessellateStep(tessellatedStripAndFan
+  .replace('#4=GEOMETRIC_REPRESENTATION_CONTEXT(3);', "#4=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNIT_ASSIGNED_CONTEXT((#7)));\n#7=(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.));\n#8=(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNIT_ASSIGNED_CONTEXT((#9)));\n#9=(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT($,.METRE.));")
+  .replace('#5=TESSELLATED_SHAPE_REPRESENTATION', "#6=SHAPE_REPRESENTATION('',(#3),#8);\n#5=TESSELLATED_SHAPE_REPRESENTATION"));
+assert.equal(differentlyScaledRepresentations.meshes.length, 2, 'different representation unit contexts retain both body instances');
+assert.ok(
+  Math.max(...differentlyScaledRepresentations.meshes.map((mesh) => Math.max(...mesh.positions))) >= 1_000,
+  'representation unit contexts apply distinct scales',
+);
 const trimmedResult = tessellateStep(trimmedSemicircle);
 assert.equal(trimmedResult.unit, 'model units', 'missing STEP length units remain labeled as model units');
 const trimmedPositions = Array.from(trimmedResult.meshes[0].positions);
@@ -274,10 +450,17 @@ for (const fixture of fixtures) {
     closeTo(Math.max(...axes[axis]), fixture.bounds[1][axis], fixture.tolerance);
   }
   if (fixture.colors) {
-    const colors = new Set(result.meshes.map((mesh) => Array.from(mesh.colors.slice(0, 3), (value) => value.toFixed(3)).join(',')));
+    const colors = new Set(result.meshes.flatMap((mesh) => {
+      const values = [];
+      for (let index = 0; index < mesh.colors.length; index += 3) {
+        values.push(Array.from(mesh.colors.slice(index, index + 3), (value) => value.toFixed(3)).join(','));
+      }
+      return values;
+    }));
     assert.equal(colors.size, fixture.colors, `${fixture.file}: distinct part colors`);
   }
   const triangles = result.meshes.reduce((sum, mesh) => sum + mesh.indices.length / 3, 0);
+  if (fixture.exactTriangles) assert.equal(triangles, fixture.exactTriangles, `${fixture.file}: triangle count`);
   if (fixture.maxTriangles) {
     assert.ok(triangles <= fixture.maxTriangles, `${fixture.file}: trimmed periodic faces use structured grids`);
   }
@@ -296,6 +479,37 @@ for (const [x, z] of [[6, 9.5], [7, 9], [8, 8], [8.5, 7], [9.5, 6], [7.5, 8.5]])
 }
 roundedRaycaster.set(new THREE.Vector3(9, -1, 9), new THREE.Vector3(0, 1, 0));
 assert.equal(roundedRaycaster.intersectObject(roundedMesh, false).length, 0, 'Rounded corner stays open outside its arc');
+
+const screw = tessellateStep(fs.readFileSync(path.join(root, 'test_data', 'step-occt-screw.step'), 'utf8')).meshes[0];
+const screwGeometry = new THREE.BufferGeometry();
+screwGeometry.setAttribute('position', new THREE.BufferAttribute(screw.positions, 3));
+screwGeometry.setAttribute('normal', new THREE.BufferAttribute(screw.normals, 3));
+screwGeometry.setIndex(new THREE.BufferAttribute(screw.indices, 1));
+const screwMesh = new THREE.Mesh(screwGeometry, new THREE.MeshStandardMaterial({ side: THREE.FrontSide }));
+const screwRaycaster = new THREE.Raycaster();
+const screwHeadTarget = new THREE.Vector3(-17.89811, -0.8263, 6);
+for (const originY of [-30, 30]) {
+  const origin = new THREE.Vector3(-17.89811, originY, 6);
+  screwRaycaster.set(origin, screwHeadTarget.clone().sub(origin).normalize());
+  const hit = screwRaycaster.intersectObject(screwMesh, false)[0];
+  assert.ok(hit && hit.distance < 25, 'Screw head exterior remains visible with front-face culling');
+}
+for (const [radius, expectedSamples] of [[5.5, 72], [6.5, 72], [7.5, 64], [8.5, 64], [9.5, 64]]) {
+  let visibleSamples = 0;
+  for (let index = 0; index < 72; index++) {
+    const angle = (index + 0.5) * Math.PI * 2 / 72;
+    screwRaycaster.set(
+      new THREE.Vector3(
+        screwHeadTarget.x + radius * Math.cos(angle),
+        screwHeadTarget.y + radius * Math.sin(angle),
+        -45,
+      ),
+      new THREE.Vector3(0, 0, 1),
+    );
+    if (screwRaycaster.intersectObject(screwMesh, false)[0]) visibleSamples++;
+  }
+  assert.equal(visibleSamples, expectedSamples, 'Screw head and slot match reference shaft-side culling');
+}
 
 const led = tessellateStep(fs.readFileSync(path.join(root, 'test_data', 'step-led-5mm.step'), 'utf8'));
 const ledShell = led.meshes.find((mesh) => mesh.name === 'Funda');

@@ -42,7 +42,7 @@ interface Surface {
   readonly periodU?: number;
   readonly periodV?: number;
   pointAt(u: number, v: number): Vector3;
-  project(point: Vector3): Vector2;
+  project(point: Vector3, fixedParameter?: { axis: 'x' | 'y'; value: number; companion?: number }): Vector2;
   normalAt(u: number, v: number): Vector3;
   nativeParameter?(point: Vector2): Vector2;
 }
@@ -59,7 +59,13 @@ interface MutableMeshData extends FaceMesh {
 }
 
 interface RepresentationGeometry {
-  readonly meshes: StepMeshData[];
+  readonly bodies: RepresentationBodyGeometry[];
+}
+
+interface RepresentationBodyGeometry {
+  readonly bodyId: number;
+  readonly unitScale: number;
+  readonly mesh?: StepMeshData;
   readonly faceCount: number;
   readonly skippedFaceCount: number;
   readonly skippedBodyCount: number;
@@ -148,15 +154,28 @@ class StepResolver {
       if (cached) return cached;
       const previousScale = this.currentLengthScale;
       this.currentLengthScale = this.resolveLengthUnit(representation).scaleToMillimetres;
-      const builtMeshes: StepMeshData[] = [];
-      let builtFaceCount = 0;
-      let builtSkippedCount = 0;
-      let builtSkippedBodyCount = 0;
+      const bodies: RepresentationBodyGeometry[] = [];
       const representationArgs = entityArgs(representation, 'REPRESENTATION') ?? representation.args;
       for (const item of this.refEntities(representationArgs[1])) {
+        if (item.type === 'TESSELLATED_SOLID' || item.type === 'TESSELLATED_SHELL') {
+          const built = this.tessellateTessellatedBody(
+            item,
+            this.entityName(item) || names.get(representation.id) || `Tessellated body #${item.id}`,
+            this.colorFor(item.id),
+          );
+          bodies.push({
+            bodyId: item.id,
+            unitScale: this.currentLengthScale,
+            mesh: built.mesh.positions.length > 0 ? built.mesh : undefined,
+            faceCount: built.faceCount,
+            skippedFaceCount: built.skipped,
+            skippedBodyCount: 0,
+          });
+          continue;
+        }
         if (isUnsupportedGeometryBody(item)) {
-          builtSkippedBodyCount++;
-          this.warnings.add(`Representation #${representation.id}: geometry body ${item.type} #${item.id} is not supported and was skipped.`);
+          bodies.push({ bodyId: item.id, unitScale: this.currentLengthScale, faceCount: 0, skippedFaceCount: 0, skippedBodyCount: 1 });
+          this.warnings.add(`Geometry body ${item.type} #${item.id} is not supported and was skipped.`);
           continue;
         }
         const solidArgs = entityArgs(item, 'MANIFOLD_SOLID_BREP');
@@ -168,8 +187,8 @@ class StepResolver {
           .map((value) => this.refEntity(value))
           .find((entity) => entity?.type === 'CLOSED_SHELL');
         if (!shell) {
-          builtSkippedBodyCount++;
-          this.warnings.add(`Representation #${representation.id}: solid #${solid.id} has no supported closed shell and was skipped.`);
+          bodies.push({ bodyId: item.id, unitScale: this.currentLengthScale, faceCount: 0, skippedFaceCount: 0, skippedBodyCount: 1 });
+          this.warnings.add(`Solid #${solid.id} has no supported closed shell and was skipped.`);
           continue;
         }
         const faces = this.refEntities(shell?.args[1]);
@@ -178,21 +197,22 @@ class StepResolver {
           this.entityName(solid) || names.get(representation.id) || `Solid #${solid.id}`,
           this.colorFor(solid.id),
         );
-        builtFaceCount += faces.length;
-        builtSkippedCount += built.skipped;
-        if (built.mesh.positions.length > 0) builtMeshes.push(built.mesh);
+        bodies.push({
+          bodyId: item.id,
+          unitScale: this.currentLengthScale,
+          mesh: built.mesh.positions.length > 0 ? built.mesh : undefined,
+          faceCount: faces.length,
+          skippedFaceCount: built.skipped,
+          skippedBodyCount: 0,
+        });
       }
-      const geometry = {
-        meshes: builtMeshes,
-        faceCount: builtFaceCount,
-        skippedFaceCount: builtSkippedCount,
-        skippedBodyCount: builtSkippedBodyCount,
-      };
+      const geometry = { bodies };
       this.currentLengthScale = previousScale;
       cache.set(representation.id, geometry);
       return geometry;
     };
 
+    const emittedBodies = new Set<string>();
     const visit = (representationId: number, world: Matrix4, path: Set<number>): void => {
       if (path.has(representationId)) {
         this.warnings.add(`Assembly representation #${representationId} contains a cycle.`);
@@ -202,10 +222,16 @@ class StepResolver {
       if (!representation) return;
       const nextPath = new Set(path).add(representationId);
       const built = buildRepresentation(representation);
-      for (const mesh of built.meshes) meshes.push(transformMesh(mesh, world, names.get(representationId)));
-      faceCount += built.faceCount;
-      skippedFaceCount += built.skippedFaceCount;
-      skippedBodyCount += built.skippedBodyCount;
+      const transformKey = world.elements.map((value) => value.toPrecision(12)).join(',');
+      for (const body of built.bodies) {
+        const key = `${body.bodyId}:${body.unitScale}:${transformKey}`;
+        if (emittedBodies.has(key)) continue;
+        emittedBodies.add(key);
+        if (body.mesh) meshes.push(transformMesh(body.mesh, world, names.get(representationId)));
+        faceCount += body.faceCount;
+        skippedFaceCount += body.skippedFaceCount;
+        skippedBodyCount += body.skippedBodyCount;
+      }
       for (const edge of children.get(representationId) ?? []) {
         visit(edge.childId, world.clone().multiply(edge.transform), nextPath);
       }
@@ -274,6 +300,166 @@ class StepResolver {
       },
       skipped,
     };
+  }
+
+  private tessellateTessellatedBody(
+    body: StepEntity,
+    name: string,
+    fallbackColor: readonly [number, number, number] = DEFAULT_COLOR,
+  ): { mesh: StepMeshData; faceCount: number; skipped: number } {
+    const mesh: MutableMeshData = { name, positions: [], normals: [], colors: [], indices: [] };
+    const items = this.refEntities(body.args[1]);
+    let skipped = 0;
+    for (const face of items) {
+      if (face.type !== 'COMPLEX_TRIANGULATED_FACE') {
+        skipped++;
+        this.warnings.add(`Tessellated body #${body.id}: item ${face.type} #${face.id} is not supported.`);
+        continue;
+      }
+      try {
+        const faceMesh = this.tessellateComplexTriangulatedFace(face, this.colorFor(face.id) ?? fallbackColor);
+        const base = mesh.positions.length / 3;
+        for (const value of faceMesh.positions) mesh.positions.push(value);
+        for (const value of faceMesh.normals) mesh.normals.push(value);
+        for (const value of faceMesh.colors) mesh.colors.push(value);
+        for (const index of faceMesh.indices) mesh.indices.push(index + base);
+      } catch (error) {
+        skipped++;
+        const detail = error instanceof Error ? error.message : String(error);
+        this.warnings.add(`Tessellated face #${face.id}: ${detail}`);
+      }
+    }
+    return {
+      mesh: {
+        name,
+        positions: new Float32Array(mesh.positions),
+        normals: new Float32Array(mesh.normals),
+        colors: new Float32Array(mesh.colors),
+        indices: new Uint32Array(mesh.indices),
+      },
+      faceCount: items.length,
+      skipped,
+    };
+  }
+
+  private tessellateComplexTriangulatedFace(
+    face: StepEntity,
+    color: readonly [number, number, number],
+  ): FaceMesh {
+    const coordinatesEntity = this.requireRefEntity(face.args[1], `Face #${face.id} has no coordinate list.`);
+    if (coordinatesEntity.type !== 'COORDINATES_LIST') {
+      throw new Error(`coordinate entity #${coordinatesEntity.id} is ${coordinatesEntity.type}.`);
+    }
+    const coordinateRows = Array.isArray(coordinatesEntity.args[2]) ? coordinatesEntity.args[2] : [];
+    const declaredCoordinateCount = this.number(
+      coordinatesEntity.args[1],
+      `Coordinate list #${coordinatesEntity.id} has no point count.`,
+    );
+    if (!Number.isSafeInteger(declaredCoordinateCount) || declaredCoordinateCount !== coordinateRows.length) {
+      throw new Error(`Coordinate list #${coordinatesEntity.id} point count does not match its coordinates.`);
+    }
+    const pointCount = this.number(face.args[2], `Face #${face.id} has no point count.`);
+    if (!Number.isSafeInteger(pointCount) || pointCount < 1) throw new Error(`Face #${face.id} has an invalid point count.`);
+    const pointIndex = this.integerList(face.args[5], `Face #${face.id} has an invalid point index.`);
+    if (pointIndex.length !== 0 && pointIndex.length !== pointCount) {
+      throw new Error('point index count does not match pnmax.');
+    }
+    if (pointIndex.length === 0 && pointCount !== coordinateRows.length) {
+      throw new Error(`Face #${face.id} implicit point count does not match its coordinate list.`);
+    }
+    if (pointIndex.some((index) => index < 1 || index > coordinateRows.length)) {
+      throw new Error(`Face #${face.id} point index is outside its coordinate list.`);
+    }
+    const normalRows = this.vectorRows(face.args[3], `Face #${face.id} has invalid normals.`);
+    if (normalRows.length !== 0 && normalRows.length !== 1 && normalRows.length !== pointCount) {
+      throw new Error(`Face #${face.id} normal count does not match pnmax.`);
+    }
+    const strips = this.integerGroups(face.args[6], `Face #${face.id} has invalid triangle strips.`);
+    const fans = this.integerGroups(face.args[7], `Face #${face.id} has invalid triangle fans.`);
+    if (strips.length === 0 && fans.length === 0) throw new Error(`Face #${face.id} contains no triangle groups.`);
+    const hasAuthoredNormals = normalRows.length > 0;
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const colors: number[] = [];
+    const indices: number[] = [];
+    const vertexMap = new Map<number, number>();
+    const vertex = (localIndex: number): number => {
+      if (!Number.isSafeInteger(localIndex) || localIndex < 1 || localIndex > pointCount) {
+        throw new Error(`point index ${localIndex} is outside 1..${pointCount}.`);
+      }
+      const cached = vertexMap.get(localIndex);
+      if (cached !== undefined) return cached;
+      const coordinateIndex = pointIndex.length > 0 ? pointIndex[localIndex - 1] : localIndex;
+      const row = coordinateRows[coordinateIndex - 1];
+      if (!Array.isArray(row) || row.length !== 3 || !row.every((value) => typeof value === 'number' && Number.isFinite(value))) {
+        throw new Error(`coordinate index ${coordinateIndex} is invalid.`);
+      }
+      const index = positions.length / 3;
+      positions.push(
+        this.number(row[0], '') * this.currentLengthScale,
+        this.number(row[1], '') * this.currentLengthScale,
+        this.number(row[2], '') * this.currentLengthScale,
+      );
+      const authored = normalRows[normalRows.length === 1 ? 0 : localIndex - 1];
+      if (authored) {
+        const normal = new Vector3(authored[0], authored[1], authored[2]);
+        if (normal.lengthSq() === 0) throw new Error(`normal ${localIndex} has zero length.`);
+        normal.normalize();
+        normals.push(normal.x, normal.y, normal.z);
+      } else {
+        normals.push(0, 0, 0);
+      }
+      colors.push(color[0], color[1], color[2]);
+      vertexMap.set(localIndex, index);
+      return index;
+    };
+    const triangle = (first: number, second: number, third: number): void => {
+      const a = vertex(first);
+      let b = vertex(second);
+      let c = vertex(third);
+      if (a === b || b === c || c === a) return;
+      if (hasAuthoredNormals) {
+        const geometric = vectorAt(positions, b).sub(vectorAt(positions, a)).cross(vectorAt(positions, c).sub(vectorAt(positions, a)));
+        const expected = vectorAt(normals, a).add(vectorAt(normals, b)).add(vectorAt(normals, c));
+        if (geometric.dot(expected) < 0) [b, c] = [c, b];
+      }
+      indices.push(a, b, c);
+    };
+    for (const stripValue of strips) {
+      const strip = stripValue;
+      for (let index = 0; index + 2 < strip.length; index++) {
+        if (index % 2 === 0) triangle(strip[index], strip[index + 1], strip[index + 2]);
+        else triangle(strip[index + 1], strip[index], strip[index + 2]);
+      }
+    }
+    for (const fanValue of fans) {
+      const fan = fanValue;
+      for (let index = 1; index + 1 < fan.length; index++) triangle(fan[0], fan[index], fan[index + 1]);
+    }
+    if (indices.length === 0) throw new Error('contains no triangles.');
+    if (!hasAuthoredNormals) {
+      for (let index = 0; index < indices.length; index += 3) {
+        const a = indices[index];
+        const b = indices[index + 1];
+        const c = indices[index + 2];
+        const normal = vectorAt(positions, b).sub(vectorAt(positions, a)).cross(vectorAt(positions, c).sub(vectorAt(positions, a)));
+        if (normal.x === 0 && normal.y === 0 && normal.z === 0) continue;
+        for (const vertexIndex of [a, b, c]) {
+          normals[vertexIndex * 3] += normal.x;
+          normals[vertexIndex * 3 + 1] += normal.y;
+          normals[vertexIndex * 3 + 2] += normal.z;
+        }
+      }
+      for (let index = 0; index < normals.length; index += 3) {
+        const normal = new Vector3(normals[index], normals[index + 1], normals[index + 2]);
+        if (normal.x === 0 && normal.y === 0 && normal.z === 0) normal.set(0, 0, 1);
+        else normal.normalize();
+        normals[index] = normal.x;
+        normals[index + 1] = normal.y;
+        normals[index + 2] = normal.z;
+      }
+    }
+    return { positions, normals, colors, indices };
   }
 
   private tessellateFace(face: StepEntity, fallbackColor: readonly [number, number, number]): FaceMesh {
@@ -470,10 +656,15 @@ class StepResolver {
     const origin = surface.nativeParameter(new Vector2(originValues[0] ?? 0, originValues[1] ?? 0));
     const direction = new Vector2(directionValues[0] ?? 0, directionValues[1] ?? 0)
       .multiplyScalar(sameSense ? 1 : -1);
-    const projected = sampled.map((point) => surface.project(point));
+    const axisTolerance = Math.max(Math.abs(direction.x), Math.abs(direction.y)) * 1e-8;
+    const fixedParameter = Math.abs(direction.y) <= axisTolerance
+      ? { axis: 'y' as const, value: origin.y, companion: origin.x }
+      : Math.abs(direction.x) <= axisTolerance
+        ? { axis: 'x' as const, value: origin.x, companion: origin.y }
+        : undefined;
+    const projected = sampled.map((point) => surface.project(point, fixedParameter));
     if (surface.periodU) projected.splice(0, projected.length, ...unwrapPeriodicLoop(projected, 'x', surface.periodU));
     if (surface.periodV) projected.splice(0, projected.length, ...unwrapPeriodicLoop(projected, 'y', surface.periodV));
-    const axisTolerance = Math.max(Math.abs(direction.x), Math.abs(direction.y)) * 1e-8;
     if (Math.abs(direction.y) <= axisTolerance) {
       for (const point of projected) point.y = origin.y;
     } else if (Math.abs(direction.x) <= axisTolerance) {
@@ -679,11 +870,14 @@ class StepResolver {
           const v = relative.dot(placement.z);
           return new Vector2(Math.atan2(relative.dot(placement.y), relative.dot(placement.x)), v);
         },
-        normalAt: (u) => placement.x
-          .clone()
-          .multiplyScalar(Math.cos(u) * cosine)
-          .addScaledVector(placement.y, Math.sin(u) * cosine)
-          .addScaledVector(placement.z, -sine),
+        normalAt: (u, v) => {
+          const orientation = Math.sign(radius + v * tangent) || 1;
+          return placement.x
+            .clone()
+            .multiplyScalar(Math.cos(u) * cosine * orientation)
+            .addScaledVector(placement.y, Math.sin(u) * cosine * orientation)
+            .addScaledVector(placement.z, -sine * orientation);
+        },
         nativeParameter: (point) => new Vector2(point.x, point.y * this.currentLengthScale),
       };
     }
@@ -732,18 +926,21 @@ class StepResolver {
             .addScaledVector(radial, majorRadius + minorRadius * Math.cos(v))
             .addScaledVector(placement.z, minorRadius * Math.sin(v));
         },
-        project: (point) => {
+        project: (point, fixedParameter) => {
           const relative = point.clone().sub(placement.origin);
           const x = relative.dot(placement.x);
           const y = relative.dot(placement.y);
           const z = relative.dot(placement.z);
-          return new Vector2(Math.atan2(y, x), Math.atan2(z, Math.hypot(x, y) - majorRadius));
+          return projectTorusLocal(x, y, z, majorRadius, minorRadius, fixedParameter);
         },
-        normalAt: (u, v) => placement.x
-          .clone()
-          .multiplyScalar(Math.cos(u) * Math.cos(v))
-          .addScaledVector(placement.y, Math.sin(u) * Math.cos(v))
-          .addScaledVector(placement.z, Math.sin(v)),
+        normalAt: (u, v) => {
+          const orientation = Math.sign(majorRadius + minorRadius * Math.cos(v)) || 1;
+          return placement.x
+            .clone()
+            .multiplyScalar(Math.cos(u) * Math.cos(v) * orientation)
+            .addScaledVector(placement.y, Math.sin(u) * Math.cos(v) * orientation)
+            .addScaledVector(placement.z, Math.sin(v) * orientation);
+        },
         nativeParameter: (point) => point,
       };
     }
@@ -1102,6 +1299,30 @@ class StepResolver {
 
   private numberList(value: StepValue | undefined): number[] {
     return Array.isArray(value) ? value.filter((item): item is number => typeof item === 'number') : [];
+  }
+
+  private integerList(value: StepValue | undefined, message: string): number[] {
+    if (!Array.isArray(value) || !value.every((item) => Number.isSafeInteger(item))) throw new Error(message);
+    return value as number[];
+  }
+
+  private integerGroups(value: StepValue | undefined, message: string): number[][] {
+    if (!Array.isArray(value)) throw new Error(message);
+    return value.map((group) => {
+      const values = this.integerList(group, message);
+      if (values.length < 3) throw new Error(message);
+      return values;
+    });
+  }
+
+  private vectorRows(value: StepValue | undefined, message: string): number[][] {
+    if (!Array.isArray(value)) throw new Error(message);
+    return value.map((row) => {
+      if (!Array.isArray(row) || row.length !== 3 || !row.every((item) => typeof item === 'number' && Number.isFinite(item))) {
+        throw new Error(message);
+      }
+      return row as number[];
+    });
   }
 }
 
@@ -1463,6 +1684,29 @@ export function rectangleCoordinates(
   coordinates[0] = minimum;
   coordinates[coordinates.length - 1] = maximum;
   return coordinates;
+}
+
+export function projectTorusLocal(
+  x: number,
+  y: number,
+  z: number,
+  majorRadius: number,
+  minorRadius: number,
+  fixedParameter?: { axis: 'x' | 'y'; value: number; companion?: number },
+): Vector2 {
+  if (fixedParameter?.axis === 'x') {
+    const radial = x * Math.cos(fixedParameter.value) + y * Math.sin(fixedParameter.value);
+    return new Vector2(fixedParameter.value, Math.atan2(z, radial - majorRadius));
+  }
+  if (fixedParameter?.axis === 'y') {
+    const radial = majorRadius + minorRadius * Math.cos(fixedParameter.value);
+    if (Math.abs(radial) < EPSILON && fixedParameter.companion !== undefined) {
+      return new Vector2(fixedParameter.companion, fixedParameter.value);
+    }
+    const angle = Math.atan2(y, x) - (radial < 0 ? Math.PI : 0);
+    return new Vector2(angle, fixedParameter.value);
+  }
+  return new Vector2(Math.atan2(y, x), Math.atan2(z, Math.hypot(x, y) - majorRadius));
 }
 
 function buildSphericalCap(
