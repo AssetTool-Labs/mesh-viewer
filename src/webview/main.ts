@@ -330,18 +330,34 @@ function setElementMode(mode: ElementMode): void {
     syncElementMesh();
     // Element work reads against wireframes — Blender edit-mode style. Switch
     // the UV overlay and the 3D wireframe overlay on for the user (through
-    // their checkboxes, so state stays single-sourced). Leaving the mode keeps
-    // them on — turning them back off is a deliberate act.
+    // their checkboxes, so state stays single-sourced). The UV overlay stays
+    // on afterwards; the 3D wireframe goes back off on exit *if we were the
+    // ones who switched it on* — a wireframe the user chose (before or during
+    // the mode) is theirs and stays.
     if (!toggleShowUV.checked && !toggleShowUV.disabled) {
       toggleShowUV.checked = true;
       toggleShowUV.dispatchEvent(new Event('change'));
     }
     if (!toggleWireframeOverlay.checked) {
+      wireframeAutoBusy = true;
       toggleWireframeOverlay.checked = true;
       toggleWireframeOverlay.dispatchEvent(new Event('change'));
+      wireframeAutoBusy = false;
+      wireframeAutoOn = true;
+    }
+  } else if (wireframeAutoOn) {
+    wireframeAutoOn = false;
+    if (toggleWireframeOverlay.checked) {
+      wireframeAutoBusy = true;
+      toggleWireframeOverlay.checked = false;
+      toggleWireframeOverlay.dispatchEvent(new Event('change'));
+      wireframeAutoBusy = false;
     }
   }
 }
+/** True while the wireframe overlay is on only for the element mode's sake. */
+let wireframeAutoOn = false;
+let wireframeAutoBusy = false;
 for (const b of elemModeBtns) {
   b.addEventListener('click', () => setElementMode(b.dataset.elem as ElementMode));
 }
@@ -745,7 +761,12 @@ function renderWeightLegend(mode: WeightMode): void {
   weightLegend.innerHTML = html;
   weightLegend.style.display = html ? '' : 'none';
 }
-toggleWireframeOverlay.addEventListener('change', () => { viewer.setWireframeOverlayVisible(toggleWireframeOverlay.checked); pushViewSettings(); });
+toggleWireframeOverlay.addEventListener('change', () => {
+  // A manual flip takes ownership: the element mode stops auto-reverting it.
+  if (!wireframeAutoBusy) wireframeAutoOn = false;
+  viewer.setWireframeOverlayVisible(toggleWireframeOverlay.checked);
+  pushViewSettings();
+});
 // Splat orientation is session-local, like the weight controls: it describes
 // the file being viewed rather than a viewport preference worth remembering.
 toggleSplatUpright.addEventListener('change', () => {
