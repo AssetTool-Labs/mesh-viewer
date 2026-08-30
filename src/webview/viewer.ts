@@ -2180,11 +2180,14 @@ export class Viewer {
   /**
    * Center the camera on a world-space box while keeping the current viewing
    * direction (unlike frameObject's canned angle) — used to localize an
-   * element selection without disorienting the user. Tiny boxes (a single
-   * vertex) are clamped to a fraction of the content size so F never zooms
-   * into a microscopic frustum.
+   * element selection without disorienting the user. When the selection's
+   * average outward normal says the current view is looking at its back
+   * side (where a depth-tested highlight would hide inside the mesh), the
+   * camera comes around to the front of the selection instead. Tiny boxes
+   * (a single vertex) are clamped to a fraction of the content size so F
+   * never zooms into a microscopic frustum.
    */
-  frameElementBox(box: THREE.Box3): void {
+  frameElementBox(box: THREE.Box3, outwardNormal?: THREE.Vector3): void {
     if (box.isEmpty() || !isFiniteBox(box)) return;
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
@@ -2195,6 +2198,13 @@ export class Viewer {
     const dir = this.camera.position.clone().sub(this.controls.target);
     if (dir.lengthSq() < 1e-12) dir.set(1, 0.7, 1);
     dir.normalize();
+    if (outwardNormal && outwardNormal.lengthSq() > 1e-10) {
+      const n = outwardNormal.clone().normalize();
+      if (dir.dot(n) < 0.15) {
+        // Slight tilt toward the current up avoids a dead-flat head-on view.
+        dir.copy(n).addScaledVector(this.camera.up, 0.25).normalize();
+      }
+    }
     this.camera.position.copy(center).addScaledVector(dir, dist * 1.6);
     this.camera.near = Math.max(0.001, maxDim / 1000);
     this.camera.far = Math.max(100, dist * 100);

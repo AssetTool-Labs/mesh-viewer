@@ -1191,19 +1191,26 @@ function retargetElementMesh(mesh: THREE.Mesh): boolean {
 
 // ---- F: localize the highlight in the other view ----
 
-/** World-space bounds of the selected (else hovered) elements. */
-function selectionBox3D(): THREE.Box3 | null {
+/** World-space bounds of the selected (else hovered) elements, plus their
+ *  average outward normal so framing can come around to the visible side. */
+function selectionBox3D(): { box: THREE.Box3; normal: THREE.Vector3 } | null {
   const st = elementSelection;
   if (st.mode === 'off' || !st.mesh || !st.topo) return null;
   const ids = st.selected.size ? st.selected : st.hovered !== null ? [st.hovered] : null;
   if (!ids) return null;
-  const pos = (st.mesh.geometry as THREE.BufferGeometry).getAttribute('position') as THREE.BufferAttribute;
+  const geom = st.mesh.geometry as THREE.BufferGeometry;
+  const pos = geom.getAttribute('position') as THREE.BufferAttribute;
+  const nrm = geom.getAttribute('normal') as THREE.BufferAttribute | undefined;
+  const normalMatrix = new THREE.Matrix3().getNormalMatrix(st.mesh.matrixWorld);
+  const normal = new THREE.Vector3();
+  const nv = new THREE.Vector3();
   const box = new THREE.Box3();
   const v = new THREE.Vector3();
   let any = false;
   const add = (i: number): void => {
     v.fromBufferAttribute(pos, i).applyMatrix4(st.mesh!.matrixWorld);
     box.expandByPoint(v);
+    if (nrm) normal.add(nv.fromBufferAttribute(nrm, i).applyMatrix3(normalMatrix));
     any = true;
   };
   for (const id of ids) {
@@ -1222,7 +1229,7 @@ function selectionBox3D(): THREE.Box3 | null {
       }
     }
   }
-  return any ? box : null;
+  return any ? { box, normal } : null;
 }
 
 /**
@@ -1235,15 +1242,15 @@ function frameElementViews(): void {
   const over3D = canvas.matches(':hover');
   if (!overUV || !over3D) {
     if (!over3D) {
-      const box = selectionBox3D();
-      if (box) viewer.frameElementBox(box);
+      const sel = selectionBox3D();
+      if (sel) viewer.frameElementBox(sel.box, sel.normal);
     }
     if (!overUV) uvView.frameElements();
   }
 }
 elemFrameBtn.addEventListener('click', () => {
-  const box = selectionBox3D();
-  if (box) viewer.frameElementBox(box);
+  const sel = selectionBox3D();
+  if (sel) viewer.frameElementBox(sel.box, sel.normal);
   uvView.frameElements();
 });
 
