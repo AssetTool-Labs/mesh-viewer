@@ -1,6 +1,6 @@
 # 3D Mesh Viewer
 
-A VS Code / Cursor extension that turns the editor into a fully featured **3D mesh viewer**. Open any supported 3D file (GLB, GLTF, FBX, OBJ, USD/USDZ, STL, PLY, DAE, 3MF, …) and you get an interactive Three.js viewport with a scene-hierarchy tree, per-object inspector, animation transport, drag/drop or button-based mesh import, and a rich file-info panel — all rendered inside a custom editor.
+A VS Code / Cursor extension that turns the editor into a fully featured **3D mesh viewer**. Open any supported 3D file (GLB, GLTF, FBX, OBJ, USD/USDZ, STEP, STL, PLY, DAE, 3MF, …) and you get an interactive Three.js viewport with a scene-hierarchy tree, per-object inspector, animation transport, drag/drop or button-based mesh import, and a rich file-info panel — all rendered inside a custom editor.
 
 It is similar in spirit to the popular `glb-viewer` extension but with first-class support for many more formats and a deeper inspection UI.
 
@@ -84,6 +84,7 @@ Bump the `version` in `package.json` (e.g. `0.1.0` → `0.1.1`), then re-run **s
 | Autodesk | `.fbx`, `.3ds` |
 | Pixar / Apple USD | `.usd`, `.usda`, `.usdc`, `.usdz` |
 | Stereolithography | `.stl` |
+| STEP CAD | `.step`, `.stp` |
 | Polygon File | `.ply` |
 | Khronos / KMZ | `.kmz` |
 | Collada | `.dae` |
@@ -97,6 +98,11 @@ Bump the `version` in `package.json` (e.g. `0.1.0` → `0.1.1`), then re-run **s
 `.ply` covers both worlds. The header decides: an export carrying 3DGS attributes
 (`f_dc_*`) or a PlayCanvas-compressed `chunk` element renders as Gaussian splats,
 anything else renders as a mesh or point cloud as before.
+
+STEP files are parsed and tessellated locally in a dedicated worker. The built-in
+viewer-focused importer handles common AP203/AP214/AP242 B-rep solids, assemblies,
+colors, units, analytic surfaces, and rational B-splines without uploading the file
+or bundling a general-purpose CAD kernel. Coordinates are normalized to millimetres.
 
 For multi-file formats (`.gltf` + `.bin` + textures, `.obj` + `.mtl` + textures), only files with reference-able extensions (`.bin`, `.mtl`, common image types) in the same directory are loaded automatically. Unrelated files (`.glb` / `.fbx` siblings, etc.) are ignored so opening one model never drags 14 MB of unrelated bytes through the webview channel.
 
@@ -125,6 +131,7 @@ loader is fixed.
 | FBX | Some 2013-era exports fail while building animation curves; files whose NUL bytes have been mangled in transit are rejected as an unknown format |
 | Collada `.dae` | `<polygons>` meshes can collapse to a single triangle, `<tristrips>` are not read, and some skinned+morphed files fail to parse |
 | 3MF | The volumetric extension is unsupported; beam-lattice models parse to no geometry |
+| STEP | Geometry healing, PMI, and uncommon surface/curve entities are not supported; affected faces are reported as skipped instead of silently fabricated |
 | VRML `.wrl` | Multi-line strings and some real-world files fail in the lexer |
 | USD | Composition (`references`, `payload`, `subLayer`) is not followed, so assets that rely on it load empty |
 
@@ -132,7 +139,7 @@ loader is fixed.
 
 ## Features
 
-- **Multi-format rendering** — every loader from Three.js' `examples/jsm/loaders` is wired in, lazy-imported on demand.
+- **Multi-format rendering** — Three.js example loaders are lazy-imported on demand, with a small built-in worker for STEP tessellation.
 - **Add more meshes to a scene** — click `+ Import Mesh…` in the sidebar, *or* drag-and-drop more files onto the viewport (see the note about *Drop into Editor* below). Each import becomes its own root in the hierarchy, with its animations listed under the file's name.
 - **Scene hierarchy panel** — collapsible tree with type icons (mesh / group / bone / light / camera / points / line segments), search filter, expand-all / collapse-all, and an eye toggle on every row to hide or unhide any subtree.
 - **Selection inspector** — click a node in the tree *or* directly in the viewport to see name, type, transform, vertex / triangle / index counts, attribute list, material list, bone count, blendshape count, and bounding box.
@@ -148,7 +155,7 @@ loader is fixed.
 - **Pose joints** — select a bone in the hierarchy or click a joint on the skeleton overlay to attach a local-space rotation gizmo; the inspector also exposes editable Euler degrees (in that bone's existing rotation order). Child bones follow (FK): rotating an upper-leg joint swings the lower leg with it. Posing pauses the clip so the mixer does not overwrite the edit. Play or scrub still drives the clip and overwrites the pose. **Reset Pose** restores the bind pose snapshotted at load. `R` rotates the selected joint around the view axis by sweeping the mouse around it (Blender's default R); `R` again switches to trackball (mouse X/Y tumble). `X`/`Y`/`Z` lock a local axis; LMB/Enter confirms, Esc cancels. `Cmd/Ctrl+Z` / `Cmd/Ctrl+Shift+Z` undo and redo pose edits. Translate, scale, IK, and export are out of scope.
 - **View helpers** — grid, axes, bounding box, auto-rotate, IBL studio/neutral environment, background color picker.
 - **Snapshot** — the camera button in the shading HUD (or the *3D Mesh Viewer: Save Snapshot as PNG* command) exports the current view to a PNG via a Save dialog. The scene is captured as shown — grid and axes are included if visible, the corner nav gizmo never is — so toggle overlays off first for a clean shot, or set the background color you want. **Hold Alt/Option** while clicking (or run *Save Snapshot as PNG (Transparent Background)*) to export with a transparent background instead of the scene background.
-- **Measurement** — a map-style **scale bar** in the bottom-left shows the current world scale as you zoom. The **ruler** button in the shading HUD enters measure mode: click two points on the model to get the straight-line distance, drawn as an always-on-top segment with a label at its midpoint; a third click starts a new segment, and `Esc` (or clicking the button again) exits. Values are in the asset's own coordinate units — glTF/GLB define these as **metres** so a `m` suffix is shown; other formats are unitless (the number is the raw distance). Per-node and whole-scene bounding-box dimensions also appear in the Selection inspector and the Info tab.
+- **Measurement** — a map-style **scale bar** in the bottom-left shows the current world scale as you zoom. The **ruler** button in the shading HUD enters measure mode: click two points on the model to get the straight-line distance, drawn as an always-on-top segment with a label at its midpoint; a third click starts a new segment, and `Esc` (or clicking the button again) exits. STEP coordinates are normalized to millimetres, glTF/GLB coordinates are metres, and other formats are unitless. Per-node and whole-scene bounding-box dimensions also appear in the Selection inspector and the Info tab.
 - **Frame-to-fit** — `Reset Camera` for the whole scene, `Frame Selection` (or double-click a tree row) for a single node.
 - **Link cameras** — when two or more viewers are open (e.g. a git diff, or two files side by side), a chain-link toggle appears in the HUD strip. Turn it on and all open viewers move together. Plain click uses *aligned* mode (they converge to one shared view — ideal for comparing versions of the same asset); **Alt/Option-click** uses *offset* mode (each viewer keeps its own framing and only the orbit motion is mirrored — better for comparing differently-placed models).
 - **HUD overlay** — live FPS, draw calls, triangle count, geometry/texture totals.

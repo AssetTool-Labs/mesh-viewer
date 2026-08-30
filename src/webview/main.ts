@@ -882,10 +882,12 @@ function updateMeasureLabel(): void {
   measureLabel.hidden = false;
 }
 
-/** glTF/GLB coordinates are metres per spec; other formats are unitless. */
+/** glTF/GLB coordinates are metres; STEP geometry is normalized to millimetres. */
 function lengthUnit(): string {
   const e = primaryFile?.ext?.toLowerCase();
-  return e === 'glb' || e === 'gltf' ? ' m' : '';
+  if (e === 'glb' || e === 'gltf') return ' m';
+  if (e === 'step' || e === 'stp') return ' mm';
+  return '';
 }
 
 /** Format a world length with adaptive precision; the unit (if any) is appended by the caller. */

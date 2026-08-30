@@ -5,12 +5,14 @@
 
 import * as THREE from 'three';
 import { LoadingManager } from 'three';
+import type { StepWorkerRequest, StepWorkerResponse } from './step/worker';
 
 /**
  * The viewer's WebGLRenderer, shared so KTX2Loader.detectSupport() can query the
  * GPU's supported compressed-texture formats. Set once when the viewer boots.
  */
 let sharedRenderer: THREE.WebGLRenderer | null = null;
+let stepWorkerSourcePromise: Promise<string> | null = null;
 export function setViewerRenderer(renderer: THREE.WebGLRenderer): void {
   sharedRenderer = renderer;
 }
@@ -138,6 +140,8 @@ const LOADER_NAMES: Record<string, string> = {
   obj: 'OBJLoader',
   fbx: 'FBXLoader',
   stl: 'STLLoader',
+  step: 'the built-in STEP loader',
+  stp: 'the built-in STEP loader',
   ply: 'PLYLoader',
   dae: 'ColladaLoader',
   '3ds': 'TDSLoader',
@@ -208,6 +212,9 @@ async function dispatch(
       return loadFBX(data as ArrayBuffer, auxFileUris);
     case 'stl':
       return loadSTL(data as ArrayBuffer, fileName);
+    case 'step':
+    case 'stp':
+      return loadSTEP(data as ArrayBuffer, fileName);
     case 'ply':
       // .ply is claimed by both worlds: a triangle mesh / point cloud and the
       // original 3DGS export format. Only the header tells them apart.
@@ -680,6 +687,93 @@ async function loadSTL(buf: ArrayBuffer, fileName: string): Promise<LoadedAsset>
   root.name = 'STL';
   root.add(mesh);
   return emptyAsset(root);
+}
+
+// ---------- STEP ----------
+
+async function loadSTEP(buf: ArrayBuffer, fileName: string): Promise<LoadedAsset> {
+  const maximumBytes = 128 * 1024 * 1024;
+  if (buf.byteLength > maximumBytes) {
+    throw new ViewerError(`${fileName} is larger than the 128 MB STEP safety limit.`);
+  }
+  const workerUri = (globalThis as { __stepWorkerUri?: string }).__stepWorkerUri;
+  if (!workerUri) throw new Error('The STEP worker is not available in this build.');
+  stepWorkerSourcePromise ??= fetch(workerUri).then((response) => {
+    if (!response.ok) throw new Error(`Could not load the STEP worker (${response.status}).`);
+    return response.text();
+  });
+  const workerSource = await stepWorkerSourcePromise;
+  const blobUri = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
+
+  const result = await new Promise<Extract<StepWorkerResponse, { ok: true }>['result']>((resolve, reject) => {
+    let worker: Worker | null = null;
+    let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      if (timeout !== undefined) globalThis.clearTimeout(timeout);
+      worker?.terminate();
+      URL.revokeObjectURL(blobUri);
+    };
+    try {
+      worker = new Worker(blobUri);
+      timeout = globalThis.setTimeout(() => {
+        finish();
+        reject(new Error('STEP tessellation exceeded the two-minute time limit.'));
+      }, 120_000);
+      worker.onerror = (event) => {
+        finish();
+        reject(new Error(event.message || 'The STEP worker stopped unexpectedly.'));
+      };
+      worker.onmessage = (event: MessageEvent<StepWorkerResponse>) => {
+        finish();
+        if (event.data.ok) resolve(event.data.result);
+        else reject(new Error(event.data.message));
+      };
+      const source = buf.slice(0);
+      const request: StepWorkerRequest = { source };
+      worker.postMessage(request, [source]);
+    } catch (error) {
+      finish();
+      reject(error);
+    }
+  });
+
+  const root = new THREE.Group();
+  root.name = result.name || fileName.replace(/\.[^.]+$/, '');
+  for (const meshData of result.meshes) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(meshData.positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(meshData.normals, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(meshData.colors, 3));
+    geometry.setIndex(new THREE.BufferAttribute(meshData.indices, 1));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      vertexColors: true,
+      roughness: 0.65,
+      metalness: 0.05,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = meshData.name;
+    root.add(mesh);
+  }
+
+  if (result.warnings.length > 0) {
+    console.warn(`[3DViewer] ${fileName} loaded with STEP warnings:`, result.warnings);
+  }
+  return {
+    ...emptyAsset(root),
+    metadata: {
+      Format: 'STEP',
+      Units: result.unit,
+      Faces: String(result.faceCount),
+      ...(result.skippedFaceCount > 0 ? { 'Skipped faces': String(result.skippedFaceCount) } : {}),
+      ...(result.warnings.length > 0 ? { Warnings: String(result.warnings.length) } : {}),
+    },
+  };
 }
 
 // ---------- PLY ----------

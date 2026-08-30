@@ -10,6 +10,8 @@ test_data/
 *.fbx
 *.obj
 *.stl
+*.step
+*.stp
 *.ply
 *.dae
 *.3ds
