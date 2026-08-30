@@ -882,11 +882,14 @@ function updateMeasureLabel(): void {
   measureLabel.hidden = false;
 }
 
-/** glTF/GLB coordinates are metres; STEP geometry is normalized to millimetres. */
+/** glTF/GLB coordinates are metres; STEP uses its resolved loader metadata. */
 function lengthUnit(): string {
   const e = primaryFile?.ext?.toLowerCase();
   if (e === 'glb' || e === 'gltf') return ' m';
-  if (e === 'step' || e === 'stp') return ' mm';
+  if (e === 'step' || e === 'stp') {
+    const units = viewer.entries[0]?.asset.metadata.Units;
+    return units === 'model units' ? ' model units' : units ? ' mm' : '';
+  }
   return '';
 }
 

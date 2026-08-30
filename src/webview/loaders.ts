@@ -6,13 +6,13 @@
 import * as THREE from 'three';
 import { LoadingManager } from 'three';
 import type { StepWorkerRequest, StepWorkerResponse } from './step/worker';
+import { fetchStepWorkerSource } from './step/workerSource';
 
 /**
  * The viewer's WebGLRenderer, shared so KTX2Loader.detectSupport() can query the
  * GPU's supported compressed-texture formats. Set once when the viewer boots.
  */
 let sharedRenderer: THREE.WebGLRenderer | null = null;
-let stepWorkerSourcePromise: Promise<string> | null = null;
 export function setViewerRenderer(renderer: THREE.WebGLRenderer): void {
   sharedRenderer = renderer;
 }
@@ -698,11 +698,7 @@ async function loadSTEP(buf: ArrayBuffer, fileName: string): Promise<LoadedAsset
   }
   const workerUri = (globalThis as { __stepWorkerUri?: string }).__stepWorkerUri;
   if (!workerUri) throw new Error('The STEP worker is not available in this build.');
-  stepWorkerSourcePromise ??= fetch(workerUri).then((response) => {
-    if (!response.ok) throw new Error(`Could not load the STEP worker (${response.status}).`);
-    return response.text();
-  });
-  const workerSource = await stepWorkerSourcePromise;
+  const workerSource = await fetchStepWorkerSource(workerUri);
   const blobUri = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
 
   const result = await new Promise<Extract<StepWorkerResponse, { ok: true }>['result']>((resolve, reject) => {
@@ -771,6 +767,7 @@ async function loadSTEP(buf: ArrayBuffer, fileName: string): Promise<LoadedAsset
       Units: result.unit,
       Faces: String(result.faceCount),
       ...(result.skippedFaceCount > 0 ? { 'Skipped faces': String(result.skippedFaceCount) } : {}),
+      ...(result.skippedBodyCount > 0 ? { 'Skipped bodies': String(result.skippedBodyCount) } : {}),
       ...(result.warnings.length > 0 ? { Warnings: String(result.warnings.length) } : {}),
     },
   };

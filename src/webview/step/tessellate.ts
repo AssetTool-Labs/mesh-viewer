@@ -24,6 +24,7 @@ export interface StepTessellationResult {
   readonly meshes: StepMeshData[];
   readonly faceCount: number;
   readonly skippedFaceCount: number;
+  readonly skippedBodyCount: number;
   readonly unit: string;
   readonly warnings: string[];
 }
@@ -61,6 +62,7 @@ interface RepresentationGeometry {
   readonly meshes: StepMeshData[];
   readonly faceCount: number;
   readonly skippedFaceCount: number;
+  readonly skippedBodyCount: number;
 }
 
 interface AssemblyEdge {
@@ -76,6 +78,8 @@ interface CurveEvaluator {
 const DEFAULT_COLOR: readonly [number, number, number] = [0.71, 0.71, 0.71];
 const CURVE_SEGMENTS = 32;
 const EPSILON = 1e-8;
+const MAX_GRID_AXIS_COORDINATES = 512;
+const MAX_GRID_POINTS = 100_000;
 
 class StepResolver {
   private readonly warnings = new Set<string>();
@@ -96,10 +100,15 @@ class StepResolver {
     const meshes: StepMeshData[] = [];
     let faceCount = 0;
     let skippedFaceCount = 0;
+    let skippedBodyCount = 0;
 
     const representations = new Map<number, StepEntity>();
-    for (const type of ['SHAPE_REPRESENTATION', 'ADVANCED_BREP_SHAPE_REPRESENTATION']) {
-      for (const representation of this.document.byType.get(type) ?? []) representations.set(representation.id, representation);
+    for (const entity of this.document.entities.values()) {
+      if (entity.type.endsWith('SHAPE_REPRESENTATION')) representations.set(entity.id, entity);
+    }
+    for (const relation of this.document.byType.get('SHAPE_DEFINITION_REPRESENTATION') ?? []) {
+      const representation = this.refEntity(relation.args[1]);
+      if (representation) representations.set(representation.id, representation);
     }
     const names = this.representationNames();
     const children = new Map<number, AssemblyEdge[]>();
@@ -111,6 +120,8 @@ class StepResolver {
       const parent = relationArgs && this.refEntity(relationArgs[3]);
       const transformation = transformArgs && this.refEntity(transformArgs[0]);
       if (!child || !parent || !transformation) continue;
+      representations.set(child.id, child);
+      representations.set(parent.id, parent);
       const childScale = this.resolveLengthUnit(child).scaleToMillimetres;
       const parentScale = this.resolveLengthUnit(parent).scaleToMillimetres;
       let transform: Matrix4 | undefined;
@@ -140,8 +151,27 @@ class StepResolver {
       const builtMeshes: StepMeshData[] = [];
       let builtFaceCount = 0;
       let builtSkippedCount = 0;
-      for (const solid of this.refEntities(representation.args[1]).filter((item) => item.type === 'MANIFOLD_SOLID_BREP')) {
-        const shell = this.refEntity(solid.args[1]);
+      let builtSkippedBodyCount = 0;
+      const representationArgs = entityArgs(representation, 'REPRESENTATION') ?? representation.args;
+      for (const item of this.refEntities(representationArgs[1])) {
+        if (isUnsupportedGeometryBody(item)) {
+          builtSkippedBodyCount++;
+          this.warnings.add(`Representation #${representation.id}: geometry body ${item.type} #${item.id} is not supported and was skipped.`);
+          continue;
+        }
+        const solidArgs = entityArgs(item, 'MANIFOLD_SOLID_BREP');
+        if (!solidArgs) {
+          continue;
+        }
+        const solid = item;
+        const shell = solidArgs
+          .map((value) => this.refEntity(value))
+          .find((entity) => entity?.type === 'CLOSED_SHELL');
+        if (!shell) {
+          builtSkippedBodyCount++;
+          this.warnings.add(`Representation #${representation.id}: solid #${solid.id} has no supported closed shell and was skipped.`);
+          continue;
+        }
         const faces = this.refEntities(shell?.args[1]);
         const built = this.tessellateFaces(
           faces,
@@ -152,7 +182,12 @@ class StepResolver {
         builtSkippedCount += built.skipped;
         if (built.mesh.positions.length > 0) builtMeshes.push(built.mesh);
       }
-      const geometry = { meshes: builtMeshes, faceCount: builtFaceCount, skippedFaceCount: builtSkippedCount };
+      const geometry = {
+        meshes: builtMeshes,
+        faceCount: builtFaceCount,
+        skippedFaceCount: builtSkippedCount,
+        skippedBodyCount: builtSkippedBodyCount,
+      };
       this.currentLengthScale = previousScale;
       cache.set(representation.id, geometry);
       return geometry;
@@ -170,6 +205,7 @@ class StepResolver {
       for (const mesh of built.meshes) meshes.push(transformMesh(mesh, world, names.get(representationId)));
       faceCount += built.faceCount;
       skippedFaceCount += built.skippedFaceCount;
+      skippedBodyCount += built.skippedBodyCount;
       for (const edge of children.get(representationId) ?? []) {
         visit(edge.childId, world.clone().multiply(edge.transform), nextPath);
       }
@@ -197,7 +233,12 @@ class StepResolver {
       meshes,
       faceCount,
       skippedFaceCount,
-      unit: this.sourceUnit === 'mm' ? 'mm' : `${this.sourceUnit} (normalized to mm)`,
+      skippedBodyCount,
+      unit: this.sourceUnit === 'model units'
+        ? this.sourceUnit
+        : this.sourceUnit === 'mm'
+          ? 'mm'
+          : `${this.sourceUnit} (normalized to mm)`,
       warnings: [...this.warnings],
     };
   }
@@ -213,10 +254,10 @@ class StepResolver {
       try {
         const faceMesh = this.tessellateFace(face, fallbackColor);
         const base = mesh.positions.length / 3;
-        mesh.positions.push(...faceMesh.positions);
-        mesh.normals.push(...faceMesh.normals);
-        mesh.colors.push(...faceMesh.colors);
-        mesh.indices.push(...faceMesh.indices.map((index) => index + base));
+        for (const value of faceMesh.positions) mesh.positions.push(value);
+        for (const value of faceMesh.normals) mesh.normals.push(value);
+        for (const value of faceMesh.colors) mesh.colors.push(value);
+        for (const index of faceMesh.indices) mesh.indices.push(index + base);
       } catch (error) {
         skipped++;
         const detail = error instanceof Error ? error.message : String(error);
@@ -251,8 +292,8 @@ class StepResolver {
         points = points.reverse();
         uv = uv.reverse();
       }
-      if (surface.periodU && fullPeriodAxis !== 'x') uv = unwrapPeriodicLoop(uv, 'x', surface.periodU);
-      if (surface.periodV && fullPeriodAxis !== 'y') uv = unwrapPeriodicLoop(uv, 'y', surface.periodV);
+      if (surface.periodU) uv = unwrapPeriodicLoop(uv, 'x', surface.periodU);
+      if (surface.periodV) uv = unwrapPeriodicLoop(uv, 'y', surface.periodV);
       return { points, uv, area: signedArea(uv), fullPeriodAxis };
     });
 
@@ -489,6 +530,7 @@ class StepResolver {
       const radiusY = curve.type === 'ELLIPSE'
         ? this.number(curve.args[3], `Ellipse #${curve.id} has no minor radius.`) * this.currentLengthScale
         : radiusX;
+      if (radiusX <= 0 || radiusY <= 0) throw new Error(`Curve #${curve.id} must have positive radii.`);
       const angleAt = (point: Vector3): number => {
         const relative = point.clone().sub(placement.origin);
         return Math.atan2(relative.dot(placement.y) / radiusY, relative.dot(placement.x) / radiusX);
@@ -1063,6 +1105,33 @@ class StepResolver {
   }
 }
 
+function isUnsupportedGeometryBody(entity: StepEntity): boolean {
+  const types = new Set([entity.type, ...(entity.components?.keys() ?? [])]);
+  const csgPrimitives = new Set([
+    'BLOCK',
+    'RECTANGULAR_PYRAMID',
+    'RIGHT_ANGULAR_WEDGE',
+    'RIGHT_CIRCULAR_CONE',
+    'RIGHT_CIRCULAR_CYLINDER',
+    'SPHERE',
+    'TORUS',
+  ]);
+  return [...types].some((type) =>
+    type !== 'MANIFOLD_SOLID_BREP'
+    && (type === 'GEOMETRIC_SET'
+    || type === 'GEOMETRIC_CURVE_SET'
+    || type === 'BOOLEAN_RESULT'
+    || type === 'BOOLEAN_CLIPPING_RESULT'
+    || type === 'BREP_WITH_VOIDS'
+    || type.endsWith('_BREP')
+    || type.endsWith('_SOLID')
+    || type.endsWith('_SURFACE_MODEL')
+    || type.endsWith('_WIREFRAME_MODEL')
+    || type.startsWith('TESSELLATED_')
+    || csgPrimitives.has(type)),
+  );
+}
+
 export function tessellateStep(source: string): StepTessellationResult {
   return new StepResolver(parsePart21(source)).tessellate();
 }
@@ -1353,6 +1422,11 @@ export function buildSurfaceRectangle(
 
   const coordinatesU = rectangleCoordinates(contour, 'x', minimum.x, minimum.x + spanU, toleranceU);
   const coordinatesV = rectangleCoordinates(contour, 'y', minimum.y, minimum.y + spanV, toleranceV);
+  if (coordinatesU.length > MAX_GRID_AXIS_COORDINATES
+    || coordinatesV.length > MAX_GRID_AXIS_COORDINATES
+    || coordinatesU.length * coordinatesV.length > MAX_GRID_POINTS) {
+    return undefined;
+  }
   const points: Vector2[] = [];
   for (const v of coordinatesV) {
     for (const u of coordinatesU) {

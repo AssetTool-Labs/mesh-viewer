@@ -13,6 +13,7 @@ const fixtures = [
   ['step-assembly-ap214.stp', '038be659c54b16c9f3da8d7b2da7b63e3fd8879d3abe5b7826108336a7c0bae9', 'https://raw.githubusercontent.com/kovacsv/occt-import-js/0.0.23/test/testfiles/cax-if/as1-oc-214.stp'],
   ['step-led-5mm.step', 'b242fbdb070c8e84e874f9be0d1a46ce782e4c64e864db956f1e78f6c82e53bb', 'https://raw.githubusercontent.com/FreeCAD/FreeCAD-library/master/Electronics%20Parts/LEDs/led-5mm.step'],
   ['step-resistor.step', '1d21c579b7043a4e80b8c08905174146f1060d9c88d54c71b71101c9e7d9e6fa', 'https://raw.githubusercontent.com/FreeCAD/FreeCAD-library/master/Electronics%20Parts/Resistors/res-1_4w-1K.step'],
+  ['step-nema17-motor.step', '7a192833722ef5216bf7916c97870b6d4677db237143e3275305d5e846cc0521', 'https://raw.githubusercontent.com/FreeCAD/FreeCAD-library/master/Electronics%20Parts/Motors/Stepper/NEMA/Old/NEMA-17_Stepper_Motor_40mm.step'],
 ];
 
 function hash(content) {

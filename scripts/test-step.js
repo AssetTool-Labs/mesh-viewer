@@ -38,6 +38,13 @@ const fixtures = [
     bounds: [[-5.25, -1.14692, -4], [5.25, 1.14774, 1.14692]],
     tolerance: 0.05,
   },
+  {
+    file: 'step-nema17-motor.step',
+    faces: 55,
+    meshes: 1,
+    bounds: [[-21.15, -21.15, 0], [21.15, 21.15, 60.1]],
+    tolerance: 0.05,
+  },
 ];
 
 for (const fixture of fixtures) {
@@ -64,6 +71,28 @@ const {
   tessellateStep,
   validateStepSpline,
 } = compiled.exports;
+const textBuilt = esbuild.buildSync({
+  entryPoints: [path.join(root, 'src/webview/textEncoding.ts')],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  write: false,
+});
+const textCompiled = { exports: {} };
+new Function('module', 'exports', 'require', textBuilt.outputFiles[0].text)(textCompiled, textCompiled.exports, require);
+const workerSourceBuilt = esbuild.buildSync({
+  entryPoints: [path.join(root, 'src/webview/step/workerSource.ts')],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  write: false,
+});
+const workerSourceCompiled = { exports: {} };
+new Function('module', 'exports', 'require', workerSourceBuilt.outputFiles[0].text)(
+  workerSourceCompiled,
+  workerSourceCompiled.exports,
+  require,
+);
 assert.throws(() => tessellateStep(''), /Not an ISO-10303-21 STEP file/);
 assert.throws(() => tessellateStep('ISO-10303-21; HEADER; ENDSEC; DATA; ENDSEC; END-ISO-10303-21;'), /contains no entities/);
 assert.throws(() => expandStepKnots([65], [0]), /Invalid B-spline knot multiplicity/);
@@ -80,6 +109,23 @@ assert.deepEqual(
   ),
   [0, 0.1, 0.4, 1],
   'structured grids preserve nonuniform source coordinates',
+);
+const denseRectangle = Array.from({ length: 513 }, (_, index) => new THREE.Vector2(index / 512, 0))
+  .concat([new THREE.Vector2(1, 1), new THREE.Vector2(0, 1)]);
+assert.equal(
+  buildSurfaceRectangle({ type: 'CYLINDRICAL_SURFACE', periodU: Math.PI * 2 }, denseRectangle, [], undefined),
+  undefined,
+  'structured grids reject excessive coordinate counts',
+);
+const productCoordinates = Array.from({ length: 317 }, (_, index) => index / 316);
+const denseProductRectangle = productCoordinates.map((x) => new THREE.Vector2(x, 0))
+  .concat(productCoordinates.slice(1).map((y) => new THREE.Vector2(1, y)))
+  .concat(productCoordinates.slice(0, -1).reverse().map((x) => new THREE.Vector2(x, 1)))
+  .concat(productCoordinates.slice(1, -1).reverse().map((y) => new THREE.Vector2(0, y)));
+assert.equal(
+  buildSurfaceRectangle({ type: 'CYLINDRICAL_SURFACE', periodU: Math.PI * 2 }, denseProductRectangle, [], undefined),
+  undefined,
+  'structured grids reject excessive point products',
 );
 const nearFullAngle = Math.PI * 1.95;
 const nearFullCylinder = buildSurfaceRectangle(
@@ -102,6 +148,12 @@ assert.equal(
 
 const binaryDocument = parsePart21('ISO-10303-21; DATA; #1=PROPERTY_DEFINITION(\'binary\',"0aFF",$); ENDSEC; END-ISO-10303-21;');
 assert.deepEqual(binaryDocument.entities.get(1).args[1], { kind: 'binary', value: '0AFF' });
+const latin1Bytes = Uint8Array.from([
+  ...Buffer.from("ISO-10303-21; DATA; #1=PRODUCT('Pi"),
+  0xe8,
+  ...Buffer.from("ce','','',()); ENDSEC; END-ISO-10303-21;"),
+]);
+assert.equal(parsePart21(textCompiled.exports.decodeText(latin1Bytes.buffer)).entities.get(1).type, 'PRODUCT');
 
 const trimmedSemicircle = `ISO-10303-21;
 DATA;
@@ -132,10 +184,44 @@ DATA;
 ENDSEC;
 END-ISO-10303-21;`;
 const trimmedResult = tessellateStep(trimmedSemicircle);
+assert.equal(trimmedResult.unit, 'model units', 'missing STEP length units remain labeled as model units');
 const trimmedPositions = Array.from(trimmedResult.meshes[0].positions);
 const trimmedY = trimmedPositions.filter((_, index) => index % 3 === 1);
 assert.ok(Math.min(...trimmedY) < -0.99, 'trimmed curve follows reversed basis direction');
 assert.ok(Math.max(...trimmedY) < 0.01, 'trimmed curve does not use the opposite semicircle');
+assert.throws(
+  () => tessellateStep(trimmedSemicircle.replace("#9=CIRCLE('',#8,1.);", "#9=CIRCLE('',#8,0.);")),
+  /positive radii/,
+  'zero-radius circles fail cleanly',
+);
+const alternateRepresentation = tessellateStep(
+  trimmedSemicircle.replace('ADVANCED_BREP_SHAPE_REPRESENTATION', 'MANIFOLD_SURFACE_SHAPE_REPRESENTATION'),
+);
+assert.equal(alternateRepresentation.meshes.length, 1, 'shape-representation subtypes are traversed');
+const complexManifold = tessellateStep(trimmedSemicircle
+  .replace("#22=MANIFOLD_SOLID_BREP('',#21);", "#22=(MANIFOLD_SOLID_BREP(#21) REPRESENTATION_ITEM(''));"));
+assert.equal(complexManifold.meshes.length, 1, 'complex manifold B-reps resolve their closed shell');
+const mixedBody = tessellateStep(trimmedSemicircle
+  .replace("#24=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#22),#23);", "#24=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#22,#25),#23);\n#25=FACETED_BREP('',#21);"));
+assert.equal(mixedBody.meshes.length, 1, 'supported bodies remain visible in mixed representations');
+assert.equal(mixedBody.skippedBodyCount, 1, 'unsupported bodies are reported');
+assert.ok(mixedBody.warnings.some((warning) => warning.includes('FACETED_BREP')), 'unsupported body warning names its type');
+const surfaceModelBody = tessellateStep(trimmedSemicircle
+  .replace("#24=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#22),#23);", "#24=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#22,#25),#23);\n#25=FACE_BASED_SURFACE_MODEL('',());"));
+assert.equal(surfaceModelBody.skippedBodyCount, 1, 'unsupported surface-model bodies are reported');
+for (const body of [
+  "BREP_WITH_VOIDS('',#21,())",
+  "CSG_SOLID('',#21)",
+  "EXTRUDED_AREA_SOLID('',#21,#8,1.)",
+]) {
+  const result = tessellateStep(trimmedSemicircle
+    .replace("#24=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#22),#23);", `#24=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#22,#25),#23);\n#25=${body};`));
+  assert.equal(result.skippedBodyCount, 1, `${body.split('(')[0]} bodies are reported`);
+}
+const complexVoids = tessellateStep(trimmedSemicircle
+  .replace("#24=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#22),#23);", "#24=ADVANCED_BREP_SHAPE_REPRESENTATION('',(#22,#25),#23);")
+  .replace('ENDSEC;', "#25=(BREP_WITH_VOIDS(#21,()) MANIFOLD_SOLID_BREP(#21) REPRESENTATION_ITEM(''));\nENDSEC;"));
+assert.equal(complexVoids.skippedBodyCount, 1, 'complex B-reps with voids are reported before manifold handling');
 
 const assemblySource = fs.readFileSync(path.join(root, 'test_data', 'step-assembly-ap214.stp'), 'utf8');
 const mixedUnitSource = assemblySource.replace(
@@ -243,6 +329,32 @@ for (const z of [6.25, 7, 7.5, 8]) {
   }
 }
 
+const nema = tessellateStep(fs.readFileSync(path.join(root, 'test_data', 'step-nema17-motor.step'), 'utf8'));
+const nemaGeometry = new THREE.BufferGeometry();
+nemaGeometry.setAttribute('position', new THREE.BufferAttribute(nema.meshes[0].positions, 3));
+nemaGeometry.setIndex(new THREE.BufferAttribute(nema.meshes[0].indices, 1));
+const nemaMesh = new THREE.Mesh(nemaGeometry, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+const nemaRaycaster = new THREE.Raycaster();
+for (const z of [42, 50]) {
+  for (let index = 0; index < 72; index++) {
+    const angle = (index + 0.5) * Math.PI * 2 / 72;
+    nemaRaycaster.set(
+      new THREE.Vector3(6 * Math.cos(angle), 6 * Math.sin(angle), z),
+      new THREE.Vector3(-Math.cos(angle), -Math.sin(angle), 0),
+    );
+    const shaftHit = nemaRaycaster.intersectObject(nemaMesh, false)
+      .find((hit) => hit.point.x ** 2 + hit.point.y ** 2 < 10);
+    assert.ok(shaftHit, `NEMA shaft remains continuous at z=${z}`);
+    if (z === 50) {
+      const expectedRadius = Math.cos(angle) >= -0.8 ? 2.5 : 2 / -Math.cos(angle);
+      assert.ok(
+        Math.abs(Math.hypot(shaftHit.point.x, shaftHit.point.y) - expectedRadius) <= 0.15,
+        'NEMA upper shaft retains its D-cut profile',
+      );
+    }
+  }
+}
+
 const resistor = tessellateStep(fs.readFileSync(path.join(root, 'test_data', 'step-resistor.step'), 'utf8'));
 const resistorMeshes = resistor.meshes.map((meshData) => {
   const geometry = new THREE.BufferGeometry();
@@ -276,4 +388,23 @@ for (let index = 0; index < pinPositions.length; index += 3) {
   assert.ok(z >= -1.001 || Math.abs(x) >= 4.7, 'Pin elbows stay within their trimmed quarter-torus envelope');
 }
 
-console.log(`STEP regression passed (${fixtures.length} files).`);
+async function testWorkerSourceRetry() {
+  let attempts = 0;
+  const fetcher = async () => {
+    attempts++;
+    return attempts === 1
+      ? { ok: false, status: 503 }
+      : { ok: true, status: 200, text: async () => 'worker source' };
+  };
+  await assert.rejects(() => workerSourceCompiled.exports.fetchStepWorkerSource('worker.js', fetcher), /503/);
+  assert.equal(await workerSourceCompiled.exports.fetchStepWorkerSource('worker.js', fetcher), 'worker source');
+  assert.equal(attempts, 2, 'failed STEP worker source fetch is retried');
+}
+
+testWorkerSourceRetry().then(
+  () => console.log(`STEP regression passed (${fixtures.length} files).`),
+  (error) => {
+    console.error(error);
+    process.exitCode = 1;
+  },
+);

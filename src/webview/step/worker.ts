@@ -1,4 +1,5 @@
 import { tessellateStep, type StepTessellationResult } from './tessellate';
+import { decodeText } from '../textEncoding';
 
 export interface StepWorkerRequest {
   readonly source: ArrayBuffer;
@@ -15,7 +16,7 @@ const worker = self as unknown as {
 
 worker.onmessage = (event: MessageEvent<StepWorkerRequest>) => {
   try {
-    const source = new TextDecoder('utf-8', { fatal: true }).decode(event.data.source);
+    const source = decodeText(event.data.source);
     const response: StepWorkerResponse = { ok: true, result: tessellateStep(source) };
     const transfer = response.result.meshes.flatMap((mesh) => [
       mesh.positions.buffer,
