@@ -1345,6 +1345,7 @@ function finishAreaSelect3D(marquee: { pts: Array<{ x: number; y: number }>; ext
   const n = posAttr.count;
   const sx = new Float32Array(n);
   const sy = new Float32Array(n);
+  const sz = new Float32Array(n);
   const okv = new Uint8Array(n);
   const v = new THREE.Vector4();
   const e = mvp.elements;
@@ -1362,6 +1363,30 @@ function finishAreaSelect3D(marquee: { pts: Array<{ x: number; y: number }>; ext
     okv[i] = 1;
     sx[i] = ((v.x / v.w) * 0.5 + 0.5) * rect.width;
     sy[i] = (0.5 - (v.y / v.w) * 0.5) * rect.height;
+    // Clip w = -viewZ for a perspective projection: linear depth, normalized
+    // by `far` to match what renderSelectionDepth's shader writes.
+    sz[i] = v.w / viewer.camera.far;
+  }
+
+  // X-ray display on = select through; off = only what the camera can see,
+  // judged against a one-shot depth snapshot (Blender's box-select rule).
+  let visAt: (x: number, y: number, depth01: number) => boolean = () => true;
+  if (!toggleXray.checked) {
+    const dw = Math.max(1, Math.round(rect.width));
+    const dh = Math.max(1, Math.round(rect.height));
+    const depth = viewer.renderSelectionDepth(dw, dh);
+    if (depth) {
+      visAt = (x, y, depthLin) => {
+        const px = Math.round(x);
+        const py = Math.round(y);
+        if (px < 0 || py < 0 || px >= dw || py >= dh) return false;
+        const o = ((dh - 1 - py) * dw + px) * 4; // GL read-back is bottom-up
+        const d = (depth[o] + depth[o + 1] / 255) / 255;
+        // Relative bias: forgiving of interpolation, far under the front/back
+        // separation of real geometry.
+        return depthLin <= d + depthLin * 0.01 + 5e-4;
+      };
+    }
   }
   let inside: (x: number, y: number) => boolean;
   if (elemTool === 'box') {
@@ -1374,13 +1399,16 @@ function finishAreaSelect3D(marquee: { pts: Array<{ x: number; y: number }>; ext
   } else {
     inside = (x, y) => pointInPolygon(x, y, marquee.pts);
   }
-  const insideVert = (i: number): boolean => okv[i] === 1 && inside(sx[i], sy[i]);
+  const insideVert = (i: number): boolean =>
+    okv[i] === 1 && inside(sx[i], sy[i]) && visAt(sx[i], sy[i], sz[i]);
   const insideTri = (t: number): boolean => {
     const a = topo.tris[t * 3];
     const b = topo.tris[t * 3 + 1];
     const c = topo.tris[t * 3 + 2];
     if (!okv[a] || !okv[b] || !okv[c]) return false;
-    return inside((sx[a] + sx[b] + sx[c]) / 3, (sy[a] + sy[b] + sy[c]) / 3);
+    const cx = (sx[a] + sx[b] + sx[c]) / 3;
+    const cy = (sy[a] + sy[b] + sy[c]) / 3;
+    return inside(cx, cy) && visAt(cx, cy, (sz[a] + sz[b] + sz[c]) / 3);
   };
   elementSelection.applyArea(idsInRegion(topo, mode, insideVert, insideTri), marquee.extend);
 }

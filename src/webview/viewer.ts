@@ -1282,6 +1282,75 @@ export class Viewer {
     this.elementOverlay = group;
   }
 
+  private selectionDepthMat: THREE.ShaderMaterial | null = null;
+
+  /**
+   * Depth snapshot of the asset content for occlusion-aware area select:
+   * one render with a depth override, read back once, then every candidate
+   * vertex compares its depth against it. A hand-rolled shader writes
+   * *linear* view depth (viewZ / far) into two 8-bit channels — linear
+   * because window depth crams everything against 1.0 under tiny near
+   * planes, and hand-rolled so the packing convention can't drift with
+   * three's depth-material internals, tone mapping, or color-space handling.
+   * Unpack with (r + g/255) / 255. Helpers, grid and the highlight overlay
+   * are excluded — only real content occludes. With a skinned mesh
+   * mid-animation the pass sees the bind pose (override materials don't bind
+   * skeletons), matching the selection geometry itself, so the comparison
+   * stays self-consistent.
+   */
+  renderSelectionDepth(width: number, height: number): Uint8Array | null {
+    if (width <= 0 || height <= 0) return null;
+    if (!this.selectionDepthMat) {
+      this.selectionDepthMat = new THREE.ShaderMaterial({
+        uniforms: { uFar: { value: 1 } },
+        vertexShader: `
+          varying float vDist;
+          void main() {
+            vec4 mv = modelViewMatrix * vec4(position, 1.0);
+            vDist = -mv.z;
+            gl_Position = projectionMatrix * mv;
+          }`,
+        fragmentShader: `
+          uniform float uFar;
+          varying float vDist;
+          void main() {
+            float z = clamp(vDist / uFar, 0.0, 1.0);
+            float hi = floor(z * 255.0);
+            float lo = floor(fract(z * 255.0) * 255.0);
+            gl_FragColor = vec4(hi / 255.0, lo / 255.0, 0.0, 1.0);
+          }`,
+        blending: THREE.NoBlending,
+        side: THREE.DoubleSide,
+      });
+    }
+    this.selectionDepthMat.uniforms.uFar.value = this.camera.far;
+    const rt = new THREE.WebGLRenderTarget(width, height);
+    const temp = new THREE.Scene();
+    temp.overrideMaterial = this.selectionDepthMat;
+    const overlayVisible = this.elementOverlay?.visible ?? true;
+    if (this.elementOverlay) this.elementOverlay.visible = false;
+    // Reparent the content for the pass; world matrices are unchanged.
+    temp.add(this.contentRoot);
+
+    const prevTarget = this.renderer.getRenderTarget();
+    const prevClear = this.renderer.getClearColor(new THREE.Color());
+    const prevAlpha = this.renderer.getClearAlpha();
+    this.renderer.setRenderTarget(rt);
+    // White unpacks to ~1.0 = far plane, so empty pixels never occlude.
+    this.renderer.setClearColor(0xffffff, 1);
+    this.renderer.clear();
+    this.renderer.render(temp, this.camera);
+    const buf = new Uint8Array(width * height * 4);
+    this.renderer.readRenderTargetPixels(rt, 0, 0, width, height, buf);
+    this.renderer.setRenderTarget(prevTarget);
+    this.renderer.setClearColor(prevClear, prevAlpha);
+
+    this.scene.add(this.contentRoot);
+    if (this.elementOverlay) this.elementOverlay.visible = overlayVisible;
+    rt.dispose();
+    return buf;
+  }
+
   clearElementOverlay(): void {
     const group = this.elementOverlay;
     if (!group) return;
