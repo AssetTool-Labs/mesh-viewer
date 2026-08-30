@@ -765,7 +765,10 @@ toggleWireframeOverlay.addEventListener('change', () => {
   // A manual flip takes ownership: the element mode stops auto-reverting it.
   if (!wireframeAutoBusy) wireframeAutoOn = false;
   viewer.setWireframeOverlayVisible(toggleWireframeOverlay.checked);
-  pushViewSettings();
+  // The element mode's automatic flips are session decoration — remembering
+  // them would make every future file open with the wireframe on. Only a
+  // flip the user made is worth persisting.
+  if (!wireframeAutoBusy) pushViewSettings();
 });
 // Splat orientation is session-local, like the weight controls: it describes
 // the file being viewed rather than a viewport preference worth remembering.
