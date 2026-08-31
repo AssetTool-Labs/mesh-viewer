@@ -1,6 +1,6 @@
 # 3D Mesh Viewer
 
-A VS Code / Cursor extension that turns the editor into a fully featured **3D mesh viewer**. Open any supported 3D file (GLB, GLTF, FBX, OBJ, USD/USDZ, STL, PLY, DAE, 3MF, …) — or a **Gaussian splat** capture (SPZ, SPLAT, KSPLAT, SOG, 3DGS PLY) — and get an interactive Three.js viewport with a scene-hierarchy tree, per-object inspector, a Blender-style shading HUD, an animation timeline / dope sheet with frame-by-frame playback, drag/drop mesh import, and a rich file-info panel — all inside a custom editor.
+A VS Code / Cursor extension that turns the editor into a fully featured **3D mesh viewer**. Open any supported 3D file (GLB, GLTF, FBX, OBJ, USD/USDZ, STEP, STL, PLY, DAE, 3MF, …) — or a **Gaussian splat** capture (SPZ, SPLAT, KSPLAT, SOG, 3DGS PLY) — and get an interactive Three.js viewport with a scene-hierarchy tree, per-object inspector, a Blender-style shading HUD, an animation timeline / dope sheet with frame-by-frame playback, drag/drop mesh import, and a rich file-info panel — all inside a custom editor.
 
 Install it from the VS Code Marketplace or Open VSX (search "3D Mesh Viewer"), or grab the `.vsix` from this repo's [Releases](../../releases).
 
@@ -32,7 +32,7 @@ A shading strip next to the corner view gizmo switches between **Wireframe, Soli
 
 ## More features
 
-- **Wide format support** — GLB/GLTF (including DRACO- and meshopt-compressed, and KTX2/Basis textures), FBX, OBJ, USD/USDA/USDC/USDZ, STL, PLY, DAE (Collada), 3DS, 3MF, VRML, Gaussian splats (SPZ/SPLAT/KSPLAT/SOG/3DGS PLY), and more
+- **Wide format support** — GLB/GLTF (including DRACO- and meshopt-compressed, and KTX2/Basis textures), FBX, OBJ, USD/USDA/USDC/USDZ, STEP/STP, STL, PLY, DAE (Collada), 3DS, 3MF, VRML, Gaussian splats (SPZ/SPLAT/KSPLAT/SOG/3DGS PLY), and more
 - **Sidecar textures** — FBX/OBJ/DAE files that reference textures by relative path (e.g. a `textures/` folder next to the model) load them automatically, even when the exported absolute paths are stale
 - **Scene hierarchy** — tree view with filtering, per-node visibility (with a one-click bulk show/hide of the filtered set), and selection outlines
 - **Inspector** — object transforms, geometry stats, material and texture details, with clickable texture previews (including GPU-compressed KTX2) that enlarge for close inspection

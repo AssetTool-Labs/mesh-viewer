@@ -163,7 +163,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
             openLabel: 'Import into 3D Viewer',
             filters: {
               '3D Models': [
-                'obj', 'fbx', 'glb', 'gltf', 'stl', 'ply', 'dae',
+                'obj', 'fbx', 'glb', 'gltf', 'stl', 'step', 'stp', 'ply', 'dae',
                 '3ds', '3mf', 'wrl', 'vrml',
                 'usd', 'usda', 'usdc', 'usdz',
                 'vox', 'pcd', 'xyz', 'lwo', 'kmz',
@@ -560,6 +560,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'webview.css'));
     const dracoUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'draco'));
     const basisUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'basis'));
+    const stepWorkerUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaRoot, 'step-worker.js'));
     const nonce = makeNonce();
 
     const csp = [
@@ -586,6 +587,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
       .replaceAll('{{styleUri}}', styleUri.toString())
       .replaceAll('{{dracoUri}}', `${dracoUri.toString()}/`)
       .replaceAll('{{basisUri}}', `${basisUri.toString()}/`)
+      .replaceAll('{{stepWorkerUri}}', stepWorkerUri.toString())
       .replaceAll('{{nonce}}', nonce);
   }
 }

@@ -2,6 +2,7 @@
 // Produces:
 //   out/extension.js  - Node bundle for the VS Code extension host
 //   out/webview.js    - Browser bundle for the custom-editor webview (Three.js inlined)
+//   out/step-worker.js - Browser worker for STEP parsing and tessellation
 //   out/webview.css   - Stylesheet for the webview
 //   out/viewer.html   - HTML shell for the webview
 
@@ -40,6 +41,15 @@ const webviewOpts = {
   target: ['chrome110'],
   format: 'iife',
   loader: { '.css': 'css' },
+};
+
+const stepWorkerOpts = {
+  ...baseOpts,
+  entryPoints: [path.join(__dirname, 'src/webview/step/worker.ts')],
+  outfile: path.join(outDir, 'step-worker.js'),
+  platform: 'browser',
+  target: ['chrome110'],
+  format: 'iife',
 };
 
 const cssOpts = {
@@ -84,6 +94,7 @@ async function run() {
     const ctxs = await Promise.all([
       esbuild.context(extensionOpts),
       esbuild.context(webviewOpts),
+      esbuild.context(stepWorkerOpts),
       esbuild.context(cssOpts),
     ]);
     await Promise.all(ctxs.map((c) => c.watch()));
@@ -96,6 +107,7 @@ async function run() {
     await Promise.all([
       esbuild.build(extensionOpts),
       esbuild.build(webviewOpts),
+      esbuild.build(stepWorkerOpts),
       esbuild.build(cssOpts),
     ]);
     copyHtml();
