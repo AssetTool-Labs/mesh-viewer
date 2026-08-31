@@ -5,6 +5,8 @@
 
 import * as THREE from 'three';
 import { LoadingManager } from 'three';
+import type { StepWorkerRequest, StepWorkerResponse } from './step/worker';
+import { fetchStepWorkerSource } from './step/workerSource';
 
 /**
  * The viewer's WebGLRenderer, shared so KTX2Loader.detectSupport() can query the
@@ -138,6 +140,8 @@ const LOADER_NAMES: Record<string, string> = {
   obj: 'OBJLoader',
   fbx: 'FBXLoader',
   stl: 'STLLoader',
+  step: 'the built-in STEP loader',
+  stp: 'the built-in STEP loader',
   ply: 'PLYLoader',
   dae: 'ColladaLoader',
   '3ds': 'TDSLoader',
@@ -208,6 +212,9 @@ async function dispatch(
       return loadFBX(data as ArrayBuffer, auxFileUris);
     case 'stl':
       return loadSTL(data as ArrayBuffer, fileName);
+    case 'step':
+    case 'stp':
+      return loadSTEP(data as ArrayBuffer, fileName);
     case 'ply':
       // .ply is claimed by both worlds: a triangle mesh / point cloud and the
       // original 3DGS export format. Only the header tells them apart.
@@ -682,6 +689,90 @@ async function loadSTL(buf: ArrayBuffer, fileName: string): Promise<LoadedAsset>
   return emptyAsset(root);
 }
 
+// ---------- STEP ----------
+
+async function loadSTEP(buf: ArrayBuffer, fileName: string): Promise<LoadedAsset> {
+  const maximumBytes = 128 * 1024 * 1024;
+  if (buf.byteLength > maximumBytes) {
+    throw new ViewerError(`${fileName} is larger than the 128 MB STEP safety limit.`);
+  }
+  const workerUri = (globalThis as { __stepWorkerUri?: string }).__stepWorkerUri;
+  if (!workerUri) throw new Error('The STEP worker is not available in this build.');
+  const workerSource = await fetchStepWorkerSource(workerUri);
+  const blobUri = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
+
+  const result = await new Promise<Extract<StepWorkerResponse, { ok: true }>['result']>((resolve, reject) => {
+    let worker: Worker | null = null;
+    let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      if (timeout !== undefined) globalThis.clearTimeout(timeout);
+      worker?.terminate();
+      URL.revokeObjectURL(blobUri);
+    };
+    try {
+      worker = new Worker(blobUri);
+      timeout = globalThis.setTimeout(() => {
+        finish();
+        reject(new Error('STEP tessellation exceeded the two-minute time limit.'));
+      }, 120_000);
+      worker.onerror = (event) => {
+        finish();
+        reject(new Error(event.message || 'The STEP worker stopped unexpectedly.'));
+      };
+      worker.onmessage = (event: MessageEvent<StepWorkerResponse>) => {
+        finish();
+        if (event.data.ok) resolve(event.data.result);
+        else reject(new Error(event.data.message));
+      };
+      const source = buf.slice(0);
+      const request: StepWorkerRequest = { source };
+      worker.postMessage(request, [source]);
+    } catch (error) {
+      finish();
+      reject(error);
+    }
+  });
+
+  const root = new THREE.Group();
+  root.name = result.name || fileName.replace(/\.[^.]+$/, '');
+  for (const meshData of result.meshes) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(meshData.positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(meshData.normals, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(meshData.colors, 3));
+    geometry.setIndex(new THREE.BufferAttribute(meshData.indices, 1));
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      vertexColors: true,
+      roughness: 0.65,
+      metalness: 0.05,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = meshData.name;
+    root.add(mesh);
+  }
+
+  if (result.warnings.length > 0) {
+    console.warn(`[3DViewer] ${fileName} loaded with STEP warnings:`, result.warnings);
+  }
+  return {
+    ...emptyAsset(root),
+    metadata: {
+      Format: 'STEP',
+      Units: result.unit,
+      Faces: String(result.faceCount),
+      ...(result.skippedFaceCount > 0 ? { 'Skipped faces': String(result.skippedFaceCount) } : {}),
+      ...(result.skippedBodyCount > 0 ? { 'Skipped bodies': String(result.skippedBodyCount) } : {}),
+      ...(result.warnings.length > 0 ? { Warnings: String(result.warnings.length) } : {}),
+    },
+  };
+}
+
 // ---------- PLY ----------
 
 async function loadPLY(buf: ArrayBuffer): Promise<LoadedAsset> {
@@ -739,6 +830,60 @@ function isGaussianSplatPLY(buf: ArrayBuffer): boolean {
  * tagged `userData.isSplat` because Spark exposes no public type guard, and the
  * viewer needs to recognise it to dispose it, count it, and orient it.
  */
+/**
+ * Drop a SOG bundle's higher-order spherical harmonics so the rest of it loads.
+ *
+ * The bundled Spark rejects any SOG carrying an `shN` block outright — the whole
+ * file fails with "Failed to parse meta.json for SOGS" and nothing renders. That
+ * is confirmed in both directions: removing `shN` from a failing bundle makes it
+ * load, and grafting `shN` onto a working one makes it fail. Notably it is *not*
+ * the `"version": 2` the symptom is usually attributed to; both the working and
+ * failing samples are version 2.
+ *
+ * `shN` only carries view-dependent colour detail, so dropping it costs a little
+ * specular variation and keeps the splats — much better than showing an error.
+ * Returns null when there is nothing to strip, so ordinary bundles are passed
+ * through untouched and pay nothing.
+ */
+async function stripSogHigherOrderSH(
+  buf: ArrayBuffer,
+): Promise<{ bytes: ArrayBuffer; droppedFiles: number } | null> {
+  try {
+    const { unzipSync, zipSync } = await import('three/examples/jsm/libs/fflate.module.js');
+    const entries = unzipSync(new Uint8Array(buf));
+    const rawMeta = entries['meta.json'];
+    if (!rawMeta) return null;
+    const meta = JSON.parse(new TextDecoder().decode(rawMeta)) as {
+      shN?: { files?: string[] };
+    };
+    if (!meta.shN) return null;
+
+    const shFiles = new Set(meta.shN.files ?? []);
+    delete meta.shN;
+    const kept: Record<string, Uint8Array> = {};
+    for (const [name, bytes] of Object.entries(entries)) {
+      if (name !== 'meta.json' && !shFiles.has(name) && !name.startsWith('shN')) {
+        kept[name] = bytes;
+      }
+    }
+    kept['meta.json'] = new TextEncoder().encode(JSON.stringify(meta));
+    // level 0: the payload is already-compressed .webp, so deflating again would
+    // cost time for nothing.
+    const rebuilt = zipSync(kept, { level: 0 });
+    return {
+      bytes: rebuilt.buffer.slice(
+        rebuilt.byteOffset,
+        rebuilt.byteOffset + rebuilt.byteLength,
+      ) as ArrayBuffer,
+      droppedFiles: shFiles.size,
+    };
+  } catch (err) {
+    // Not a readable zip, or an unexpected meta shape — let Spark report it.
+    console.warn('[3DViewer] Could not inspect SOG bundle for higher-order SH:', err);
+    return null;
+  }
+}
+
 async function loadSplat(
   buf: ArrayBuffer,
   fileName: string,
@@ -755,6 +900,19 @@ async function loadSplat(
         `This is an SPZ v${version} file. The bundled Spark splat decoder reads ` +
           'SPZ v1-v3 (gzip-wrapped) only.',
       );
+    }
+  }
+
+  let droppedSH = false;
+  if (fileTypeKey === 'PCSOGSZIP') {
+    const stripped = await stripSogHigherOrderSH(buf);
+    if (stripped) {
+      console.warn(
+        `[3DViewer] ${fileName} carries higher-order spherical harmonics (shN), which the ` +
+          `bundled Spark decoder cannot read; dropped ${stripped.droppedFiles} shN file(s) so the splats load.`,
+      );
+      buf = stripped.bytes;
+      droppedSH = true;
     }
   }
   const { SplatMesh, SplatFileType } = await import('@sparkjsdev/spark');
@@ -784,6 +942,9 @@ async function loadSplat(
   const asset = emptyAsset(mesh);
   asset.metadata['Splats'] = mesh.numSplats.toLocaleString();
   asset.metadata['Splat format'] = `.${fileTypeKey.toLowerCase()}`;
+  // Said out loud, because the view-dependent colour is genuinely less accurate
+  // than the file describes.
+  if (droppedSH) asset.metadata['Spherical harmonics'] = 'higher-order (shN) dropped';
   return asset;
 }
 
@@ -799,13 +960,219 @@ function boxCorners(box: THREE.Box3): number[] {
 
 // ---------- Collada ----------
 
+/**
+ * Collada elements whose text is purely numeric, so a comma inside a number can
+ * only be a decimal mark. `<p>` and the `*_array` index lists are included
+ * because a comma-locale exporter formats every number it writes.
+ */
+const COLLADA_NUMERIC_ELEMENTS = [
+  'float_array', 'int_array', 'float', 'int', 'color',
+  'translate', 'scale', 'rotate', 'matrix', 'lookat', 'skew',
+  'bind_shape_matrix', 'transparency', 'index_of_refraction', 'shininess',
+];
+
+/**
+ * A comma-locale exporter writes `0,010000` where the spec wants `0.010000`.
+ * `parseFloat` stops at the comma, so three reads every such value as its
+ * integer part: `<unit meter="0,01">` becomes 0 and scales the whole scene to
+ * nothing, effect parameters collapse (`transparency` 0 × `transparent` alpha
+ * makes every material fully transparent), and vertex coordinates silently lose
+ * their fractional part. assimp's `teapots.DAE` does all three at once.
+ *
+ * Returns null when there is nothing to repair, so ordinary files are handed to
+ * the loader untouched.
+ *
+ * Only a token that is *itself* a single comma-decimal number is rewritten. That
+ * is what keeps a legitimately comma-separated list (`1.5, 2.5`) safe: such a
+ * list carries period decimals, and a token holding two commas is never treated
+ * as a number. The test is per element rather than per document, because these
+ * files mix the two — `teapots.DAE` has 34,844 comma decimals *and* a
+ * period-separated version string.
+ */
+function normalizeColladaDecimalCommas(text: string): string | null {
+  if (!/\d,\d/.test(text)) return null;
+
+  const asDecimalMarks = (body: string): string | null => {
+    if (!/\d,\d/.test(body)) return null;
+    // A period decimal anywhere in this element means the comma separates items.
+    if (/\d\.\d/.test(body)) return null;
+    const tokens = body.trim().split(/\s+/).filter(Boolean);
+    if (!tokens.length) return null;
+    const numeric = /^[-+]?\d+(,\d+)?([eE][-+]?\d+)?$/;
+    if (!tokens.every((token) => numeric.test(token))) return null;
+    return body.replace(/(\d),(\d)/g, '$1.$2');
+  };
+
+  let repaired = 0;
+
+  // `meter` is a lone scalar, so it needs no list disambiguation.
+  let out = text.replace(
+    /(<(?:[\w.-]+:)?unit\b[^>]*?\bmeter\s*=\s*")([^"]*)(")/gi,
+    (all, head: string, value: string, tail: string) => {
+      const fixed = asDecimalMarks(value);
+      if (fixed === null) return all;
+      repaired++;
+      return `${head}${fixed}${tail}`;
+    },
+  );
+
+  const names = COLLADA_NUMERIC_ELEMENTS.join('|');
+  out = out.replace(
+    new RegExp(`(<(?:[\\w.-]+:)?(?:${names})\\b[^>]*>)([^<]*)(<)`, 'gi'),
+    (all, open: string, body: string, next: string) => {
+      const fixed = asDecimalMarks(body);
+      if (fixed === null) return all;
+      repaired++;
+      return `${open}${fixed}${next}`;
+    },
+  );
+
+  if (!repaired) return null;
+  console.warn(
+    `[3DViewer] Collada file uses comma decimal separators; rewrote ${repaired} value list(s) ` +
+      'so units, transforms, coordinates and materials parse correctly.',
+  );
+  return out;
+}
+
+/**
+ * Rescue materials an exporter left fully transparent.
+ *
+ * COLLADA's `A_ONE` rule is `opacity = transparent.alpha × transparency`, and
+ * three implements it to the letter. Several DCC exporters — 3ds Max and Maya
+ * among them — instead write `<transparency>0</transparency>` to mean "not
+ * transparent at all", so the spec-literal reading makes every surface invisible:
+ * the file loads, reports its geometry, and draws nothing.
+ *
+ * A material that ends up fully transparent with no alpha map carries no other
+ * transparency signal, so treat it as opaque. A deliberately invisible surface is
+ * rare and shows nothing either way; an entire model silently vanishing is the
+ * far worse outcome.
+ */
+function rescueFullyTransparentMaterials(root: THREE.Object3D): number {
+  let rescued = 0;
+  const seen = new Set<THREE.Material>();
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.material) return;
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const material of materials) {
+      if (seen.has(material)) continue;
+      seen.add(material);
+      const m = material as THREE.MeshPhongMaterial;
+      if (m.transparent === true && m.opacity === 0 && !m.alphaMap) {
+        m.opacity = 1;
+        m.transparent = false;
+        rescued++;
+      }
+    }
+  });
+  return rescued;
+}
+
+function normalizeColladaPrimitives(text: string): string {
+  if (!/<(?:[\w.-]+:)?(?:polygons|tristrips)\b/.test(text)) return text;
+
+  const document = new DOMParser().parseFromString(text, 'application/xml');
+  if (document.getElementsByTagName('parsererror').length) return text;
+
+  const directChildren = (element: Element, name: string): Element[] =>
+    Array.from(element.childNodes).filter(
+      (child): child is Element =>
+        child.nodeType === Node.ELEMENT_NODE && (child as Element).localName === name,
+    );
+
+  const replacementFor = (primitive: Element, type: 'polylist' | 'triangles'): Element | null => {
+    const inputs = directChildren(primitive, 'input');
+    const stride = inputs.reduce((max, input) => {
+      const offset = Number.parseInt(input.getAttribute('offset') ?? '0', 10);
+      return Number.isFinite(offset) ? Math.max(max, offset + 1) : max;
+    }, 0);
+    if (!stride || directChildren(primitive, 'ph').length) return null;
+
+    const polygons = directChildren(primitive, 'p').map((p) =>
+      (p.textContent ?? '').trim().split(/\s+/).filter(Boolean),
+    );
+    if (!polygons.length || polygons.some((polygon) => polygon.length % stride !== 0)) return null;
+
+    const replacement = document.createElementNS(primitive.namespaceURI, type);
+    for (const attribute of Array.from(primitive.attributes)) {
+      replacement.setAttribute(attribute.name, attribute.value);
+    }
+    for (const input of inputs) replacement.appendChild(input.cloneNode(true));
+
+    const indices: string[] = [];
+    if (type === 'polylist') {
+      const vertexCounts = polygons.map((polygon) => polygon.length / stride);
+      replacement.setAttribute('count', String(vertexCounts.length));
+      const vcount = document.createElementNS(primitive.namespaceURI, 'vcount');
+      vcount.textContent = vertexCounts.join(' ');
+      replacement.appendChild(vcount);
+      for (const polygon of polygons) {
+        for (const index of polygon) indices.push(index);
+      }
+    } else {
+      let triangleCount = 0;
+      for (const strip of polygons) {
+        const vertexCount = strip.length / stride;
+        for (let index = 0; index + 2 < vertexCount; index++) {
+          const first = index % 2 === 0 ? index : index + 1;
+          const second = index % 2 === 0 ? index + 1 : index;
+          for (const vertex of [first, second, index + 2]) {
+            indices.push(...strip.slice(vertex * stride, (vertex + 1) * stride));
+          }
+          triangleCount++;
+        }
+      }
+      replacement.setAttribute('count', String(triangleCount));
+    }
+
+    const indexList = document.createElementNS(primitive.namespaceURI, 'p');
+    indexList.textContent = indices.join(' ');
+    replacement.appendChild(indexList);
+    for (const extra of directChildren(primitive, 'extra')) {
+      replacement.appendChild(extra.cloneNode(true));
+    }
+    return replacement;
+  };
+
+  let changed = false;
+  for (const polygons of Array.from(document.getElementsByTagNameNS('*', 'polygons'))) {
+    if (directChildren(polygons, 'p').length < 2) continue;
+    const replacement = replacementFor(polygons, 'polylist');
+    if (replacement) {
+      polygons.parentNode?.replaceChild(replacement, polygons);
+      changed = true;
+    }
+  }
+  for (const strips of Array.from(document.getElementsByTagNameNS('*', 'tristrips'))) {
+    const replacement = replacementFor(strips, 'triangles');
+    if (replacement) {
+      strips.parentNode?.replaceChild(replacement, strips);
+      changed = true;
+    }
+  }
+
+  return changed ? new XMLSerializer().serializeToString(document) : text;
+}
+
 async function loadCollada(text: string, auxFileUris: Record<string, string>): Promise<LoadedAsset> {
   const { ColladaLoader } = await import('three/examples/jsm/loaders/ColladaLoader.js');
   const aux = await makeManagerForAux(auxFileUris);
   const loader = new ColladaLoader(aux.manager);
-  const result = loader.parse(text, '');
+  // Decimal commas first: the primitives pass below re-serialises index lists,
+  // and repairing the numbers beforehand keeps both passes working on one form.
+  const source = normalizeColladaDecimalCommas(text) ?? text;
+  const result = loader.parse(normalizeColladaPrimitives(source), '');
   if (!result || !result.scene) throw new ViewerError('Collada file did not contain a parsable scene.');
   const root: THREE.Object3D = result.scene;
+  const rescued = rescueFullyTransparentMaterials(root);
+  if (rescued) {
+    console.warn(
+      `[3DViewer] ${rescued} Collada material(s) resolved to fully transparent (the exporter's ` +
+        'transparency convention is inverted); treated them as opaque.',
+    );
+  }
   const { lights, cameras } = gatherLightsAndCameras(root);
   // ColladaLoader.parse() returns clips on result.animations, NOT
   // result.scene.animations (Scene/Group has no animations field).

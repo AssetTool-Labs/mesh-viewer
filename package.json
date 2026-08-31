@@ -32,6 +32,8 @@
     "usd",
     "usdz",
     "stl",
+    "step",
+    "stp",
     "ply",
     "collada",
     "three.js",
@@ -61,6 +63,12 @@
           },
           {
             "filenamePattern": "*.stl"
+          },
+          {
+            "filenamePattern": "*.step"
+          },
+          {
+            "filenamePattern": "*.stp"
           },
           {
             "filenamePattern": "*.ply"
@@ -149,7 +157,7 @@
       "explorer/context": [
         {
           "command": "3dMeshViewer.openWith",
-          "when": "resourceExtname =~ /\\.(obj|fbx|glb|gltf|stl|ply|dae|3ds|3mf|wrl|vrml|usd|usda|usdc|usdz|vox|pcd|xyz|lwo|kmz|spz|splat|ksplat|sog)$/i",
+          "when": "resourceExtname =~ /\\.(obj|fbx|glb|gltf|stl|step|stp|ply|dae|3ds|3mf|wrl|vrml|usd|usda|usdc|usdz|vox|pcd|xyz|lwo|kmz|spz|splat|ksplat|sog)$/i",
           "group": "navigation"
         }
       ]
@@ -237,6 +245,7 @@
   "scripts": {
     "build": "node esbuild.js",
     "watch": "node esbuild.js --watch",
+    "test:step": "node scripts/fetch-step-fixtures.js && node scripts/test-step.js",
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies",
     "publish:ovsx": "ovsx publish --no-dependencies",

@@ -14,7 +14,7 @@ export function activate(context: vscode.ExtensionContext): void {
             canSelectMany: false,
             filters: {
               '3D Models': [
-                'obj', 'fbx', 'glb', 'gltf', 'stl', 'ply', 'dae',
+                'obj', 'fbx', 'glb', 'gltf', 'stl', 'step', 'stp', 'ply', 'dae',
                 '3ds', '3mf', 'wrl', 'vrml',
                 'usd', 'usda', 'usdc', 'usdz',
                 'vox', 'pcd', 'xyz', 'lwo', 'kmz',
