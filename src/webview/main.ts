@@ -23,9 +23,14 @@ import {
   type EnvironmentMode,
   type WeightMode,
   type MapChannel,
+  type InspectMode,
+  INSPECT_LABELS,
   type MorphMeshInfo,
   type HudInfo,
 } from './viewer';
+import { UVView, type AreaTool, type UVBacking, type UVElementContext } from './uvView';
+import { elementSelection, type ElementMode } from './elementSelection';
+import { edgeKeyOf, idsInRegion, pickFromIntersection, pointInPolygon } from './elementTopology';
 import { TimelinePanel, type TimelineClip } from './timeline';
 
 declare function acquireVsCodeApi(): {
@@ -149,6 +154,17 @@ const toggleShowUV = $<HTMLInputElement>('toggleShowUV');
 const texModal = $('texModal');
 const texModalBody = $('texModalBody');
 const texModalCaption = $('texModalCaption');
+const texIsolateBtn = $<HTMLButtonElement>('texIsolate');
+const viewStateChip = $('viewStateChip');
+const viewStateChipLabel = $('viewStateChipLabel');
+const viewStateChipClose = $<HTMLButtonElement>('viewStateChipClose');
+const elemModeSeg = $('elemModeSeg');
+const elemModeBtns = Array.from(elemModeSeg.querySelectorAll<HTMLButtonElement>('[data-elem]'));
+const elemToolSeg = $('elemToolSeg');
+const elemToolBtns = Array.from(elemToolSeg.querySelectorAll<HTMLButtonElement>('[data-tool]'));
+const elemStatus = $('elemStatus');
+const elemFrameBtn = $<HTMLButtonElement>('elemFrame');
+const areaSvg = $('areaSvg') as unknown as SVGSVGElement;
 
 // Enlarged texture preview: clone the (up-to-1024px) card canvas into a modal,
 // compositing the UV overlay on top when it's currently shown.
@@ -299,11 +315,150 @@ interface TextureEntry {
 }
 let textureEntries: TextureEntry[] = [];
 let activeTextureIdx = 0;
-/** Live references to the canvases of the currently-mounted card, so the UV
- *  toggle / selection change can repaint without rebuilding the whole card. */
-let activeImgCanvas: HTMLCanvasElement | null = null;
-let activeUVCanvas: HTMLCanvasElement | null = null;
+/** One pan/zoom UV viewport, re-parented into whichever texture card is
+ *  mounted, so zoom state survives texture switches and panel rebuilds. */
+const uvView = new UVView();
 let showUV = false;
+
+// ---- Element selection (one selection, two views) ----
+// The UV canvas and the 3D viewport render and mutate the same state; ids are
+// seam-aware (see elementTopology), so a seam vertex lights all its UV copies.
+function setElementMode(mode: ElementMode): void {
+  elementSelection.setMode(mode);
+  for (const b of elemModeBtns) b.classList.toggle('active', b.dataset.elem === mode);
+  if (mode !== 'off') {
+    syncElementMesh();
+    // Element work reads against wireframes — Blender edit-mode style. Switch
+    // the UV overlay and the 3D wireframe overlay on for the user (through
+    // their checkboxes, so state stays single-sourced). The UV overlay stays
+    // on afterwards; the 3D wireframe goes back off on exit *if we were the
+    // ones who switched it on* — a wireframe the user chose (before or during
+    // the mode) is theirs and stays.
+    if (!toggleShowUV.checked && !toggleShowUV.disabled && !showUVSuppressed) {
+      toggleShowUV.checked = true;
+      toggleShowUV.dispatchEvent(new Event('change'));
+    }
+    // A wireframe the user dismissed during this mode session stays dismissed
+    // across 1/2/3 mode switches — only a fresh entry re-offers it.
+    if (!toggleWireframeOverlay.checked && !wireframeSuppressed) {
+      wireframeAutoBusy = true;
+      toggleWireframeOverlay.checked = true;
+      toggleWireframeOverlay.dispatchEvent(new Event('change'));
+      wireframeAutoBusy = false;
+      wireframeAutoOn = true;
+    }
+  } else {
+    if (wireframeAutoOn) {
+      wireframeAutoOn = false;
+      if (toggleWireframeOverlay.checked) {
+        wireframeAutoBusy = true;
+        toggleWireframeOverlay.checked = false;
+        toggleWireframeOverlay.dispatchEvent(new Event('change'));
+        wireframeAutoBusy = false;
+      }
+    }
+    wireframeSuppressed = false;
+    showUVSuppressed = false;
+  }
+}
+/** True while the wireframe overlay is on only for the element mode's sake. */
+let wireframeAutoOn = false;
+let wireframeAutoBusy = false;
+/** The user dismissed an auto-enabled overlay while a mode was active; stop
+ *  re-forcing it until the mode is fully exited. */
+let wireframeSuppressed = false;
+let showUVSuppressed = false;
+for (const b of elemModeBtns) {
+  b.addEventListener('click', () => setElementMode(b.dataset.elem as ElementMode));
+}
+
+let elemTool: AreaTool = 'box';
+for (const b of elemToolBtns) {
+  b.addEventListener('click', () => {
+    elemTool = b.dataset.tool as AreaTool;
+    for (const o of elemToolBtns) o.classList.toggle('active', o === b);
+    rebuildElementContext();
+  });
+}
+
+/** The selection follows the mesh whose UVs the texture card is showing. */
+function syncElementMesh(): void {
+  const entry = textureEntries[activeTextureIdx];
+  const usage = entry ? pickUsageForUV(entry) : null;
+  elementSelection.setMesh(usage?.mesh ?? null);
+}
+
+const ELEM_NOUN: Record<string, [string, string]> = {
+  vertex: ['vertex', 'vertices'],
+  edge: ['edge', 'edges'],
+  face: ['face', 'faces'],
+};
+
+function rebuildElementContext(): void {
+  const st = elementSelection;
+  let ctx: UVElementContext | null = null;
+  if (st.mode !== 'off' && st.mesh && st.topo) {
+    ctx = {
+      mode: st.mode,
+      version: st.version,
+      tool: elemTool,
+      topo: st.topo,
+      geometry: st.mesh.geometry as THREE.BufferGeometry,
+      selected: st.selected,
+      hovered: st.hovered,
+      onHover: (id) => elementSelection.hover(id),
+      onClick: (id, extend) => elementSelection.click(id, extend),
+      onArea: (ids, extend) => elementSelection.applyArea(ids, extend),
+      onLinked: (id, extend) => elementSelection.selectLinked(id, 'uv', extend),
+    };
+  }
+  uvView.setElementContext(ctx);
+}
+
+elementSelection.onChange(() => {
+  const st = elementSelection;
+  // 3D side.
+  viewer.updateElementOverlay(st.mesh, st.topo, st.mode, st.selected, st.hovered, st.version);
+  // UV side.
+  rebuildElementContext();
+  elemFrameBtn.disabled =
+    st.mode === 'off' || !st.mesh || (st.selected.size === 0 && st.hovered === null);
+  // Status line under the toolbar.
+  if (st.mode === 'off') {
+    elemStatus.hidden = true;
+  } else {
+    elemStatus.hidden = false;
+    if (!st.mesh || !st.topo) {
+      elemStatus.textContent = 'No mesh with UVs to select on.';
+    } else {
+      const [one, many] = ELEM_NOUN[st.mode];
+      const n = st.selected.size;
+      elemStatus.textContent =
+        `${n} ${n === 1 ? one : many} selected` +
+        (st.hovered !== null ? ' · hovering' : '') +
+        ' — box/lasso: drag in UV, Shift+drag (or B, then drag) in 3D · double-click = linked · A = all/none · F = frame · Esc clears';
+    }
+  }
+});
+
+// Keys 1/2/3 switch element kind while selection is active; Esc clears.
+document.addEventListener('keydown', (ev) => {
+  const target = ev.target as HTMLElement | null;
+  if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  if (elementSelection.mode === 'off') return;
+  if (ev.code === 'Digit1') setElementMode('vertex');
+  else if (ev.code === 'Digit2') setElementMode('edge');
+  else if (ev.code === 'Digit3') setElementMode('face');
+  else if (ev.code === 'KeyA') elementSelection.selectAllToggle();
+  else if (ev.code === 'KeyF') frameElementViews();
+  else if (ev.code === 'KeyB') armAreaSelect();
+  else if (ev.code === 'Escape' && texModal.classList.contains('hidden')) {
+    // An in-flight box/lasso eats the Esc; a second Esc clears the selection.
+    if (uvView.cancelArea() || cancelAreaSelect3D()) return;
+    elementSelection.clear();
+  }
+});
 
 // ---- Tabs ----
 function selectTab(which: string): void {
@@ -323,7 +478,13 @@ document.querySelectorAll<HTMLButtonElement>('.tab').forEach((tab) => {
 // pushViewSettings). Programmatic sync in applyViewSettings assigns
 // .value/.checked directly, which does NOT dispatch 'change', so it never
 // echoes back to the host.
-shadingSelect.addEventListener('change', () => { viewer.setShading(shadingSelect.value as ShadingMode); syncShadingHud(); pushViewSettings(); });
+shadingSelect.addEventListener('change', () => {
+  // Picking any shading mode (dropdown or HUD strip) ends an Inspect view.
+  setInspect(null);
+  viewer.setShading(shadingSelect.value as ShadingMode);
+  syncShadingHud();
+  pushViewSettings();
+});
 for (const { el, channel } of mapToggleInputs) {
   el.addEventListener('change', () => viewer.setMapEnabled(channel, el.checked));
 }
@@ -375,8 +536,47 @@ function syncShadingHud(): void {
   // Map toggles only affect the asset's materials, so show them only there.
   const shaded = shadingSelect.value === 'material' || shadingSelect.value === 'rendered';
   mapToggles.style.display = shaded ? '' : 'none';
+  updateViewStateChip();
 }
 syncShadingHud();
+
+/** Session-local Inspect channel shown on the model (entered from the
+ *  Textures tab). Like the skin-weight display it overrides the shading
+ *  dropdown without touching it, so the chip below is what makes it visible. */
+let inspectMode: InspectMode | null = null;
+function setInspect(mode: InspectMode | null): void {
+  if (inspectMode === mode) return;
+  inspectMode = mode;
+  viewer.setInspectMode(mode);
+  updateViewStateChip();
+  syncTexIsolateButton();
+}
+
+/** Viewport chip naming the active special view — skin weights or an Inspect
+ *  channel — so the shading controls never silently disagree with what is
+ *  drawn. Weights win when both are on, matching the precedence in
+ *  Viewer.applyShadingToObject. */
+function updateViewStateChip(): void {
+  let text = '';
+  if (toggleWeights.checked) {
+    const label = weightModeSelect.selectedOptions[0]?.textContent ?? weightModeSelect.value;
+    text = `Skin weights: ${label}`;
+  } else if (inspectMode) {
+    text = `Inspect: ${INSPECT_LABELS[inspectMode]}`;
+  }
+  viewStateChip.hidden = text === '';
+  viewStateChipLabel.textContent = text;
+}
+// Weights exit through their checkbox (single-sourced with its handler);
+// Inspect has no sidebar control of its own, so the chip clears it directly.
+viewStateChipClose.addEventListener('click', () => {
+  if (toggleWeights.checked) {
+    toggleWeights.checked = false;
+    toggleWeights.dispatchEvent(new Event('change'));
+  } else {
+    setInspect(null);
+  }
+});
 
 // Export the current view as a PNG; the host shows a Save dialog and writes it.
 function saveSnapshot(transparent = false): void {
@@ -525,6 +725,7 @@ toggleWeights.addEventListener('change', () => {
     weightBoneRow.style.display = 'none';
     weightLegend.style.display = 'none';
   }
+  updateViewStateChip();
 });
 weightModeSelect.addEventListener('change', applyWeightMode);
 weightBoneSelect.addEventListener('change', () => viewer.setWeightBone(Number(weightBoneSelect.value)));
@@ -538,6 +739,7 @@ function applyWeightMode(): void {
   weightBoneRow.style.display = mode === 'isolate' ? '' : 'none';
   if (mode === 'isolate') populateWeightBones();
   renderWeightLegend(mode);
+  updateViewStateChip();
 }
 
 /** Swap the legend under the mode dropdown to explain the current mode's colors.
@@ -570,7 +772,19 @@ function renderWeightLegend(mode: WeightMode): void {
   weightLegend.innerHTML = html;
   weightLegend.style.display = html ? '' : 'none';
 }
-toggleWireframeOverlay.addEventListener('change', () => { viewer.setWireframeOverlayVisible(toggleWireframeOverlay.checked); pushViewSettings(); });
+toggleWireframeOverlay.addEventListener('change', () => {
+  // A manual flip takes ownership: the element mode stops auto-reverting it,
+  // and a dismissal during a mode session stops it re-forcing on 1/2/3.
+  if (!wireframeAutoBusy) {
+    wireframeAutoOn = false;
+    wireframeSuppressed = elementSelection.mode !== 'off' && !toggleWireframeOverlay.checked;
+  }
+  viewer.setWireframeOverlayVisible(toggleWireframeOverlay.checked);
+  // The element mode's automatic flips are session decoration — remembering
+  // them would make every future file open with the wireframe on. Only a
+  // flip the user made is worth persisting.
+  if (!wireframeAutoBusy) pushViewSettings();
+});
 // Splat orientation is session-local, like the weight controls: it describes
 // the file being viewed rather than a viewport preference worth remembering.
 toggleSplatUpright.addEventListener('change', () => {
@@ -609,8 +823,35 @@ frameSelectionBtn.addEventListener('click', () => {
 });
 sidebarToggle.addEventListener('click', () => app.classList.toggle('sidebar-collapsed'));
 
+// Drag the panel edge to resize the sidebar. Width lives in --sidebar-width so
+// the toggle button, collapse offset, and this handle all move together; the
+// 3D canvas and the UV viewport resize themselves via their ResizeObservers.
+const sidebarResizer = $('sidebarResizer');
+sidebarResizer.addEventListener('pointerdown', (ev) => {
+  ev.preventDefault();
+  sidebarResizer.setPointerCapture(ev.pointerId);
+  sidebarResizer.classList.add('dragging');
+  const move = (m: PointerEvent): void => {
+    const max = Math.max(280, Math.round(window.innerWidth * 0.6));
+    const w = Math.min(Math.max(Math.round(m.clientX), 220), max);
+    document.documentElement.style.setProperty('--sidebar-width', `${w}px`);
+  };
+  const up = (): void => {
+    sidebarResizer.classList.remove('dragging');
+    sidebarResizer.removeEventListener('pointermove', move);
+    sidebarResizer.removeEventListener('pointerup', up);
+    sidebarResizer.removeEventListener('pointercancel', up);
+  };
+  sidebarResizer.addEventListener('pointermove', move);
+  sidebarResizer.addEventListener('pointerup', up);
+  sidebarResizer.addEventListener('pointercancel', up);
+});
+
 toggleShowUV.addEventListener('change', () => {
   showUV = toggleShowUV.checked;
+  // Same dismissal rule as the wireframe: unchecking during a mode session
+  // stops the mode re-forcing it (the auto-enable sets checked, clearing this).
+  showUVSuppressed = elementSelection.mode !== 'off' && !toggleShowUV.checked;
   refreshUVOverlay();
 });
 
@@ -960,6 +1201,370 @@ canvas.addEventListener('pointercancel', () => {
   pressStart = null;
 });
 
+/** First raycast hit on a visible mesh (skips helpers/hidden branches). */
+function firstVisibleMeshHit(ray: THREE.Raycaster): THREE.Intersection | null {
+  const hits = ray.intersectObject(viewer.contentRoot, true);
+  return (
+    hits.find((h) => {
+      if (!(h.object as THREE.Mesh).isMesh) return false;
+      for (let o: THREE.Object3D | null = h.object; o; o = o.parent) {
+        if (o.visible === false) return false;
+      }
+      return true;
+    }) ?? null
+  );
+}
+
+/**
+ * Point the selection at the mesh that was hit. If it is not the active mesh,
+ * switch the Textures tab to an entry that this mesh's material uses so the UV
+ * view matches; a mesh no texture entry knows about is not selectable.
+ */
+function retargetElementMesh(mesh: THREE.Mesh): boolean {
+  if (elementSelection.mesh === mesh) return true;
+  // Match by mesh, not by mesh.material: solid/normals/Inspect/weights swap in
+  // transient materials that no texture entry knows about, and clicks in those
+  // states must still land.
+  const idx = textureEntries.findIndex((e) => e.usages.some((u) => u.mesh === mesh));
+  if (idx < 0) return false;
+  if (idx !== activeTextureIdx) {
+    activeTextureIdx = idx;
+    textureSelect.value = String(idx);
+    renderActiveTexture();
+  }
+  elementSelection.setMesh(mesh);
+  // Same entry, different mesh: the wireframe must still swap to the new
+  // mesh's unwrap so drawing and hit-testing agree.
+  refreshUVOverlay();
+  return true;
+}
+
+// ---- F: localize the highlight in the other view ----
+
+/** World-space bounds of the selected (else hovered) elements, plus their
+ *  average outward normal so framing can come around to the visible side. */
+function selectionBox3D(): { box: THREE.Box3; normal: THREE.Vector3 } | null {
+  const st = elementSelection;
+  if (st.mode === 'off' || !st.mesh || !st.topo) return null;
+  const ids = st.selected.size ? st.selected : st.hovered !== null ? [st.hovered] : null;
+  if (!ids) return null;
+  const geom = st.mesh.geometry as THREE.BufferGeometry;
+  const pos = geom.getAttribute('position') as THREE.BufferAttribute;
+  const nrm = geom.getAttribute('normal') as THREE.BufferAttribute | undefined;
+  const normalMatrix = new THREE.Matrix3().getNormalMatrix(st.mesh.matrixWorld);
+  const normal = new THREE.Vector3();
+  const nv = new THREE.Vector3();
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  let any = false;
+  const add = (i: number): void => {
+    v.fromBufferAttribute(pos, i).applyMatrix4(st.mesh!.matrixWorld);
+    box.expandByPoint(v);
+    if (nrm) normal.add(nv.fromBufferAttribute(nrm, i).applyMatrix3(normalMatrix));
+    any = true;
+  };
+  for (const id of ids) {
+    if (st.mode === 'face') {
+      if (id < 0 || id >= st.topo.triCount) continue;
+      add(st.topo.tris[id * 3]);
+      add(st.topo.tris[id * 3 + 1]);
+      add(st.topo.tris[id * 3 + 2]);
+    } else if (st.mode === 'vertex') {
+      add(id);
+    } else {
+      const copies = st.topo.edgeCopies.get(id);
+      if (copies) {
+        add(copies[0]);
+        add(copies[1]);
+      }
+    }
+  }
+  return any ? { box, normal } : null;
+}
+
+/**
+ * F over the UV view localizes the 3D camera on the highlight; F over the 3D
+ * viewport localizes the UV view; F anywhere else (or the toolbar button)
+ * does both.
+ */
+function frameElementViews(): void {
+  const overUV = uvView.root.matches(':hover');
+  const over3D = canvas.matches(':hover');
+  if (!overUV || !over3D) {
+    if (!over3D) {
+      const sel = selectionBox3D();
+      if (sel) viewer.frameElementBox(sel.box, sel.normal);
+    }
+    if (!overUV) uvView.frameElements();
+  }
+}
+elemFrameBtn.addEventListener('click', () => {
+  const sel = selectionBox3D();
+  if (sel) viewer.frameElementBox(sel.box, sel.normal);
+  uvView.frameElements();
+});
+
+// ---- 3D box/lasso element selection ----
+// Shift+left-drag area-selects (extending); `B` arms the next plain drag as a
+// replacing area select. X-ray semantics: everything projecting inside the
+// region is taken, back faces and occluded parts included — no occlusion test.
+let area3D: { pts: Array<{ x: number; y: number }>; extend: boolean; pointerId: number } | null = null;
+let areaArmed = false;
+
+function armAreaSelect(): void {
+  if (elementSelection.mode === 'off' || !elementSelection.mesh) return;
+  areaArmed = true;
+  canvas.style.cursor = 'crosshair';
+}
+
+function cancelAreaSelect3D(): boolean {
+  const had = area3D !== null || areaArmed;
+  area3D = null;
+  areaArmed = false;
+  canvas.style.cursor = '';
+  areaSvg.classList.remove('active');
+  areaSvg.replaceChildren();
+  viewer.controls.enabled = true;
+  return had;
+}
+
+function drawAreaBand(): void {
+  if (!area3D || area3D.pts.length < 2) return;
+  areaSvg.classList.add('active');
+  const ns = 'http://www.w3.org/2000/svg';
+  let el: SVGElement;
+  if (elemTool === 'box') {
+    const [a, b] = [area3D.pts[0], area3D.pts[area3D.pts.length - 1]];
+    el = document.createElementNS(ns, 'rect');
+    el.setAttribute('x', String(Math.min(a.x, b.x)));
+    el.setAttribute('y', String(Math.min(a.y, b.y)));
+    el.setAttribute('width', String(Math.abs(b.x - a.x)));
+    el.setAttribute('height', String(Math.abs(b.y - a.y)));
+  } else {
+    el = document.createElementNS(ns, 'polygon');
+    el.setAttribute('points', area3D.pts.map((p) => `${p.x},${p.y}`).join(' '));
+  }
+  el.setAttribute('class', 'band');
+  areaSvg.replaceChildren(el);
+}
+
+canvas.addEventListener(
+  'pointerdown',
+  (ev) => {
+    if (ev.button !== 0 || elementSelection.mode === 'off' || !elementSelection.mesh) return;
+    if (!ev.shiftKey && !areaArmed) return;
+    // From here the drag belongs to the selection, not the camera.
+    viewer.controls.enabled = false;
+    canvas.setPointerCapture(ev.pointerId);
+    const rect = canvas.getBoundingClientRect();
+    area3D = {
+      pts: [{ x: ev.clientX - rect.left, y: ev.clientY - rect.top }],
+      extend: ev.shiftKey,
+      pointerId: ev.pointerId,
+    };
+  },
+  true,
+);
+canvas.addEventListener('pointermove', (ev) => {
+  if (!area3D || ev.pointerId !== area3D.pointerId) return;
+  const rect = canvas.getBoundingClientRect();
+  const pt = { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+  if (elemTool === 'lasso') area3D.pts.push(pt);
+  else area3D.pts[1] = pt;
+  drawAreaBand();
+});
+canvas.addEventListener(
+  'pointercancel',
+  (ev) => {
+    // An OS gesture can cancel the drag with no pointerup: restore the
+    // camera controls and drop the marquee instead of leaving them stuck.
+    if (area3D && ev.pointerId === area3D.pointerId) cancelAreaSelect3D();
+  },
+  true,
+);
+canvas.addEventListener(
+  'pointerup',
+  (ev) => {
+    if (!area3D || ev.pointerId !== area3D.pointerId) return;
+    const marquee = area3D;
+    const moved =
+      marquee.pts.length > 1 &&
+      Math.abs(marquee.pts[marquee.pts.length - 1].x - marquee.pts[0].x) +
+        Math.abs(marquee.pts[marquee.pts.length - 1].y - marquee.pts[0].y) >
+        4;
+    cancelAreaSelect3D();
+    if (moved) {
+      finishAreaSelect3D(marquee);
+      // The click-pick pointerup handler must not also fire for this gesture.
+      skipNextPick = true;
+    }
+  },
+  true,
+);
+
+function finishAreaSelect3D(marquee: { pts: Array<{ x: number; y: number }>; extend: boolean }): void {
+  const mesh = elementSelection.mesh;
+  const topo = elementSelection.topo;
+  const mode = elementSelection.mode;
+  if (!mesh || !topo || mode === 'off') return;
+  const rect = canvas.getBoundingClientRect();
+  // Batched local → screen projection of every buffer vertex.
+  const mvp = new THREE.Matrix4()
+    .multiplyMatrices(viewer.camera.projectionMatrix, viewer.camera.matrixWorldInverse)
+    .multiply(mesh.matrixWorld);
+  const posAttr = (mesh.geometry as THREE.BufferGeometry).getAttribute('position') as THREE.BufferAttribute;
+  const n = posAttr.count;
+  const sx = new Float32Array(n);
+  const sy = new Float32Array(n);
+  const okv = new Uint8Array(n);
+  const v = new THREE.Vector4();
+  const e = mvp.elements;
+  for (let i = 0; i < n; i++) {
+    const x = posAttr.getX(i);
+    const y = posAttr.getY(i);
+    const z = posAttr.getZ(i);
+    v.set(
+      e[0] * x + e[4] * y + e[8] * z + e[12],
+      e[1] * x + e[5] * y + e[9] * z + e[13],
+      e[2] * x + e[6] * y + e[10] * z + e[14],
+      e[3] * x + e[7] * y + e[11] * z + e[15],
+    );
+    if (v.w <= 0) continue; // behind the camera
+    okv[i] = 1;
+    sx[i] = ((v.x / v.w) * 0.5 + 0.5) * rect.width;
+    sy[i] = (0.5 - (v.y / v.w) * 0.5) * rect.height;
+  }
+  let inside: (x: number, y: number) => boolean;
+  if (elemTool === 'box') {
+    const [a, b] = [marquee.pts[0], marquee.pts[marquee.pts.length - 1]];
+    const minX = Math.min(a.x, b.x);
+    const maxX = Math.max(a.x, b.x);
+    const minY = Math.min(a.y, b.y);
+    const maxY = Math.max(a.y, b.y);
+    inside = (x, y) => x >= minX && x <= maxX && y >= minY && y <= maxY;
+  } else {
+    inside = (x, y) => pointInPolygon(x, y, marquee.pts);
+  }
+  const insideVert = (i: number): boolean => okv[i] === 1 && inside(sx[i], sy[i]);
+  const insideTri = (t: number): boolean => {
+    const a = topo.tris[t * 3];
+    const b = topo.tris[t * 3 + 1];
+    const c = topo.tris[t * 3 + 2];
+    if (!okv[a] || !okv[b] || !okv[c]) return false;
+    return inside((sx[a] + sx[b] + sx[c]) / 3, (sy[a] + sy[b] + sy[c]) / 3);
+  };
+  let ids = idsInRegion(topo, mode, insideVert, insideTri);
+
+  // X-ray on = select straight through. X-ray off = Blender's rule: only what
+  // the camera actually sees, decided by an ID pass — every pixel of the
+  // region names the front-most triangle, and elements keep their selection
+  // only if a visible triangle backs them (the triangle itself, an adjacent
+  // one for a vertex, an incident one for an edge).
+  // A posed SkinnedMesh defeats the ID pass: the id copy renders at bind pose
+  // while the skinned occluders render deformed, so the depths never match.
+  // Selection geometry is bind-pose throughout, so skinned meshes keep the
+  // through-select behavior instead.
+  if (!toggleXray.checked && !(mesh as THREE.SkinnedMesh).isSkinnedMesh) {
+    const dw = Math.max(1, Math.round(rect.width));
+    const dh = Math.max(1, Math.round(rect.height));
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const p of marquee.pts) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const bx = Math.max(0, Math.floor(minX));
+    const by = Math.max(0, Math.floor(minY));
+    const bw = Math.min(dw - 1, Math.ceil(maxX)) - bx + 1;
+    const bh = Math.min(dh - 1, Math.ceil(maxY)) - by + 1;
+    const buf = viewer.renderSelectionIds(mesh, dw, dh, bx, by, bw, bh);
+    if (buf) {
+      const visTris = new Set<number>();
+      for (let yy = 0; yy < bh; yy++) {
+        for (let xx = 0; xx < bw; xx++) {
+          if (!inside(bx + xx, by + yy)) continue;
+          const o = ((bh - 1 - yy) * bw + xx) * 4; // GL read-back is bottom-up
+          const id = buf[o] * 65536 + buf[o + 1] * 256 + buf[o + 2];
+          if (id > 0 && id <= topo.triCount) visTris.add(id - 1);
+        }
+      }
+      if (mode === 'face') {
+        ids = visTris;
+      } else if (mode === 'vertex') {
+        const visReps = new Set<number>();
+        for (const t of visTris) {
+          visReps.add(topo.rep[topo.tris[t * 3]]);
+          visReps.add(topo.rep[topo.tris[t * 3 + 1]]);
+          visReps.add(topo.rep[topo.tris[t * 3 + 2]]);
+        }
+        ids = new Set([...ids].filter((r) => visReps.has(r)));
+      } else {
+        const visEdges = new Set<number>();
+        for (const t of visTris) {
+          const a = topo.tris[t * 3];
+          const b = topo.tris[t * 3 + 1];
+          const c = topo.tris[t * 3 + 2];
+          visEdges.add(edgeKeyOf(topo, a, b));
+          visEdges.add(edgeKeyOf(topo, b, c));
+          visEdges.add(edgeKeyOf(topo, c, a));
+        }
+        ids = new Set([...ids].filter((k) => visEdges.has(k)));
+      }
+    }
+  }
+  elementSelection.applyArea(ids, marquee.extend);
+}
+
+// Double-click in the viewport selects the 3D connected component.
+canvas.addEventListener('dblclick', (ev) => {
+  if (elementSelection.mode === 'off' || !elementSelection.mesh || !elementSelection.topo) return;
+  const rect = canvas.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((ev.clientX - rect.left) / rect.width) * 2 - 1,
+    -(((ev.clientY - rect.top) / rect.height) * 2 - 1),
+  );
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(ndc, viewer.camera);
+  const hit = firstVisibleMeshHit(ray);
+  if (!hit || hit.object !== elementSelection.mesh) return;
+  const id = pickFromIntersection(hit, elementSelection.mode, elementSelection.topo);
+  if (id !== null) elementSelection.selectLinked(id, '3d', ev.shiftKey);
+});
+
+/** Hover mirroring for the 3D side, coalesced to one raycast per frame. */
+let hoverRaf = 0;
+canvas.addEventListener('pointermove', (ev) => {
+  if (elementSelection.mode === 'off' || !elementSelection.mesh) return;
+  if (ev.buttons !== 0) return; // dragging the camera
+  if (hoverRaf) return;
+  const cx = ev.clientX;
+  const cy = ev.clientY;
+  hoverRaf = requestAnimationFrame(() => {
+    hoverRaf = 0;
+    if (elementSelection.mode === 'off') return;
+    const rect = canvas.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((cx - rect.left) / rect.width) * 2 - 1,
+      -(((cy - rect.top) / rect.height) * 2 - 1),
+    );
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, viewer.camera);
+    const hit = firstVisibleMeshHit(ray);
+    if (!hit || hit.object !== elementSelection.mesh || !elementSelection.topo) {
+      elementSelection.hover(null);
+      return;
+    }
+    elementSelection.hover(pickFromIntersection(hit, elementSelection.mode, elementSelection.topo));
+  });
+});
+canvas.addEventListener('pointerleave', () => {
+  if (elementSelection.mode !== 'off') elementSelection.hover(null);
+});
+
 function pickAt(ev: PointerEvent): void {
   if (!viewer.entries.length) return;
   if (viewer.isPoseGizmoBusy()) return;
@@ -977,6 +1582,21 @@ function pickAt(ev: PointerEvent): void {
   const r = Math.max(dist * 0.005, 1e-4);
   ray.params.Points = { threshold: r };
   ray.params.Line = { threshold: r };
+
+  // Element mode takes over viewport clicks entirely: clicks pick elements on
+  // the active mesh (or switch the active mesh), not scene objects.
+  if (elementSelection.mode !== 'off') {
+    const hit = firstVisibleMeshHit(ray);
+    if (!hit) {
+      elementSelection.click(null, ev.shiftKey);
+      return;
+    }
+    if (!retargetElementMesh(hit.object as THREE.Mesh)) return;
+    const topo = elementSelection.topo;
+    if (!topo) return;
+    elementSelection.click(pickFromIntersection(hit, elementSelection.mode, topo), ev.shiftKey);
+    return;
+  }
 
   const joint = viewer.pickSkeletonJoint(ray);
   if (joint) {
@@ -1337,7 +1957,9 @@ function pushViewSettings(): void {
     upAxis: upAxisSelect.value as ViewSettings['upAxis'],
     showBounds: toggleBounds.checked,
     showSkeleton: toggleSkeleton.checked,
-    showWireframeOverlay: toggleWireframeOverlay.checked,
+    // An auto-enabled wireframe is session decoration; persist the value the
+    // user actually owns (auto-on only ever starts from unchecked).
+    showWireframeOverlay: wireframeAutoOn ? false : toggleWireframeOverlay.checked,
   };
   vscode.postMessage({ type: 'viewSettingsChanged', settings });
 }
@@ -2128,8 +2750,6 @@ function populateTextures(): void {
   const prevKey = textureEntries[activeTextureIdx]?.key;
 
   textureEntries = [];
-  activeImgCanvas = null;
-  activeUVCanvas = null;
   textureView.innerHTML = '';
   textureSelect.innerHTML = '';
 
@@ -2160,11 +2780,16 @@ function populateTextures(): void {
     textureSummary.textContent = '';
     textureSelect.disabled = true;
     toggleShowUV.disabled = true;
+    texIsolateBtn.disabled = true;
+    setElementMode('off');
+    elementSelection.setMesh(null);
+    for (const b of elemModeBtns) b.disabled = b.dataset.elem !== 'off';
     textureView.innerHTML = '<div class="kv-empty">No textures in this scene.</div>';
     return;
   }
   textureSelect.disabled = false;
   toggleShowUV.disabled = false;
+  for (const b of elemModeBtns) b.disabled = false;
 
   // Sort: base color first, then normal/roughness/metalness, then the rest.
   const slotPriority = (slot: string): number => {
@@ -2212,8 +2837,6 @@ function populateTextures(): void {
 /** Build and mount the card for `textureEntries[activeTextureIdx]`. */
 function renderActiveTexture(): void {
   textureView.innerHTML = '';
-  activeImgCanvas = null;
-  activeUVCanvas = null;
   const entry = textureEntries[activeTextureIdx];
   if (!entry) return;
 
@@ -2231,36 +2854,40 @@ function renderActiveTexture(): void {
   roleBadge.className = 'tex-card-role';
   const uniqueRoles = Array.from(new Set(entry.usages.map((u) => TEXTURE_ROLE_LABELS[u.slot] ?? u.slot)));
   roleBadge.textContent = uniqueRoles.join(' · ');
-  head.append(name, roleBadge);
+  const expandBtn = document.createElement('button');
+  expandBtn.type = 'button';
+  expandBtn.className = 'tex-card-expand';
+  expandBtn.textContent = '⤢';
+  expandBtn.title = 'Enlarge';
+  head.append(name, roleBadge, expandBtn);
   card.appendChild(head);
 
   const preview = document.createElement('div');
   preview.className = 'tex-card-preview';
 
-  const imgCanvas = document.createElement('canvas');
-  imgCanvas.className = 'tex-img';
-  const ok = drawTextureToCanvas(entry.texture, imgCanvas);
-  if (!ok) {
+  const backing = buildTextureBacking(entry.texture);
+  if (!backing) {
     preview.classList.add('empty');
     preview.textContent = previewPlaceholderLabel(entry.texture);
+    expandBtn.disabled = true;
   } else {
-    const stack = document.createElement('div');
-    stack.className = 'tex-canvas-stack';
-    const uvCanvas = document.createElement('canvas');
-    uvCanvas.className = 'tex-uv';
-    // Critical for alignment: both canvases share the *same* internal buffer
-    // size. CSS scales them identically via object-fit: contain, so UV strokes
-    // drawn in the canvas's own pixel coords end up on top of the right
-    // texels at any rendered display size.
-    uvCanvas.width = imgCanvas.width;
-    uvCanvas.height = imgCanvas.height;
-    stack.append(imgCanvas, uvCanvas);
-    preview.appendChild(stack);
-    stack.addEventListener('click', () =>
-      openTextureModal(imgCanvas, uvCanvas, roleBadge.textContent ? `${nameText} · ${roleBadge.textContent}` : nameText),
-    );
-    activeImgCanvas = imgCanvas;
-    activeUVCanvas = uvCanvas;
+    uvView.setTexture(backing, entry.texture.flipY !== false, entry.key);
+    preview.appendChild(uvView.root);
+    // The modal keeps its own fixed-size render (image + composited overlay);
+    // it is a snapshot for close reading, not a second zoomable view.
+    expandBtn.addEventListener('click', () => {
+      const img = document.createElement('canvas');
+      if (!drawTextureToCanvas(entry.texture, img)) return;
+      let uv: HTMLCanvasElement | null = null;
+      const usage = showUV ? pickUsageForUV(entry) : null;
+      if (usage) {
+        uv = document.createElement('canvas');
+        uv.width = img.width;
+        uv.height = img.height;
+        drawUVOverlay(usage.mesh.geometry as THREE.BufferGeometry, entry.texture, uv);
+      }
+      openTextureModal(img, uv, roleBadge.textContent ? `${nameText} · ${roleBadge.textContent}` : nameText);
+    });
   }
   card.appendChild(preview);
 
@@ -2283,8 +2910,51 @@ function renderActiveTexture(): void {
 
   textureView.appendChild(card);
 
+  syncTexIsolateButton();
   refreshUVOverlay();
+  if (elementSelection.mode !== 'off') syncElementMesh();
 }
+
+/** Material slot → Inspect mode, for the Textures tab's "Isolate on model". */
+const SLOT_TO_INSPECT: Record<string, InspectMode> = {
+  map: 'baseColor',
+  normalMap: 'normalMap',
+  metalnessMap: 'metalness',
+  roughnessMap: 'roughness',
+  aoMap: 'ao',
+  emissiveMap: 'emissive',
+};
+
+function inspectModeForEntry(entry: TextureEntry): InspectMode | null {
+  for (const u of entry.usages) {
+    const mode = SLOT_TO_INSPECT[u.slot];
+    if (mode) return mode;
+  }
+  return null;
+}
+
+/** Enable the button for textures in a standard PBR slot, and flip its label
+ *  when the model is already isolating this texture's channel. */
+function syncTexIsolateButton(): void {
+  const entry = textureEntries[activeTextureIdx];
+  const mode = entry ? inspectModeForEntry(entry) : null;
+  const active = mode !== null && mode === inspectMode;
+  texIsolateBtn.disabled = !mode;
+  texIsolateBtn.textContent = active ? 'Stop isolating' : 'Isolate on model';
+  texIsolateBtn.classList.toggle('active', active);
+  texIsolateBtn.title = mode
+    ? active
+      ? 'Return the model to its normal shading'
+      : `Show the ${INSPECT_LABELS[mode]} channel unlit on the model`
+    : 'Only the standard PBR slots (base color, normal, metalness, roughness, AO, emissive) can be isolated';
+}
+
+texIsolateBtn.addEventListener('click', () => {
+  const entry = textureEntries[activeTextureIdx];
+  const mode = entry ? inspectModeForEntry(entry) : null;
+  if (!mode) return;
+  setInspect(mode === inspectMode ? null : mode);
+});
 
 function displayTextureName(tex: THREE.Texture, usages: TextureUsage[]): string {
   if (tex.name) return tex.name;
@@ -2348,8 +3018,28 @@ function filterName(f: THREE.TextureFilter | THREE.MagnificationTextureFilter | 
   }
 }
 
+/** GPU read-back cap for the zoomable view. CPU-drawable images are handed
+ *  over at native size with no copy; compressed/GPU-only ones are read back
+ *  once, and 2048² keeps that under a few hundred ms and ~16 MB. */
+const UV_BACKING_MAX_GPU = 2048;
+
+/** Source image for the zoomable UV view: the texture's own image when the
+ *  canvas can draw it directly, else a one-off GPU read-back. */
+function buildTextureBacking(tex: THREE.Texture): UVBacking | null {
+  const img = tex.image;
+  const dims = imageDims(img);
+  const drawable =
+    img instanceof HTMLImageElement ||
+    img instanceof HTMLCanvasElement ||
+    (typeof ImageBitmap !== 'undefined' && img instanceof ImageBitmap);
+  if (dims && drawable) return { source: img as CanvasImageSource, width: dims.w, height: dims.h };
+  const rendered = viewer.renderTextureToCanvas(tex, UV_BACKING_MAX_GPU);
+  return rendered ? { source: rendered, width: rendered.width, height: rendered.height } : null;
+}
+
 /** Fill the canvas with the texture's image, trying a CPU drawImage first and
- *  falling back to a GPU read-back for compressed (KTX2) / GPU-only textures. */
+ *  falling back to a GPU read-back for compressed (KTX2) / GPU-only textures.
+ *  Used by the enlarge modal; the card itself draws through UVView. */
 function drawTextureToCanvas(tex: THREE.Texture, canvas: HTMLCanvasElement): boolean {
   if (drawTextureCPU(tex, canvas)) return true;
   const rendered = viewer.renderTextureToCanvas(tex, TEXTURE_CANVAS_MAX);
@@ -2402,22 +3092,24 @@ function drawTextureCPU(tex: THREE.Texture, canvas: HTMLCanvasElement): boolean 
   }
 }
 
-/** Re-draw the UV overlay on the currently-mounted card. */
+/** Point the zoomable view at the UVs of the mesh that should be overlaid
+ *  (or at nothing when the overlay is off). While an element mode is active,
+ *  the wireframe follows the selection's mesh — element picks can retarget to
+ *  another mesh of the same texture entry, and drawing one mesh's unwrap
+ *  while hit-testing another would misplace every highlight. */
 function refreshUVOverlay(): void {
-  if (!activeUVCanvas) return;
-  const ctx = activeUVCanvas.getContext('2d');
-  if (!ctx) return;
-  ctx.clearRect(0, 0, activeUVCanvas.width, activeUVCanvas.height);
   if (!showUV) {
-    activeUVCanvas.classList.add('hidden');
+    uvView.setWireframe(null);
     return;
   }
-  activeUVCanvas.classList.remove('hidden');
+  const st = elementSelection;
+  if (st.mode !== 'off' && st.mesh) {
+    uvView.setWireframe(st.mesh.geometry as THREE.BufferGeometry);
+    return;
+  }
   const entry = textureEntries[activeTextureIdx];
-  if (!entry) return;
-  const usage = pickUsageForUV(entry);
-  if (!usage) return;
-  drawUVOverlay(usage.mesh.geometry as THREE.BufferGeometry, entry.texture, activeUVCanvas);
+  const usage = entry ? pickUsageForUV(entry) : null;
+  uvView.setWireframe(usage ? (usage.mesh.geometry as THREE.BufferGeometry) : null);
 }
 
 /**
@@ -2436,6 +3128,8 @@ function pickUsageForUV(entry: TextureEntry): TextureUsage | null {
   return entry.usages[0] ?? null;
 }
 
+/** Fixed-buffer UV overlay for the enlarge modal (the card's live overlay is
+ *  drawn by UVView with the same UV → texel rules). */
 function drawUVOverlay(
   geom: THREE.BufferGeometry,
   tex: THREE.Texture,
@@ -2482,3 +3176,7 @@ function drawUVOverlay(
   }
   ctx.stroke();
 }
+
+// Test/debug hook: lets the headless UI harness inspect the live module state
+// (the bundle is an IIFE, so nothing is reachable from the page otherwise).
+(window as unknown as Record<string, unknown>).__mv = { viewer, uvView, elementSelection };

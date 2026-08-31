@@ -30,14 +30,22 @@ A shading strip next to the corner view gizmo switches between **Wireframe, Soli
 
 ![Shading HUD in Normals mode with its hover explanation](media/shading-hud.png)
 
+## UV inspection
+
+The Textures tab pairs a **zoomable UV viewport** (wheel to individual texels, drag to pan, wireframe overlay crisp at any zoom) with Blender-style **element selection**: pick vertices, edges, or faces in either the UV view or the 3D viewport and watch the same selection light up in both — seam vertices show every UV copy across islands. Box/lasso select honors the X-ray toggle (visible-only vs through), double-click grabs a whole UV island or 3D connected part, and `F` localizes the highlight in the other view. **Isolate on model** paints any PBR map unlit on the geometry.
+
+![UV inspection: element selection synced between the UV view and the viewport](media/uv-viewer.gif)
+
 ## More features
 
 - **Wide format support** — GLB/GLTF (including DRACO- and meshopt-compressed, and KTX2/Basis textures), FBX, OBJ, USD/USDA/USDC/USDZ, STEP/STP, STL, PLY, DAE (Collada), 3DS, 3MF, VRML, Gaussian splats (SPZ/SPLAT/KSPLAT/SOG/3DGS PLY), and more
 - **Sidecar textures** — FBX/OBJ/DAE files that reference textures by relative path (e.g. a `textures/` folder next to the model) load them automatically, even when the exported absolute paths are stale
 - **Scene hierarchy** — tree view with filtering, per-node visibility (with a one-click bulk show/hide of the filtered set), and selection outlines
-- **Inspector** — object transforms, geometry stats, material and texture details, with clickable texture previews (including GPU-compressed KTX2) that enlarge for close inspection
+- **Inspector** — object transforms, geometry stats, material and texture details, with a zoomable texture viewport (including GPU-compressed KTX2) and a UV-map overlay that stays crisp at any zoom
 - **Skin-weight visualization** — recolor a skinned mesh by its bone weights, with modes for all bones, a single isolated bone, influence count, and weight normalization; the coloring deforms with the animation
 - **Texture-map toggles** — in Material/Rendered shading, switch each PBR map (base color, normal, metalness, roughness, AO, emissive) on or off in the lit render to isolate what each contributes
+- **UV ↔ 3D element selection** — Blender-style vertex/edge/face inspection with one selection mirrored between the zoomable UV viewport and the 3D view: hover sync, click/Shift/box/lasso select, double-click for UV islands or 3D connected components, seam-aware highlighting, and `F` to localize the highlight in the other view
+- **Isolate a texture on the model** — from the Textures tab, show any PBR map (base color, normal map, metalness, roughness, AO, emissive) unlit on the geometry; a viewport chip names the active special view with one-click exit
 - **Blendshape controls** — a Blendshapes tab (shown only when a scene has morph targets) with a slider per shape, grouped by mesh and optionally combined by name for ARKit face rigs; sliders track animated shapes live and let you pose them by hand
 - **View options** — wireframe overlay, skeleton overlay, grid/axes helpers, bounds, environment lighting, and a Y-up / Z-up axis toggle for CAD/robotics assets exported Z-up (also one click away in the shading HUD)
 - **Measurement** — a bottom-left scale bar for the current zoom, plus a ruler tool to click two points and read the distance
