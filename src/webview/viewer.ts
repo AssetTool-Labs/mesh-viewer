@@ -11,9 +11,25 @@ import { SparkRenderer } from '@sparkjsdev/spark';
 import type { CameraState, OrbitDelta } from '../types';
 import { setViewerRenderer, type LoadedAsset } from './loaders';
 import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
+import type { ElementMode, Topology } from './elementTopology';
 export type { WeightMode } from './weightMaterial';
 
 export type ShadingMode = 'solid' | 'material' | 'rendered' | 'wireframe' | 'points' | 'normals';
+
+/** Inspect shows one PBR channel unlit on the geometry: the slot's texture,
+ *  or the material's scalar factor as a flat color when it has no map. It is
+ *  entered from the Textures tab and, like the skin-weight display, is a
+ *  session-local overlay on top of the shading dropdown. */
+export type InspectMode = 'baseColor' | 'normalMap' | 'metalness' | 'roughness' | 'ao' | 'emissive';
+
+export const INSPECT_LABELS: Record<InspectMode, string> = {
+  baseColor: 'Base Color',
+  normalMap: 'Normal Map',
+  metalness: 'Metalness',
+  roughness: 'Roughness',
+  ao: 'AO',
+  emissive: 'Emissive',
+};
 
 /** PBR texture maps that can be toggled on/off in Material/Rendered shading. */
 export type MapChannel = 'baseColor' | 'normal' | 'metalness' | 'roughness' | 'ao' | 'emissive';
@@ -70,6 +86,51 @@ export function isFiniteBox(box: THREE.Box3): boolean {
     Number.isFinite(box.min.x) && Number.isFinite(box.min.y) && Number.isFinite(box.min.z) &&
     Number.isFinite(box.max.x) && Number.isFinite(box.max.y) && Number.isFinite(box.max.z)
   );
+}
+
+/**
+ * Bring every vertex attribute up to `position`'s length.
+ *
+ * three indexes all attributes with the same vertex index and assumes they are
+ * the same length. Some loaders do not deliver that — Collada's skin+morph path
+ * can emit `position` 240 / `skinIndex` 216 — and three then reads past the end.
+ * For skinning that is fatal rather than cosmetic: the out-of-range read yields
+ * an undefined bone index, so `SkinnedMesh.applyBoneTransform` throws
+ * `Cannot read properties of undefined (reading 'matrixWorld')` from inside
+ * `WebGLRenderer.render`, on every frame, and the viewport dies.
+ *
+ * Padding with zeros is the right repair: a zero skin weight makes
+ * `applyBoneTransform` skip that bone entirely, so unskinned vertices simply
+ * stay at their bind position. A short `normal` is dropped instead so the
+ * recompute below can rebuild it consistently.
+ */
+function padShortAttributes(geometry: THREE.BufferGeometry): string[] {
+  const position = geometry.getAttribute('position');
+  if (!position) return [];
+  const padded: string[] = [];
+  for (const name of Object.keys(geometry.attributes)) {
+    if (name === 'position') continue;
+    const attr = geometry.getAttribute(name) as THREE.BufferAttribute;
+    // Interleaved attributes share a buffer with others; rewriting them safely
+    // is not worth it, and no loader that emits them mismatches counts.
+    if (attr.count >= position.count || !(attr as { array?: ArrayLike<number> }).array) continue;
+    if (name === 'normal') {
+      geometry.deleteAttribute('normal');
+      padded.push(`${name} (dropped, recomputed)`);
+      continue;
+    }
+    const source = attr.array as unknown as { length: number };
+    const filled = new (attr.array.constructor as new (n: number) => typeof attr.array)(
+      position.count * attr.itemSize,
+    );
+    (filled as unknown as { set(a: ArrayLike<number>): void }).set(attr.array as ArrayLike<number>);
+    geometry.setAttribute(
+      name,
+      new THREE.BufferAttribute(filled, attr.itemSize, attr.normalized),
+    );
+    padded.push(`${name} ${source.length / attr.itemSize}→${position.count}`);
+  }
+  return padded;
 }
 
 /** The mesh's morph influence array if it has any morph targets, else null. */
@@ -240,6 +301,16 @@ export class Viewer {
 
   private originalMaterials = new WeakMap<THREE.Object3D, MaterialBackup>();
   private shadingMode: ShadingMode = 'material';
+  /** Active Inspect channel; overrides the shading mode on meshes until null. */
+  private inspectMode: InspectMode | null = null;
+  /** Element-selection highlight overlay, mounted as a child of its mesh. */
+  private elementOverlay: THREE.Group | null = null;
+  /** What the current overlay's selection part was built from; hover-only
+   *  changes swap just the hover child instead of rebuilding the set. */
+  private overlayMesh: THREE.Mesh | null = null;
+  private overlayMode: ElementMode = 'off';
+  private overlayVersion = -1;
+  private overlayHover: THREE.Object3D | null = null;
   /** Maps the user has switched off in Material/Rendered shading. */
   private readonly disabledMaps = new Set<MapChannel>();
   /** Original texture slots nulled by the map toggles, keyed by material, for restore. */
@@ -1176,6 +1247,274 @@ export class Viewer {
    *  - follows animations / skinning automatically every frame
    *  - covers groups: descendant meshes are merged into one silhouette
    */
+  /**
+   * Rebuild the element highlight overlay (selected + hovered verts/edges/faces)
+   * as a child of `mesh`, so it follows the mesh transform. Geometry is built in
+   * the mesh's local space from the topology's buffer indices; overlays draw on
+   * top (no depth test) like the measurement overlay. Pass a null mesh or an
+   * empty selection to remove it.
+   */
+  updateElementOverlay(
+    mesh: THREE.Mesh | null,
+    topo: Topology | null,
+    mode: ElementMode,
+    selected: ReadonlySet<number>,
+    hovered: number | null,
+    version: number,
+  ): void {
+    if (!mesh || !topo || mode === 'off' || (selected.size === 0 && hovered === null)) {
+      this.clearElementOverlay();
+      return;
+    }
+    const pos = (mesh.geometry as THREE.BufferGeometry).getAttribute('position') as THREE.BufferAttribute;
+    if (!pos) return;
+
+    // Hover changes come with every mouse move; only a selection change (a
+    // new version, mesh, or mode) pays for rebuilding the selection geometry.
+    const sameSelection =
+      this.elementOverlay !== null &&
+      this.overlayMesh === mesh &&
+      this.overlayMode === mode &&
+      this.overlayVersion === version;
+    if (!sameSelection) this.clearElementOverlay();
+
+    const SEL = 0xff9d2e;
+    const HOV = 0x4cc3f7;
+    const push = (arr: number[], i: number): void => {
+      arr.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+    };
+    const collect = (ids: Iterable<number>): number[] => {
+      const out: number[] = [];
+      for (const id of ids) {
+        if (mode === 'face') {
+          if (id < 0 || id >= topo.triCount) continue;
+          push(out, topo.tris[id * 3]);
+          push(out, topo.tris[id * 3 + 1]);
+          push(out, topo.tris[id * 3 + 2]);
+        } else if (mode === 'vertex') {
+          // One point per canonical vertex — copies share the position.
+          push(out, id);
+        } else {
+          const copies = topo.edgeCopies.get(id);
+          if (!copies) continue;
+          // Copies coincide in 3D; the first pair is enough.
+          push(out, copies[0]);
+          push(out, copies[1]);
+        }
+      }
+      return out;
+    };
+    const mount = (coords: number[], color: number, order: number): THREE.Object3D | null => {
+      if (!coords.length) return null;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(coords, 3));
+      let obj: THREE.Object3D;
+      if (mode === 'face') {
+        // Blender edit-mode look: a translucent tint over the shaded texture.
+        // With X-ray off the fill is depth-tested (pulled off the surface by a
+        // polygon offset), so occluded faces don't bleed through; with X-ray
+        // on it stays visible through the mesh, matching select-through.
+        obj = new THREE.Mesh(
+          geo,
+          new THREE.MeshBasicMaterial({
+            color,
+            transparent: true,
+            opacity: 0.35,
+            side: THREE.DoubleSide,
+            depthTest: !this.xrayOn,
+            depthWrite: false,
+            polygonOffset: true,
+            polygonOffsetFactor: -2,
+            polygonOffsetUnits: -2,
+            toneMapped: false,
+          }),
+        );
+      } else if (mode === 'vertex') {
+        obj = new THREE.Points(
+          geo,
+          new THREE.PointsMaterial({ color, size: 7, sizeAttenuation: false, depthTest: false, toneMapped: false }),
+        );
+      } else {
+        obj = new THREE.LineSegments(
+          geo,
+          new THREE.LineBasicMaterial({ color, depthTest: false, toneMapped: false }),
+        );
+      }
+      obj.renderOrder = order;
+      obj.raycast = () => {};
+      return obj;
+    };
+
+    let group = this.elementOverlay;
+    if (!sameSelection || !group) {
+      group = new THREE.Group();
+      group.name = '__elementOverlay';
+      const sel = mount(collect(selected), SEL, 998);
+      if (sel) group.add(sel);
+      mesh.add(group);
+      this.elementOverlay = group;
+      this.overlayMesh = mesh;
+      this.overlayMode = mode;
+      this.overlayVersion = version;
+      this.overlayHover = null;
+    }
+    if (this.overlayHover) {
+      group.remove(this.overlayHover);
+      disposeOverlayObject(this.overlayHover);
+      this.overlayHover = null;
+    }
+    if (hovered !== null && !selected.has(hovered)) {
+      const hov = mount(collect([hovered]), HOV, 999);
+      if (hov) {
+        group.add(hov);
+        this.overlayHover = hov;
+      }
+    }
+  }
+
+  /** Non-indexed copy of a geometry carrying a per-triangle id attribute,
+   *  for the visibility ID pass. Cached per source geometry. */
+  private readonly idMeshCache = new WeakMap<THREE.BufferGeometry, THREE.Mesh>();
+  /** Iterable twin of idMeshCache so clearAssets can free the GPU buffers —
+   *  a WeakMap entry dying never fires three's dispose path. */
+  private readonly idMeshes = new Set<THREE.Mesh>();
+
+  private idMeshFor(mesh: THREE.Mesh): THREE.Mesh | null {
+    const src = mesh.geometry as THREE.BufferGeometry;
+    const cached = this.idMeshCache.get(src);
+    if (cached) return cached;
+    const pos = src.getAttribute('position') as THREE.BufferAttribute | undefined;
+    if (!pos) return null;
+    const index = src.getIndex();
+    const n = index ? index.count : pos.count;
+    const flat = new Float32Array(n * 3);
+    const tri = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const v = index ? index.getX(i) : i;
+      flat[i * 3] = pos.getX(v);
+      flat[i * 3 + 1] = pos.getY(v);
+      flat[i * 3 + 2] = pos.getZ(v);
+      tri[i] = Math.floor(i / 3);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(flat, 3));
+    geo.setAttribute('aTri', new THREE.BufferAttribute(tri, 1));
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: `
+        attribute float aTri;
+        varying float vTri;
+        void main() {
+          vTri = aTri;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      // Triangle id + 1 in RGB (0 = background/other meshes). vTri is constant
+      // across each triangle, so the varying interpolates to itself.
+      fragmentShader: `
+        varying float vTri;
+        void main() {
+          float id = floor(vTri + 0.5) + 1.0;
+          float r = floor(id / 65536.0);
+          float g = floor(mod(id, 65536.0) / 256.0);
+          float b = mod(id, 256.0);
+          gl_FragColor = vec4(r, g, b, 255.0) / 255.0;
+        }`,
+      blending: THREE.NoBlending,
+      side: THREE.DoubleSide,
+    });
+    const idMesh = new THREE.Mesh(geo, mat);
+    idMesh.matrixAutoUpdate = false;
+    idMesh.frustumCulled = false;
+    this.idMeshCache.set(src, idMesh);
+    this.idMeshes.add(idMesh);
+    return idMesh;
+  }
+
+  private idBlackMat: THREE.MeshBasicMaterial | null = null;
+
+  /**
+   * Visibility ID pass for occlusion-aware area select, Blender-style: the
+   * whole content is laid down as depth-writing black, then `mesh` is drawn
+   * again as per-triangle color ids over it — a pixel holds a triangle id iff
+   * that triangle is what the camera actually sees there. No depth compare,
+   * no bias. Returns the RGBA read-back of the `rx,ry,rw,rh` region (CSS px,
+   * y down); decode ids as r*65536 + g*256 + b, minus 1 (0 = nothing).
+   * Lines, points, splats and the highlight overlay neither occlude nor id.
+   */
+  renderSelectionIds(
+    mesh: THREE.Mesh,
+    width: number,
+    height: number,
+    rx: number,
+    ry: number,
+    rw: number,
+    rh: number,
+  ): Uint8Array | null {
+    if (width <= 0 || height <= 0 || rw <= 0 || rh <= 0) return null;
+    const idMesh = this.idMeshFor(mesh);
+    if (!idMesh) return null;
+    idMesh.matrix.copy(mesh.matrixWorld);
+    if (!this.idBlackMat) {
+      this.idBlackMat = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.DoubleSide });
+    }
+
+    // Hide everything that should neither occlude nor produce ids.
+    const hidden: THREE.Object3D[] = [];
+    this.contentRoot.traverse((o) => {
+      const anyO = o as THREE.Mesh;
+      const isLineOrPoints = (o as THREE.Points).isPoints || (o as THREE.Line).isLine;
+      if ((isLineOrPoints || isSplat(o) || o === this.elementOverlay) && o.visible) {
+        o.visible = false;
+        hidden.push(o);
+      }
+    });
+
+    const occluders = new THREE.Scene();
+    occluders.overrideMaterial = this.idBlackMat;
+    occluders.add(this.contentRoot);
+    const idScene = new THREE.Scene();
+    idScene.add(idMesh);
+
+    const rt = new THREE.WebGLRenderTarget(width, height);
+    const prevTarget = this.renderer.getRenderTarget();
+    const prevClear = this.renderer.getClearColor(new THREE.Color());
+    const prevAlpha = this.renderer.getClearAlpha();
+    const prevAuto = this.renderer.autoClear;
+    const buf = new Uint8Array(rw * rh * 4);
+    try {
+      this.renderer.setRenderTarget(rt);
+      this.renderer.setClearColor(0x000000, 1);
+      this.renderer.clear();
+      this.renderer.autoClear = false;
+      this.renderer.render(occluders, this.camera);
+      // Same depth as the black copy of itself; LessEqualDepth lets the ids win.
+      this.renderer.render(idScene, this.camera);
+      this.renderer.readRenderTargetPixels(rt, rx, height - ry - rh, rw, rh, buf);
+    } finally {
+      // The content root must find its way home even if a render throws —
+      // otherwise the whole asset vanishes from the live scene.
+      this.renderer.autoClear = prevAuto;
+      this.renderer.setRenderTarget(prevTarget);
+      this.renderer.setClearColor(prevClear, prevAlpha);
+      this.scene.add(this.contentRoot);
+      idScene.remove(idMesh);
+      for (const o of hidden) o.visible = true;
+      rt.dispose();
+    }
+    return buf;
+  }
+
+  clearElementOverlay(): void {
+    const group = this.elementOverlay;
+    if (!group) return;
+    this.elementOverlay = null;
+    this.overlayMesh = null;
+    this.overlayMode = 'off';
+    this.overlayVersion = -1;
+    this.overlayHover = null;
+    group.parent?.remove(group);
+    for (const child of group.children) disposeOverlayObject(child);
+  }
+
   setSelected(obj: THREE.Object3D | null): void {
     if (this.selectedObj === obj) return;
     this.cancelRotateModal();
@@ -1506,6 +1845,13 @@ export class Viewer {
     this.scene.environment = tex;
   }
 
+  /** Isolate one PBR channel unlit on every mesh (null = back to shading). */
+  setInspectMode(mode: InspectMode | null): void {
+    if (this.inspectMode === mode) return;
+    this.inspectMode = mode;
+    this.applyAllShading();
+  }
+
   setShading(mode: ShadingMode): void {
     if (this.shadingMode === mode) return;
     this.shadingMode = mode;
@@ -1525,6 +1871,14 @@ export class Viewer {
   setXray(v: boolean): void {
     if (this.xrayOn === v) return;
     this.xrayOn = v;
+    // Element face highlights switch between occluded and see-through styles.
+    for (const child of this.elementOverlay?.children ?? []) {
+      const m = (child as THREE.Mesh).material as THREE.MeshBasicMaterial;
+      if ((child as THREE.Mesh).isMesh && m) {
+        m.depthTest = !v;
+        m.needsUpdate = true;
+      }
+    }
     this.applyAllShading();
   }
 
@@ -1544,8 +1898,11 @@ export class Viewer {
       if (!mesh.isMesh && !(o as THREE.Points).isPoints) return;
       this.applyShadingToObject(o);
     });
-    // Map toggles only touch the asset's own materials (Material/Rendered modes).
-    if (this.shadingMode === 'material' || this.shadingMode === 'rendered') this.applyMapToggles();
+    // Map toggles only touch the asset's own materials (Material/Rendered modes);
+    // while inspecting, meshes carry channel materials instead, so skip them.
+    if (!this.inspectMode && (this.shadingMode === 'material' || this.shadingMode === 'rendered')) {
+      this.applyMapToggles();
+    }
     if (this.xrayOn) this.applyXray();
   }
 
@@ -1644,6 +2001,13 @@ export class Viewer {
 
     // The previous mode may have left a generated material behind.
     this.disposeTransientMaterial(o);
+
+    // Inspect overrides the dropdown on meshes; applyAllShading has already
+    // restored any nulled map slots, so the channel material sees real maps.
+    if (this.inspectMode && isMesh) {
+      (mesh as THREE.Mesh).material = buildChannelMaterial(backup.material, this.inspectMode);
+      return;
+    }
 
     const restore = (): void => {
       (mesh as THREE.Mesh).material = backup.material;
@@ -1814,6 +2178,14 @@ export class Viewer {
         this.ensureSparkRenderer();
         this.applySplatOrientation(o);
       } else if (mesh.isMesh) {
+        if (mesh.geometry) {
+          const padded = padShortAttributes(mesh.geometry);
+          if (padded.length) {
+            console.warn(
+              `[3DViewer] ${o.name || 'mesh'}: vertex attributes shorter than position; padded ${padded.join(', ')}.`,
+            );
+          }
+        }
         // Some formats ship without normals; the normals debug mode and lit
         // shading both need them, so fill them in once at load time.
         if (mesh.geometry && !mesh.geometry.getAttribute('normal')) {
@@ -1863,6 +2235,12 @@ export class Viewer {
 
   /** Remove everything currently loaded (used by loadAsset). */
   clearAssets(): void {
+    this.clearElementOverlay();
+    for (const m of this.idMeshes) {
+      m.geometry.dispose();
+      forEachMaterial(m.material as THREE.Material, (mm) => mm.dispose());
+    }
+    this.idMeshes.clear();
     this.setSelected(null);
     if (this.activeAction) {
       this.activeAction.stop();
@@ -1900,6 +2278,42 @@ export class Viewer {
   frameAll(): void {
     if (!this.entries.length) return;
     this.frameObject(this.contentRoot);
+  }
+
+  /**
+   * Center the camera on a world-space box while keeping the current viewing
+   * direction (unlike frameObject's canned angle) — used to localize an
+   * element selection without disorienting the user. When the selection's
+   * average outward normal says the current view is looking at its back
+   * side (where a depth-tested highlight would hide inside the mesh), the
+   * camera comes around to the front of the selection instead. Tiny boxes
+   * (a single vertex) are clamped to a fraction of the content size so F
+   * never zooms into a microscopic frustum.
+   */
+  frameElementBox(box: THREE.Box3, outwardNormal?: THREE.Vector3): void {
+    if (box.isEmpty() || !isFiniteBox(box)) return;
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const content = contentBounds(this.contentRoot).getSize(new THREE.Vector3());
+    const contentDim = Math.max(content.x, content.y, content.z) || 1;
+    const maxDim = Math.max(size.x, size.y, size.z, contentDim * 0.05);
+    const dist = maxDim / (2 * Math.tan((Math.PI * this.camera.fov) / 360));
+    const dir = this.camera.position.clone().sub(this.controls.target);
+    if (dir.lengthSq() < 1e-12) dir.set(1, 0.7, 1);
+    dir.normalize();
+    if (outwardNormal && outwardNormal.lengthSq() > 1e-10) {
+      const n = outwardNormal.clone().normalize();
+      if (dir.dot(n) < 0.15) {
+        // Slight tilt toward the current up avoids a dead-flat head-on view.
+        dir.copy(n).addScaledVector(this.camera.up, 0.25).normalize();
+      }
+    }
+    this.camera.position.copy(center).addScaledVector(dir, dist * 1.6);
+    this.camera.near = Math.max(0.001, maxDim / 1000);
+    this.camera.far = Math.max(100, dist * 100);
+    this.camera.updateProjectionMatrix();
+    this.controls.target.copy(center);
+    this.controls.update();
   }
 
   frameObject(obj: THREE.Object3D): void {
@@ -2155,6 +2569,64 @@ const MAP_SLOTS: Record<MapChannel, string> = {
   ao: 'aoMap',
   emissive: 'emissiveMap',
 };
+
+/** Unlit material isolating one PBR channel of a source material, for the
+ *  Inspect modes. Shows the slot's texture, or the scalar factor as a flat
+ *  color when there is no map. Packed maps (e.g. a single ORM texture) show all
+ *  their components — v1 displays the map rather than extracting one channel.
+ *  Multi-material meshes use the first entry, like the normals mode. */
+function buildChannelMaterial(
+  src: THREE.Material | THREE.Material[],
+  mode: InspectMode,
+): THREE.MeshBasicMaterial {
+  const std = (Array.isArray(src) ? src[0] : src) as THREE.MeshStandardMaterial;
+  const gray = (v: number): THREE.Color => new THREE.Color(v, v, v);
+  // toneMapped off so the raw texel / scalar isn't reshaped by tone mapping.
+  const base = { toneMapped: false };
+  switch (mode) {
+    case 'baseColor':
+      return new THREE.MeshBasicMaterial({
+        ...base,
+        map: std?.map ?? null,
+        color: std?.color?.clone() ?? new THREE.Color(0xffffff),
+      });
+    case 'normalMap':
+      // Flat tangent-space "up" (0.5, 0.5, 1) when the material has no map.
+      return std?.normalMap
+        ? new THREE.MeshBasicMaterial({ ...base, map: std.normalMap })
+        : new THREE.MeshBasicMaterial({ ...base, color: new THREE.Color(0x8080ff) });
+    case 'metalness':
+      return std?.metalnessMap
+        ? new THREE.MeshBasicMaterial({ ...base, map: std.metalnessMap })
+        : new THREE.MeshBasicMaterial({ ...base, color: gray(std?.metalness ?? 0) });
+    case 'roughness':
+      return std?.roughnessMap
+        ? new THREE.MeshBasicMaterial({ ...base, map: std.roughnessMap })
+        : new THREE.MeshBasicMaterial({ ...base, color: gray(std?.roughness ?? 1) });
+    case 'ao':
+      // Shown through the primary UV set; no occlusion map means "fully lit".
+      return std?.aoMap
+        ? new THREE.MeshBasicMaterial({ ...base, map: std.aoMap })
+        : new THREE.MeshBasicMaterial({ ...base, color: new THREE.Color(0xffffff) });
+    case 'emissive':
+      return std?.emissiveMap
+        ? new THREE.MeshBasicMaterial({
+            ...base,
+            map: std.emissiveMap,
+            color: std.emissive?.clone() ?? new THREE.Color(0xffffff),
+          })
+        : new THREE.MeshBasicMaterial({
+            ...base,
+            color: std?.emissive?.clone() ?? new THREE.Color(0x000000),
+          });
+  }
+}
+
+function disposeOverlayObject(child: THREE.Object3D): void {
+  const o = child as THREE.Mesh;
+  o.geometry?.dispose();
+  forEachMaterial(o.material as THREE.Material, (m) => m.dispose());
+}
 
 function forEachMaterial(
   m: THREE.Material | THREE.Material[],

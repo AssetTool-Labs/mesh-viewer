@@ -61,6 +61,27 @@
               <input type="checkbox" id="toggleShowUV" />
               <span>Show UV map overlay</span>
             </label>
+            <button type="button" id="texIsolate" disabled>Isolate on model</button>
+            <label class="row" id="elemModeRow">
+              <span>Select</span>
+              <!-- Element-selection mode, mirrored between the UV view and the
+                   3D viewport (keys 1/2/3 switch, Esc clears). -->
+              <div class="elem-seg" id="elemModeSeg" role="group">
+                <button type="button" data-elem="off" class="active">Off</button>
+                <button type="button" data-elem="vertex" title="Vertices (1)">Vert</button>
+                <button type="button" data-elem="edge" title="Edges (2)">Edge</button>
+                <button type="button" data-elem="face" title="Faces (3)">Face</button>
+              </div>
+            </label>
+            <label class="row" id="elemToolRow">
+              <span>Tool</span>
+              <div class="elem-seg" id="elemToolSeg" role="group">
+                <button type="button" data-tool="box" class="active" title="Drag a rectangle (Shift extends; B arms it in the 3D view)">Box</button>
+                <button type="button" data-tool="lasso" title="Drag a free shape (Shift extends)">Lasso</button>
+              </div>
+            </label>
+            <button type="button" id="elemFrame" disabled title="Center both views on the highlight — over a view, F localizes the other one">Frame highlight <span class="kbd">F</span></button>
+            <div id="elemStatus" class="tex-summary" hidden></div>
             <div id="textureSummary" class="tex-summary"></div>
           </div>
           <div id="textureView" class="tex-view">
@@ -233,6 +254,15 @@
         <div id="scaleBar" hidden><span id="scaleBarLabel"></span></div>
         <div id="measureLabel" hidden></div>
         <div id="poseHint" hidden></div>
+        <!-- Rubber band for 3D box/lasso element selection. -->
+        <svg id="areaSvg"></svg>
+        <!-- Names the active special view (Inspect channel / skin weights), with a
+             one-click way back, so the shading strip never silently disagrees
+             with what is rendered. -->
+        <div id="viewStateChip" hidden>
+          <span id="viewStateChipLabel"></span>
+          <button type="button" id="viewStateChipClose" title="Exit this view">✕</button>
+        </div>
         <!-- Blender-style shading mode strip, to the left of the corner view gizmo. -->
         <div id="shadingHud">
           <button id="shadingCollapse" class="shading-btn shading-collapse" data-tip="Hide the shading controls">›</button>
@@ -336,6 +366,9 @@
       </div>
 
       <button id="sidebarToggle" aria-label="Toggle panel" title="Toggle panel">⮜</button>
+      <!-- Drag handle on the panel edge; the 3D canvas and the UV viewport both
+           watch their own boxes, so they follow the drag live. -->
+      <div id="sidebarResizer" title="Drag to resize the panel"></div>
     </div>
 
     <div id="texModal" class="hidden" role="dialog" aria-label="Texture preview">
@@ -345,6 +378,7 @@
 
     <script nonce="{{nonce}}">window.__dracoDecoderPath = "{{dracoUri}}";</script>
     <script nonce="{{nonce}}">window.__ktx2TranscoderPath = "{{basisUri}}";</script>
+    <script nonce="{{nonce}}">window.__stepWorkerUri = "{{stepWorkerUri}}";</script>
     <script nonce="{{nonce}}" src="{{scriptUri}}"></script>
   </body>
 </html>

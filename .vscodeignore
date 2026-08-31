@@ -10,6 +10,7 @@
 !media/icon.png
 !out/extension.js
 !out/webview.js
+!out/step-worker.js
 !out/webview.css
 !out/viewer.html
 !out/draco/**

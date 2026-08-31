@@ -51,6 +51,20 @@ html, body {
 }
 
 #app.sidebar-collapsed #sidebar { margin-left: calc(-1 * var(--sidebar-width)); }
+#app.sidebar-collapsed #sidebarResizer { display: none; }
+
+/* Invisible until hovered/dragged; straddles the sidebar/viewport border. */
+#sidebarResizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--sidebar-width);
+  width: 7px;
+  margin-left: -4px;
+  cursor: col-resize;
+  z-index: 10;
+}
+#sidebarResizer:hover, #sidebarResizer.dragging { background: var(--accent); opacity: 0.35; }
 #app.sidebar-collapsed #sidebarToggle { transform: rotate(180deg); }
 
 #sidebarToggle {
@@ -423,6 +437,63 @@ button.group-title:hover { color: var(--fg); }
   color: var(--muted);
   font-size: 11px;
 }
+/* Jump from the 2D preview to the matching Inspect mode in the viewport. */
+#texIsolate,
+#elemFrame {
+  align-self: flex-start;
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--panel-border);
+  border-radius: 2px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+#texIsolate:hover:not(:disabled), #elemFrame:hover:not(:disabled) { background: var(--hover); }
+#texIsolate:disabled, #elemFrame:disabled { opacity: 0.45; cursor: default; }
+.kbd {
+  display: inline-block;
+  padding: 0 4px;
+  margin-left: 4px;
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  font-size: 10px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  color: var(--muted);
+}
+#texIsolate.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+/* Vert/Edge/Face segmented switch. */
+.elem-seg { display: flex; gap: 2px; flex: 1; }
+.elem-seg button {
+  flex: 1;
+  padding: 3px 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 11px;
+  cursor: pointer;
+}
+.elem-seg button:hover:not(.active) { background: var(--hover); }
+.elem-seg button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.elem-seg button:disabled { opacity: 0.45; cursor: default; }
+.uv-view.picking { cursor: crosshair; }
+#areaSvg {
+  display: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 5;
+}
+#areaSvg.active { display: block; }
+#areaSvg .band {
+  fill: rgba(76, 195, 247, 0.08);
+  stroke: #4cc3f7;
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+.uv-view.picking.dragging { cursor: grabbing; }
 .tex-view {
   flex: 1 1 auto;
   display: flex;
@@ -477,28 +548,54 @@ button.group-title:hover { color: var(--fg); }
     repeating-conic-gradient(#2a2a2a 0% 25%, #1f1f1f 0% 50%) 0 0 / 16px 16px;
   min-height: 80px;
 }
-/* Image + UV stack: both canvases share the same grid cell and inherit the
-   same CSS box. Because both have identical intrinsic sizes (we set
-   canvas.width / canvas.height to the same value when we render) and use
-   `object-fit: contain`, the browser letterboxes them into exactly the same
-   on-screen rectangle. That makes the UV overlay align with the image
-   regardless of the panel width or texture aspect ratio. */
-.tex-canvas-stack {
-  display: grid;
+/* Zoomable UV viewport (UVView): a square that fills the card width; the
+   canvas is sized to the box × devicePixelRatio and paints the texture and
+   overlay itself, so nothing here scales the canvas. */
+.uv-view {
+  position: relative;
   width: 100%;
-  min-width: 0;
-}
-.tex-canvas-stack > canvas {
-  grid-area: 1 / 1;
-  display: block;
-  width: 100%;
+  aspect-ratio: 1 / 1;
   max-height: 60vh;
-  object-fit: contain;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
 }
-.tex-canvas-stack > canvas.tex-uv { pointer-events: none; }
-.tex-canvas-stack > canvas.tex-uv.hidden { display: none; }
-/* The preview is clickable to open the enlarged modal. */
-.tex-canvas-stack { cursor: zoom-in; }
+.uv-view.dragging { cursor: grabbing; }
+.uv-view canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.uv-zoom {
+  position: absolute;
+  right: 6px;
+  bottom: 4px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+/* Enlarge (modal) button in the card header. */
+.tex-card-expand {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--panel-border);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tex-card-expand:hover:not(:disabled) { background: var(--hover); }
+.tex-card-expand:disabled { opacity: 0.45; cursor: default; }
 .tex-card-preview.empty {
   color: var(--muted);
   font-size: 11px;
@@ -726,6 +823,38 @@ button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
   white-space: nowrap;
 }
 #measureLabel[hidden] { display: none; }
+
+/* Status chip for the active special view, tucked under the shading strip so
+   it reads as part of the same cluster (strip is 30px tall at top 57px). */
+#viewStateChip {
+  position: absolute;
+  top: 92px;
+  right: 144px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 10px;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+#viewStateChip[hidden] { display: none; }
+#viewStateChip button {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+#viewStateChip button:hover { background: rgba(255, 255, 255, 0.4); }
 
 /* Blender-style shading mode strip, vertically centered on the view gizmo
    (128px square at top/right 8px) and sitting to its left. */
