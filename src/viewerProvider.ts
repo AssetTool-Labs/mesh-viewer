@@ -147,12 +147,7 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
         case 'ready':
           try {
             const payload = await this.buildFilePayload(webview, document.uri);
-            const init: InitMessage = {
-              type: 'init',
-              settings: this.effectiveViewSettings(),
-              canReveal: document.uri.scheme === 'file',
-              ...payload,
-            };
+            const init: InitMessage = { type: 'init', settings: this.effectiveViewSettings(), ...payload };
             await webview.postMessage(init);
             await webview.postMessage({ type: 'viewerCount', count: MeshViewerProvider.liveWebviews.size });
           } catch (err) {
@@ -273,36 +268,6 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
           await vscode.workspace.fs.writeFile(target, Buffer.from(match[1], 'base64'));
           break;
         }
-        case 'saveSourceCopy': {
-          const base = path.basename(document.uri.fsPath);
-          const ext = path.extname(base).slice(1);
-          const dot = base.length - ext.length - 1;
-          const suggested = ext ? `${base.slice(0, dot)} copy.${ext}` : `${base} copy`;
-          const target = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.joinPath(fileDir, suggested),
-            filters: ext ? { [`${ext.toUpperCase()} file`]: [ext] } : undefined,
-          });
-          if (!target) break;
-          try {
-            const bytes = document.uri.scheme === 'file'
-              ? await vscode.workspace.fs.readFile(document.uri)
-              : await this.readVirtualResource(document.uri);
-            await vscode.workspace.fs.writeFile(target, bytes);
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            vscode.window.showErrorMessage(`3D Mesh Viewer: could not save a copy — ${message}`);
-          }
-          break;
-        }
-        case 'revealSource':
-          // Inside the workspace, highlight it in the Explorer view; otherwise
-          // fall back to the OS file manager (Finder / File Explorer).
-          if (vscode.workspace.getWorkspaceFolder(document.uri)) {
-            await vscode.commands.executeCommand('revealInExplorer', document.uri);
-          } else {
-            await vscode.commands.executeCommand('revealFileInOS', document.uri);
-          }
-          break;
       }
     });
     webviewPanel.onDidDispose(() => sub.dispose());

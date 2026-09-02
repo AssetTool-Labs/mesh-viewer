@@ -123,15 +123,6 @@ html, body {
   flex-shrink: 0;
 }
 .sidebar-header .header-btn:hover { background: var(--button-hover); }
-.sidebar-header .header-btn.icon {
-  padding: 4px;
-  line-height: 0;
-}
-.sidebar-header .header-btn.icon svg {
-  width: 14px;
-  height: 14px;
-}
-.sidebar-header .header-btn.icon[hidden] { display: none; }
 
 .tabs {
   display: flex;
