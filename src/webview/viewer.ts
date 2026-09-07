@@ -159,12 +159,31 @@ interface MaterialBackup {
   flatShading?: boolean;
 }
 
-/** Local TRS of one bone at load time (bind / rest pose). */
+/** Local TRS of one node. Used for bones' bind pose at load time and for the
+ *  undo history of every node the transform gizmo has touched. */
 interface BindPose {
-  bone: THREE.Bone;
+  object: THREE.Object3D;
   position: THREE.Vector3;
   quaternion: THREE.Quaternion;
   scale: THREE.Vector3;
+}
+
+export type GizmoMode = 'translate' | 'rotate' | 'scale';
+export type GizmoSpace = 'local' | 'world';
+
+function snapshotTRS(object: THREE.Object3D): BindPose {
+  return {
+    object,
+    position: object.position.clone(),
+    quaternion: object.quaternion.clone(),
+    scale: object.scale.clone(),
+  };
+}
+
+function restoreTRS(pose: BindPose): void {
+  pose.object.position.copy(pose.position);
+  pose.object.quaternion.copy(pose.quaternion);
+  pose.object.scale.copy(pose.scale);
 }
 
 /** One imported asset under `contentRoot`. The first entry is the file the editor
@@ -276,8 +295,15 @@ export class Viewer {
   private mixer: THREE.AnimationMixer | null = null;
   private readonly poseControls: TransformControls;
   private bindPoses: BindPose[] = [];
-  /** The bone TransformControls / R-rotate actually edit (may be a Mixamo parent). */
-  private poseBone: THREE.Bone | null = null;
+  /** The node TransformControls and the inspector fields edit: the selected
+   *  object, or for bones the resolved pose bone (may be a Mixamo parent). */
+  private poseTarget: THREE.Object3D | null = null;
+  private gizmoModeState: GizmoMode = 'rotate';
+  private gizmoSpaceState: GizmoSpace = 'local';
+  /** Load-time TRS of non-bone nodes, recorded the first time each is edited so
+   *  Reset Transform has a target without snapshotting every node up front.
+   *  Bones are covered by `bindPoses` instead. */
+  private readonly originalTransforms = new WeakMap<THREE.Object3D, BindPose>();
   private poseUndo: BindPose[][] = [];
   private poseRedo: BindPose[][] = [];
   private rotateModal: {
@@ -350,19 +376,22 @@ export class Viewer {
       if (!this.suppressCameraChange) this.onCameraChange?.();
     });
 
-    // Rotate-only local gizmo for posing a selected bone. The helper lives on
-    // the scene (not contentRoot) so framing / bounds ignore it. Orbit is
-    // disabled while the gizmo is dragged so the two left-button tools don't
-    // fight. objectChange pauses the mixer — otherwise the next tick overwrites
-    // the bone.
+    // Transform gizmo for the selected node (bones pose, everything else moves /
+    // rotates / scales). Defaults to a local rotate so bone posing is unchanged.
+    // The helper lives on the scene (not contentRoot) so framing / bounds
+    // ignore it. Orbit is disabled while the gizmo is dragged so the two
+    // left-button tools don't fight. objectChange pauses the mixer — otherwise
+    // the next tick overwrites the bone.
     this.poseControls = new TransformControls(this.camera, canvas);
-    this.poseControls.mode = 'rotate';
-    this.poseControls.space = 'local';
+    this.poseControls.mode = this.gizmoModeState;
+    this.poseControls.space = this.gizmoSpaceState;
     this.poseControls.detach();
     this.scene.add(this.poseControls.getHelper());
     this.poseControls.addEventListener('dragging-changed', (e) => {
       this.controls.enabled = !e.value;
       if (e.value) this.pushPoseUndo();
+      // Box3Helper snapshots its box at construction, so re-fit once the drag ends.
+      else if (this.showBounds) this.rebuildBoundsHelper();
     });
     this.poseControls.addEventListener('objectChange', () => {
       this.pauseForPose();
@@ -1520,16 +1549,96 @@ export class Viewer {
     this.cancelRotateModal();
     this.selectedObj = obj;
     this.outlinePass.selectedObjects = obj ? [obj] : [];
+    // Anything in the tree is a gizmo target. contentRoot never is: its
+    // rotation / position are owned by setUpAxis and alignContentToGrid.
     const bone = obj && (obj as THREE.Bone).isBone ? (obj as THREE.Bone) : null;
-    this.poseBone = bone ? resolvePoseBone(bone) : null;
-    if (this.poseBone) this.poseControls.attach(this.poseBone);
+    this.poseTarget = bone ? resolvePoseBone(bone) : obj && obj !== this.contentRoot ? obj : null;
+    if (this.poseTarget) this.poseControls.attach(this.poseTarget);
     else this.poseControls.detach();
     if (this.showSkeleton) this.updateSkeletonHighlight();
   }
 
-  /** Bone the gizmo / inspector / R-rotate edit. */
+  /** The bone the gizmo / inspector / R-rotate edit, or null when the target is not a bone. */
+  private get poseBone(): THREE.Bone | null {
+    const t = this.poseTarget;
+    return t && (t as THREE.Bone).isBone ? (t as THREE.Bone) : null;
+  }
+
   getPoseBone(): THREE.Bone | null {
     return this.poseBone;
+  }
+
+  /** Node the gizmo and the inspector transform fields edit. */
+  getPoseTarget(): THREE.Object3D | null {
+    return this.poseTarget;
+  }
+
+  get gizmoMode(): GizmoMode {
+    return this.gizmoModeState;
+  }
+
+  setGizmoMode(mode: GizmoMode): void {
+    this.gizmoModeState = mode;
+    this.poseControls.mode = mode;
+  }
+
+  get gizmoSpace(): GizmoSpace {
+    return this.gizmoSpaceState;
+  }
+
+  setGizmoSpace(space: GizmoSpace): void {
+    this.gizmoSpaceState = space;
+    this.poseControls.space = space;
+  }
+
+  /**
+   * Write a node's local TRS from the inspector fields. Rotation is in degrees
+   * in the node's existing Euler order. Undo is the caller's job (see
+   * beginPoseNumericEdit) so one keystroke run makes one history entry.
+   */
+  setTargetTransform(
+    target: THREE.Object3D,
+    trs: { position?: [number, number, number]; rotationDeg?: [number, number, number]; scale?: [number, number, number] },
+  ): void {
+    this.rememberOriginalTransform(target);
+    if (trs.position) target.position.set(...trs.position);
+    if (trs.rotationDeg) {
+      target.rotation.set(
+        THREE.MathUtils.degToRad(trs.rotationDeg[0]),
+        THREE.MathUtils.degToRad(trs.rotationDeg[1]),
+        THREE.MathUtils.degToRad(trs.rotationDeg[2]),
+        target.rotation.order,
+      );
+    }
+    if (trs.scale) target.scale.set(...trs.scale);
+    this.pauseForPose();
+    if (this.showBounds) this.rebuildBoundsHelper();
+  }
+
+  /** True once a non-bone node has been edited away from its load-time TRS. */
+  hasTransformEdit(target: THREE.Object3D): boolean {
+    const orig = this.originalTransforms.get(target);
+    if (!orig) return false;
+    return (
+      !orig.position.equals(target.position) ||
+      !orig.quaternion.equals(target.quaternion) ||
+      !orig.scale.equals(target.scale)
+    );
+  }
+
+  /** Put a non-bone node back to the TRS it had when first edited (i.e. load time). */
+  resetTransform(target: THREE.Object3D): void {
+    const orig = this.originalTransforms.get(target);
+    if (!orig) return;
+    this.pushPoseUndo();
+    restoreTRS(orig);
+    this.pauseForPose();
+    if (this.showBounds) this.rebuildBoundsHelper();
+  }
+
+  private rememberOriginalTransform(target: THREE.Object3D): void {
+    if ((target as THREE.Bone).isBone || this.originalTransforms.has(target)) return;
+    this.originalTransforms.set(target, snapshotTRS(target));
   }
 
   get hasBindPose(): boolean {
@@ -1573,11 +1682,7 @@ export class Viewer {
   resetBindPose(): void {
     this.cancelRotateModal();
     this.pushPoseUndo();
-    for (const pose of this.bindPoses) {
-      pose.bone.position.copy(pose.position);
-      pose.bone.quaternion.copy(pose.quaternion);
-      pose.bone.scale.copy(pose.scale);
-    }
+    for (const pose of this.bindPoses) restoreTRS(pose);
     this.contentRoot.updateMatrixWorld(true);
     if (this.showSkeleton) this.updateSkeletonMarkers();
     this.pauseForPose();
@@ -1598,36 +1703,28 @@ export class Viewer {
    * that are not in `skeleton.bones`. Shared bones are stored once.
    */
   private snapshotBindPoses(root: THREE.Object3D): void {
-    const seen = new Set<THREE.Bone>(this.bindPoses.map((p) => p.bone));
+    const seen = new Set<THREE.Object3D>(this.bindPoses.map((p) => p.object));
     root.traverse((o) => {
       const bone = o as THREE.Bone;
       if (!bone.isBone || seen.has(bone)) return;
       seen.add(bone);
-      this.bindPoses.push({
-        bone,
-        position: bone.position.clone(),
-        quaternion: bone.quaternion.clone(),
-        scale: bone.scale.clone(),
-      });
+      this.bindPoses.push(snapshotTRS(bone));
     });
   }
 
+  /** Every bone's current TRS, plus the non-bone gizmo target if there is one,
+   *  so poses and node transforms share a single undo history. */
   private capturePoseSnapshot(): BindPose[] {
-    return this.bindPoses.map((p) => ({
-      bone: p.bone,
-      position: p.bone.position.clone(),
-      quaternion: p.bone.quaternion.clone(),
-      scale: p.bone.scale.clone(),
-    }));
+    const snapshot = this.bindPoses.map((p) => snapshotTRS(p.object));
+    const target = this.poseTarget;
+    if (target && !(target as THREE.Bone).isBone) snapshot.push(snapshotTRS(target));
+    return snapshot;
   }
 
   private restorePoseSnapshot(snapshot: BindPose[]): void {
-    for (const pose of snapshot) {
-      pose.bone.position.copy(pose.position);
-      pose.bone.quaternion.copy(pose.quaternion);
-      pose.bone.scale.copy(pose.scale);
-    }
+    for (const pose of snapshot) restoreTRS(pose);
     this.applyPoseToSkin();
+    if (this.showBounds) this.rebuildBoundsHelper();
   }
 
   private applyPoseToSkin(): void {
@@ -1640,7 +1737,10 @@ export class Viewer {
   }
 
   pushPoseUndo(): void {
-    if (this.bindPoses.length === 0) return;
+    if (this.bindPoses.length === 0 && !this.poseTarget) return;
+    // Gizmo drags land here (dragging-changed) before the first objectChange,
+    // so this is the one place guaranteed to see the pre-edit TRS.
+    if (this.poseTarget) this.rememberOriginalTransform(this.poseTarget);
     this.poseUndo.push(this.capturePoseSnapshot());
     this.poseRedo = [];
   }
@@ -2256,7 +2356,7 @@ export class Viewer {
     this.bindPoses = [];
     this.poseUndo = [];
     this.poseRedo = [];
-    this.poseBone = null;
+    this.poseTarget = null;
     this.clearSkeletonHelpers();
     this.clearWireframeOverlays();
     this.clearWeightMaterials();

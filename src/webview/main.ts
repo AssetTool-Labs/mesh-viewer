@@ -27,6 +27,7 @@ import {
   INSPECT_LABELS,
   type MorphMeshInfo,
   type HudInfo,
+  type GizmoMode,
 } from './viewer';
 import { UVView, type AreaTool, type UVBacking, type UVElementContext } from './uvView';
 import { elementSelection, type ElementMode } from './elementSelection';
@@ -961,7 +962,7 @@ document.addEventListener('keydown', (ev) => {
     ev.preventDefault();
     if (ev.shiftKey) viewer.redoPose();
     else viewer.undoPose();
-    syncBoneRotationFields();
+    syncTransformFields();
     refreshPoseHint();
     return;
   }
@@ -992,11 +993,28 @@ document.addEventListener('keydown', (ev) => {
     return;
   }
 
-  if (ev.code === 'KeyR' || ev.key === 'r' || ev.key === 'R') {
-    if (!viewer.getPoseBone()) return;
+  // Blender's G / R / S pick the gizmo mode for whatever is selected. On a bone,
+  // R additionally starts the mouse-driven rotate modal as before.
+  if (ev.code === 'KeyG' || ev.key === 'g' || ev.key === 'G') {
+    if (!viewer.getPoseTarget()) return;
     ev.preventDefault();
-    viewer.startRotateModal(lastPointerX, lastPointerY);
-    refreshPoseHint();
+    setGizmoMode('translate');
+    return;
+  }
+  if (ev.code === 'KeyS' || ev.key === 's' || ev.key === 'S') {
+    if (!viewer.getPoseTarget()) return;
+    ev.preventDefault();
+    setGizmoMode('scale');
+    return;
+  }
+  if (ev.code === 'KeyR' || ev.key === 'r' || ev.key === 'R') {
+    if (!viewer.getPoseTarget()) return;
+    ev.preventDefault();
+    setGizmoMode('rotate');
+    if (viewer.getPoseBone()) {
+      viewer.startRotateModal(lastPointerX, lastPointerY);
+      refreshPoseHint();
+    }
     return;
   }
 
@@ -1166,7 +1184,7 @@ viewer.setAnimationFinishedCallback(() => {
 
 viewer.onPoseEdit = () => {
   timeline.setPlaying(false);
-  syncBoneRotationFields();
+  syncTransformFields();
   refreshPoseHint();
 };
 
@@ -2228,16 +2246,16 @@ function renderSelectionDetails(obj: THREE.Object3D): void {
   kv('Type', obj.type);
   kv('UUID', obj.uuid);
   kv('Visible', obj.visible ? 'yes' : 'no');
-  const pos = obj.position;
-  kv('Position', `${fmt(pos.x)}, ${fmt(pos.y)}, ${fmt(pos.z)}`);
-  if ((obj as THREE.Bone).isBone) {
-    appendBoneRotationFields(obj as THREE.Bone);
+  if (viewer.getPoseTarget()) {
+    appendTransformFields();
   } else {
+    const pos = obj.position;
+    kv('Position', `${fmt(pos.x)}, ${fmt(pos.y)}, ${fmt(pos.z)}`);
     const rotEuler = obj.rotation;
     kv('Rotation', `${fmtDeg(rotEuler.x)}°, ${fmtDeg(rotEuler.y)}°, ${fmtDeg(rotEuler.z)}°`);
+    const scale = obj.scale;
+    kv('Scale', `${fmt(scale.x)}, ${fmt(scale.y)}, ${fmt(scale.z)}`);
   }
-  const scale = obj.scale;
-  kv('Scale', `${fmt(scale.x)}, ${fmt(scale.y)}, ${fmt(scale.z)}`);
   kv('Children', String(obj.children.length));
 
   const mesh = obj as THREE.Mesh;
@@ -2297,69 +2315,159 @@ function resetPose(): void {
   if (!viewer.hasBindPose) return;
   viewer.resetBindPose();
   timeline.setPlaying(viewer.isAnimationPlaying);
-  syncBoneRotationFields();
+  syncTransformFields();
 }
 
 function refreshResetPoseButton(): void {
   resetPoseBtn.disabled = !viewer.hasBindPose;
 }
 
-function appendBoneRotationFields(bone: THREE.Bone): void {
-  const target = viewer.getPoseBone() ?? bone;
-  const key = document.createElement('div');
-  key.className = 'kv-key';
-  key.textContent = `Rotation (${target.rotation.order})`;
-  const val = document.createElement('div');
-  val.className = 'kv-val kv-rot';
+/** Inspector field groups, keyed by the id prefix of their X/Y/Z inputs. */
+type TransformGroup = 'xfPos' | 'xfRot' | 'xfScl';
+const TRANSFORM_AXES = ['X', 'Y', 'Z'] as const;
+
+/** Current values of one group as the inspector should display them. */
+function transformGroupValues(target: THREE.Object3D, group: TransformGroup): [string, string, string] {
+  if (group === 'xfPos') return [fmt(target.position.x), fmt(target.position.y), fmt(target.position.z)];
+  if (group === 'xfRot') return [fmtDeg(target.rotation.x), fmtDeg(target.rotation.y), fmtDeg(target.rotation.z)];
+  return [fmt(target.scale.x), fmt(target.scale.y), fmt(target.scale.z)];
+}
+
+function transformInputs(group: TransformGroup): HTMLInputElement[] | null {
+  const inputs = TRANSFORM_AXES.map((a) => document.getElementById(group + a) as HTMLInputElement | null);
+  return inputs.every((i) => i !== null) ? (inputs as HTMLInputElement[]) : null;
+}
+
+/**
+ * Editable Position / Rotation / Scale rows plus the gizmo mode strip for the
+ * current gizmo target. Each group writes only itself so typing in Position
+ * does not round-trip the rotation through its rounded display value.
+ */
+function appendTransformFields(): void {
+  const target = viewer.getPoseTarget();
+  if (!target) return;
+  const isBone = (target as THREE.Bone).isBone;
   let started = false;
-  for (const axis of ['x', 'y', 'z'] as const) {
-    const lab = document.createElement('label');
-    lab.textContent = axis.toUpperCase();
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.step = '0.1';
-    input.id = `poseRot${axis.toUpperCase()}`;
-    input.value = fmtDeg(target.rotation[axis]);
-    input.addEventListener('focus', () => { started = false; });
-    input.addEventListener('input', () => {
-      if (!started) {
-        viewer.beginPoseNumericEdit();
-        started = true;
-      }
-      const x = Number(($<HTMLInputElement>('poseRotX')).value);
-      const y = Number(($<HTMLInputElement>('poseRotY')).value);
-      const z = Number(($<HTMLInputElement>('poseRotZ')).value);
-      if (![x, y, z].every(Number.isFinite)) return;
-      viewer.setBoneRotationDegrees(target, x, y, z);
+  const write = (group: TransformGroup): void => {
+    const inputs = transformInputs(group);
+    if (!inputs) return;
+    const v = inputs.map((i) => Number(i.value)) as [number, number, number];
+    if (!v.every(Number.isFinite)) return;
+    if (!started) {
+      viewer.beginPoseNumericEdit();
+      started = true;
+    }
+    if (group === 'xfPos') viewer.setTargetTransform(target, { position: v });
+    else if (group === 'xfRot') viewer.setTargetTransform(target, { rotationDeg: v });
+    else viewer.setTargetTransform(target, { scale: v });
+    refreshResetTransformButton();
+  };
+  const row = (label: string, group: TransformGroup, step: string): void => {
+    const key = document.createElement('div');
+    key.className = 'kv-key';
+    key.textContent = label;
+    const val = document.createElement('div');
+    val.className = 'kv-val kv-rot';
+    const values = transformGroupValues(target, group);
+    TRANSFORM_AXES.forEach((axis, i) => {
+      const lab = document.createElement('label');
+      lab.textContent = axis;
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.step = step;
+      input.id = group + axis;
+      input.value = values[i];
+      input.addEventListener('focus', () => { started = false; });
+      input.addEventListener('input', () => write(group));
+      lab.append(input);
+      val.append(lab);
     });
-    lab.append(input);
-    val.append(lab);
+    selectionDetails.append(key, val);
+  };
+  row('Position', 'xfPos', '0.01');
+  row(`Rotation (${target.rotation.order})`, 'xfRot', '0.1');
+  row('Scale', 'xfScl', '0.01');
+
+  // Gizmo mode strip: Move / Rotate / Scale, then Local / World.
+  const seg = document.createElement('div');
+  seg.className = 'kv-action kv-seg';
+  const modes: { mode: GizmoMode; label: string; key: string }[] = [
+    { mode: 'translate', label: 'Move', key: 'G' },
+    { mode: 'rotate', label: 'Rotate', key: 'R' },
+    { mode: 'scale', label: 'Scale', key: 'S' },
+  ];
+  for (const m of modes) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.mode = m.mode;
+    b.textContent = m.label;
+    b.title = `${m.label} gizmo (${m.key})`;
+    b.addEventListener('click', () => setGizmoMode(m.mode));
+    seg.append(b);
   }
-  selectionDetails.append(key, val);
+  const space = document.createElement('button');
+  space.type = 'button';
+  space.dataset.space = '';
+  space.title = 'Gizmo axes follow the node (local) or the world';
+  space.addEventListener('click', () => {
+    viewer.setGizmoSpace(viewer.gizmoSpace === 'local' ? 'world' : 'local');
+    refreshGizmoModeButtons();
+  });
+  seg.append(space);
+  selectionDetails.append(seg);
+  refreshGizmoModeButtons();
+
   const action = document.createElement('div');
   action.className = 'kv-action';
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.textContent = 'Reset Pose';
-  btn.disabled = !viewer.hasBindPose;
-  btn.addEventListener('click', () => resetPose());
+  if (isBone) {
+    btn.textContent = 'Reset Pose';
+    btn.disabled = !viewer.hasBindPose;
+    btn.addEventListener('click', () => resetPose());
+  } else {
+    btn.id = 'xfReset';
+    btn.textContent = 'Reset Transform';
+    btn.disabled = !viewer.hasTransformEdit(target);
+    btn.addEventListener('click', () => {
+      viewer.resetTransform(target);
+      syncTransformFields();
+    });
+  }
   action.append(btn);
   selectionDetails.append(action);
 }
 
-function syncBoneRotationFields(): void {
-  const bone = viewer.getPoseBone();
-  if (!bone) return;
-  const x = document.getElementById('poseRotX') as HTMLInputElement | null;
-  const y = document.getElementById('poseRotY') as HTMLInputElement | null;
-  const z = document.getElementById('poseRotZ') as HTMLInputElement | null;
-  if (!x || !y || !z) return;
-  if (document.activeElement === x || document.activeElement === y || document.activeElement === z) {
-    return;
+function setGizmoMode(mode: GizmoMode): void {
+  viewer.setGizmoMode(mode);
+  refreshGizmoModeButtons();
+}
+
+function refreshGizmoModeButtons(): void {
+  for (const b of selectionDetails.querySelectorAll<HTMLButtonElement>('.kv-seg button[data-mode]')) {
+    b.classList.toggle('active', b.dataset.mode === viewer.gizmoMode);
   }
-  x.value = fmtDeg(bone.rotation.x);
-  y.value = fmtDeg(bone.rotation.y);
-  z.value = fmtDeg(bone.rotation.z);
+  const space = selectionDetails.querySelector<HTMLButtonElement>('.kv-seg button[data-space]');
+  if (space) space.textContent = viewer.gizmoSpace === 'local' ? 'Local' : 'World';
+}
+
+function refreshResetTransformButton(): void {
+  const btn = document.getElementById('xfReset') as HTMLButtonElement | null;
+  const target = viewer.getPoseTarget();
+  if (btn && target) btn.disabled = !viewer.hasTransformEdit(target);
+}
+
+/** Push the target's live TRS into the inspector, skipping any field being typed in. */
+function syncTransformFields(): void {
+  const target = viewer.getPoseTarget();
+  if (!target) return;
+  for (const group of ['xfPos', 'xfRot', 'xfScl'] as const) {
+    const inputs = transformInputs(group);
+    if (!inputs || inputs.some((i) => document.activeElement === i)) continue;
+    const values = transformGroupValues(target, group);
+    inputs.forEach((input, i) => { input.value = values[i]; });
+  }
+  refreshResetTransformButton();
 }
 
 function fmt(n: number): string {

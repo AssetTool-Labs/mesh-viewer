@@ -732,6 +732,12 @@ button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
 }
 .kv-list .kv-action { grid-column: 1 / -1; }
 
+/* Gizmo mode strip in the Selection panel: Move / Rotate / Scale + Local / World. */
+.kv-seg { display: flex; gap: 4px; flex-wrap: wrap; }
+.kv-seg button { padding: 3px 8px; }
+.kv-seg button.active { background: var(--button-bg); color: var(--button-fg); border-color: var(--button-bg); }
+.kv-seg button[data-space] { margin-left: auto; color: var(--muted); }
+
 /* Viewport */
 #mainCol {
   flex: 1 1 auto;
