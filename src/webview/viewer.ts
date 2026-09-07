@@ -10,7 +10,7 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { SparkRenderer } from '@sparkjsdev/spark';
 import type { CameraState, OrbitDelta } from '../types';
 import { setViewerRenderer, type LoadedAsset } from './loaders';
-import { exportBlocker, exportObject } from './exporters';
+import { exportBlocker, exportObject, retargetClips } from './exporters';
 import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
 import type { ElementMode, Topology } from './elementTopology';
 export type { WeightMode } from './weightMaterial';
@@ -306,6 +306,10 @@ export class Viewer {
    *  Reset Transform has a target without snapshotting every node up front.
    *  Bones are covered by `bindPoses` instead. */
   private readonly originalTransforms = new WeakMap<THREE.Object3D, BindPose>();
+  /** Every non-bone node the gizmo or inspector has ever edited. History
+   *  snapshots cover all of them, so undo / redo do not depend on what happens
+   *  to be selected when they run. */
+  private readonly editedNodes = new Set<THREE.Object3D>();
   private poseUndo: BindPose[][] = [];
   private poseRedo: BindPose[][] = [];
   /** True while an export has transforms temporarily rewritten; tick() skips rendering. */
@@ -1654,6 +1658,7 @@ export class Viewer {
   private rememberOriginalTransform(target: THREE.Object3D): void {
     if ((target as THREE.Bone).isBone || this.originalTransforms.has(target)) return;
     this.originalTransforms.set(target, snapshotTRS(target));
+    this.editedNodes.add(target);
   }
 
   get hasBindPose(): boolean {
@@ -1727,12 +1732,12 @@ export class Viewer {
     });
   }
 
-  /** Every bone's current TRS, plus the non-bone gizmo target if there is one,
-   *  so poses and node transforms share a single undo history. */
+  /** Every bone's current TRS plus every node ever edited, so poses and node
+   *  transforms share a single undo history and each entry restores the same
+   *  set of objects whichever node is selected when it is applied. */
   private capturePoseSnapshot(): BindPose[] {
     const snapshot = this.bindPoses.map((p) => snapshotTRS(p.object));
-    const target = this.poseTarget;
-    if (target && !(target as THREE.Bone).isBone) snapshot.push(snapshotTRS(target));
+    for (const node of this.editedNodes) snapshot.push(snapshotTRS(node));
     return snapshot;
   }
 
@@ -1752,7 +1757,7 @@ export class Viewer {
   }
 
   pushPoseUndo(): void {
-    if (this.bindPoses.length === 0 && !this.poseTarget) return;
+    if (this.bindPoses.length === 0 && !this.poseTarget && this.editedNodes.size === 0) return;
     // Gizmo drags land here (dragging-changed) before the first objectChange,
     // so this is the one place guaranteed to see the pre-edit TRS.
     if (this.poseTarget) this.rememberOriginalTransform(this.poseTarget);
@@ -1784,16 +1789,56 @@ export class Viewer {
    * render loop is held for the duration to avoid a displaced frame.
    */
   async exportNode(target: THREE.Object3D, ext: string): Promise<Uint8Array> {
-    // contentRoot itself means the whole scene, so every file's clips ride along.
+    // contentRoot itself means the whole scene, so every file's clips ride
+    // along. Each entry's clips are bound inside that entry first, so two
+    // imports of the same rig do not both drive the first one.
     const clips =
       target === this.contentRoot
-        ? this.entries.flatMap((e) => e.asset.animations)
-        : this.entries.find((e) => e.wrapper === target)?.asset.animations ?? [];
+        ? this.entries.flatMap((e) => retargetClips(e.asset.animations, e.wrapper))
+        : this.entries
+            .filter((e) => e.wrapper === target)
+            .flatMap((e) => retargetClips(e.asset.animations, e.wrapper));
     this.exporting = true;
     try {
-      return await exportObject(target, ext, this.contentRoot, this.renderer, clips);
+      return await this.withAuthoredScene(() => exportObject(target, ext, this.contentRoot, clips));
     } finally {
       this.exporting = false;
+    }
+  }
+
+  /**
+   * Run `fn` with the content tree in its authored state: the asset's own
+   * materials in place of the shading, inspect, weight, and x-ray variants,
+   * disabled map slots filled back in, and the viewer-owned overlay children
+   * (wireframe overlays, element highlight) taken out of the tree. The
+   * exporters read whatever is on the objects, so without this a file saved
+   * in Normals shading would carry the debug material. Everything is put back
+   * afterwards; rendering is held by the caller so no intermediate frame shows.
+   */
+  private async withAuthoredScene<T>(fn: () => Promise<T>): Promise<T> {
+    this.clearWireframeOverlays();
+    const overlay = this.elementOverlay;
+    overlay?.parent?.remove(overlay);
+    this.restoreXray();
+    this.restoreMaps();
+    const shown: { mesh: THREE.Mesh; material: THREE.Material | THREE.Material[] }[] = [];
+    this.contentRoot.traverse((o) => {
+      const backup = this.originalMaterials.get(o);
+      const mesh = o as THREE.Mesh;
+      if (!backup || !(mesh.isMesh || (o as THREE.Points).isPoints)) return;
+      shown.push({ mesh, material: mesh.material });
+      this.restoreAuthoredMaterial(mesh, backup);
+    });
+    try {
+      return await fn();
+    } finally {
+      // Hand the generated materials back first: applyAllShading disposes and
+      // rebuilds them for the active mode, and leaves weight-mode skinned
+      // meshes alone, so those keep the material they had.
+      for (const { mesh, material } of shown) mesh.material = material;
+      this.applyAllShading();
+      if (overlay && this.overlayMesh) this.overlayMesh.add(overlay);
+      if (this.showWireframeOverlay) this.rebuildWireframeOverlays();
     }
   }
 
@@ -2140,6 +2185,19 @@ export class Viewer {
     });
   }
 
+  /** Put the asset's own material back on `mesh`, with the flags the shading
+   *  modes flip (flat shading, wireframe) at their authored values. */
+  private restoreAuthoredMaterial(mesh: THREE.Mesh, backup: MaterialBackup): void {
+    mesh.material = backup.material;
+    forEachMaterial(backup.material, (m) => {
+      if ('flatShading' in m && backup.flatShading != null) {
+        (m as THREE.MeshStandardMaterial).flatShading = backup.flatShading;
+      }
+      if ('wireframe' in m) (m as THREE.MeshBasicMaterial).wireframe = false;
+      m.needsUpdate = true;
+    });
+  }
+
   private applyShadingToObject(o: THREE.Object3D): void {
     // Weight display takes precedence over the shading dropdown on skinned
     // meshes — leave the debug material in place until weight mode is 'off'.
@@ -2161,16 +2219,7 @@ export class Viewer {
       return;
     }
 
-    const restore = (): void => {
-      (mesh as THREE.Mesh).material = backup.material;
-      forEachMaterial(backup.material, (m) => {
-        if ('flatShading' in m && backup.flatShading != null) {
-          (m as THREE.MeshStandardMaterial).flatShading = backup.flatShading;
-        }
-        if ('wireframe' in m) (m as THREE.MeshBasicMaterial).wireframe = false;
-        m.needsUpdate = true;
-      });
-    };
+    const restore = (): void => this.restoreAuthoredMaterial(mesh, backup);
 
     switch (mode) {
       case 'material':
@@ -2408,6 +2457,7 @@ export class Viewer {
     this.bindPoses = [];
     this.poseUndo = [];
     this.poseRedo = [];
+    this.editedNodes.clear();
     this.poseTarget = null;
     this.clearSkeletonHelpers();
     this.clearWireframeOverlays();

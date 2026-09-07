@@ -219,12 +219,14 @@ function openSaveMenu(): void {
   const n = viewer.entries.length;
   saveMenuSceneHint.textContent =
     sceneBlocker ?? (n === 1 ? 'The whole model with its current transforms' : `All ${n} imported files with their current transforms`);
-  saveMenuSelectionHint.textContent = selected
-    ? `${selected.name || selected.type} and everything under it`
-    : 'Select a node in the hierarchy first';
+  // A blocked selection (splat, or a skinned mesh without its skeleton) shows
+  // the reason as its hint, so a disabled row explains itself.
+  const selectionBlocker = selected ? viewer.exportBlocker(selected) : 'Select a node in the hierarchy first';
+  saveMenuSelectionHint.textContent =
+    selectionBlocker ?? `${selected!.name || selected!.type} and everything under it`;
   for (const item of saveMenu.querySelectorAll<HTMLButtonElement>('.menu-item')) {
     if (item.dataset.action === 'scene') item.disabled = sceneBlocker !== null;
-    else if (item.dataset.action === 'selection') item.disabled = !selected;
+    else if (item.dataset.action === 'selection') item.disabled = selectionBlocker !== null;
   }
   saveMenu.hidden = false;
   saveMenuBtn.setAttribute('aria-expanded', 'true');
