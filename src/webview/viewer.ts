@@ -169,7 +169,8 @@ interface BindPose {
   scale: THREE.Vector3;
 }
 
-export type GizmoMode = 'translate' | 'rotate' | 'scale';
+/** `select` is Blender's select tool: the node highlights, no gizmo attaches. */
+export type GizmoMode = 'select' | 'translate' | 'rotate' | 'scale';
 export type GizmoSpace = 'local' | 'world';
 
 function snapshotTRS(object: THREE.Object3D): BindPose {
@@ -299,7 +300,7 @@ export class Viewer {
   /** The node TransformControls and the inspector fields edit: the selected
    *  object, or for bones the resolved pose bone (may be a Mixamo parent). */
   private poseTarget: THREE.Object3D | null = null;
-  private gizmoModeState: GizmoMode = 'rotate';
+  private gizmoModeState: GizmoMode = 'select';
   private gizmoSpaceState: GizmoSpace = 'local';
   /** Load-time TRS of non-bone nodes, recorded the first time each is edited so
    *  Reset Transform has a target without snapshotting every node up front.
@@ -380,13 +381,14 @@ export class Viewer {
     });
 
     // Transform gizmo for the selected node (bones pose, everything else moves /
-    // rotates / scales). Defaults to a local rotate so bone posing is unchanged.
-    // The helper lives on the scene (not contentRoot) so framing / bounds
+    // rotates / scales). Starts in Select: a click only highlights, and the
+    // toolbar or G / R / S attaches the gizmo, so browsing a scene never
+    // shows handles nobody asked for. The helper lives on the scene (not
+    // contentRoot) so framing / bounds
     // ignore it. Orbit is disabled while the gizmo is dragged so the two
     // left-button tools don't fight. objectChange pauses the mixer — otherwise
     // the next tick overwrites the bone.
     this.poseControls = new TransformControls(this.camera, canvas);
-    this.poseControls.mode = this.gizmoModeState;
     this.poseControls.space = this.gizmoSpaceState;
     this.poseControls.detach();
     this.scene.add(this.poseControls.getHelper());
@@ -1556,9 +1558,19 @@ export class Viewer {
     // rotation / position are owned by setUpAxis and alignContentToGrid.
     const bone = obj && (obj as THREE.Bone).isBone ? (obj as THREE.Bone) : null;
     this.poseTarget = bone ? resolvePoseBone(bone) : obj && obj !== this.contentRoot ? obj : null;
-    if (this.poseTarget) this.poseControls.attach(this.poseTarget);
-    else this.poseControls.detach();
+    this.syncGizmo();
     if (this.showSkeleton) this.updateSkeletonHighlight();
+  }
+
+  /** Attach the gizmo to the target in the current mode, or detach in Select. */
+  private syncGizmo(): void {
+    const mode = this.gizmoModeState;
+    if (mode === 'select' || !this.poseTarget) {
+      this.poseControls.detach();
+      return;
+    }
+    this.poseControls.mode = mode;
+    this.poseControls.attach(this.poseTarget);
   }
 
   /** The bone the gizmo / inspector / R-rotate edit, or null when the target is not a bone. */
@@ -1582,7 +1594,7 @@ export class Viewer {
 
   setGizmoMode(mode: GizmoMode): void {
     this.gizmoModeState = mode;
-    this.poseControls.mode = mode;
+    this.syncGizmo();
   }
 
   get gizmoSpace(): GizmoSpace {
@@ -1772,10 +1784,14 @@ export class Viewer {
    * render loop is held for the duration to avoid a displaced frame.
    */
   async exportNode(target: THREE.Object3D, ext: string): Promise<Uint8Array> {
-    const entry = this.entries.find((e) => e.wrapper === target);
+    // contentRoot itself means the whole scene, so every file's clips ride along.
+    const clips =
+      target === this.contentRoot
+        ? this.entries.flatMap((e) => e.asset.animations)
+        : this.entries.find((e) => e.wrapper === target)?.asset.animations ?? [];
     this.exporting = true;
     try {
-      return await exportObject(target, ext, this.contentRoot, this.renderer, entry?.asset.animations ?? []);
+      return await exportObject(target, ext, this.contentRoot, this.renderer, clips);
     } finally {
       this.exporting = false;
     }

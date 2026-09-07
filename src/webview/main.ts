@@ -4,6 +4,7 @@ import type {
   AddFileMessage,
   CameraLinkMode,
   ExportDoneMessage,
+  ExportFormat,
   ExportTargetMessage,
   FilePayload,
   InitMessage,
@@ -125,7 +126,7 @@ const transformHud = $('transformHud');
 const xfSpaceBtn = $<HTMLButtonElement>('xfSpace');
 const xfUndoBtn = $<HTMLButtonElement>('xfUndo');
 const xfRedoBtn = $<HTMLButtonElement>('xfRedo');
-const xfSaveBtn = $<HTMLButtonElement>('xfSave');
+const xfResetHudBtn = $<HTMLButtonElement>('xfResetHud');
 const shadingModeBtns = Array.from(shadingHud.querySelectorAll<HTMLButtonElement>('[data-mode]'));
 const shadingXrayBtn = $<HTMLButtonElement>('shadingXray');
 const shadingFlatBtn = $<HTMLButtonElement>('shadingFlat');
@@ -150,7 +151,11 @@ const resetPoseBtn = $<HTMLButtonElement>('resetPose');
 const frameSelectionBtn = $<HTMLButtonElement>('frameSelection');
 const sidebarToggle = $<HTMLButtonElement>('sidebarToggle');
 const importMeshBtn = $<HTMLButtonElement>('importMeshBtn');
-const saveCopyBtn = $<HTMLButtonElement>('saveCopyBtn');
+const saveMenuBtn = $<HTMLButtonElement>('saveMenuBtn');
+const saveMenu = $('saveMenu');
+const saveMenuCopyHint = $('saveMenuCopyHint');
+const saveMenuSceneHint = $('saveMenuSceneHint');
+const saveMenuSelectionHint = $('saveMenuSelectionHint');
 const revealBtn = $<HTMLButtonElement>('revealBtn');
 const blendshapesTab = $<HTMLButtonElement>('blendshapesTab');
 const blendshapeList = $('blendshapeList');
@@ -201,9 +206,64 @@ document.addEventListener('keydown', (ev) => {
 
 importMeshBtn.addEventListener('click', () => requestPickAndImport());
 
-// Both act on the primary file; the host owns its URI, so these carry no payload.
-saveCopyBtn.addEventListener('click', () => vscode.postMessage({ type: 'saveSourceCopy' }));
+// Reveal acts on the primary file; the host owns its URI, so it carries no payload.
 revealBtn.addEventListener('click', () => vscode.postMessage({ type: 'revealSource' }));
+
+// ---- Save menu ----
+// One popover for every write-to-disk action. Row state is computed on open
+// rather than tracked, since selection and imports change constantly and the
+// menu is only visible for a moment.
+function openSaveMenu(): void {
+  const selected = viewer.getSelected();
+  const sceneBlocker = viewer.entries.length ? viewer.exportBlocker(viewer.contentRoot) : 'Nothing is loaded yet.';
+  const n = viewer.entries.length;
+  saveMenuSceneHint.textContent =
+    sceneBlocker ?? (n === 1 ? 'The whole model with its current transforms' : `All ${n} imported files with their current transforms`);
+  saveMenuSelectionHint.textContent = selected
+    ? `${selected.name || selected.type} and everything under it`
+    : 'Select a node in the hierarchy first';
+  for (const item of saveMenu.querySelectorAll<HTMLButtonElement>('.menu-item')) {
+    if (item.dataset.action === 'scene') item.disabled = sceneBlocker !== null;
+    else if (item.dataset.action === 'selection') item.disabled = !selected;
+  }
+  saveMenu.hidden = false;
+  saveMenuBtn.setAttribute('aria-expanded', 'true');
+  // The panel clips at its bottom edge, so in a short editor pane the menu
+  // scrolls instead of losing its last rows.
+  saveMenu.style.maxHeight = `${Math.max(80, window.innerHeight - saveMenu.getBoundingClientRect().top - 8)}px`;
+}
+
+function closeSaveMenu(): void {
+  if (saveMenu.hidden) return;
+  saveMenu.hidden = true;
+  saveMenuBtn.setAttribute('aria-expanded', 'false');
+}
+
+saveMenuBtn.addEventListener('click', () => (saveMenu.hidden ? openSaveMenu() : closeSaveMenu()));
+saveMenu.addEventListener('click', (ev) => {
+  const item = (ev.target as HTMLElement).closest<HTMLButtonElement>('.menu-item');
+  if (!item || item.disabled) return;
+  closeSaveMenu();
+  switch (item.dataset.action) {
+    case 'copy': vscode.postMessage({ type: 'saveSourceCopy' }); break;
+    case 'scene': saveSceneAs(); break;
+    case 'selection': saveSelectionAs(); break;
+    case 'snapshot': saveSnapshot(false); break;
+    case 'snapshotTransparent': saveSnapshot(true); break;
+  }
+});
+// Any press outside the menu or its button dismisses it, as does leaving the window.
+document.addEventListener('pointerdown', (ev) => {
+  const t = ev.target as Node;
+  if (!saveMenu.contains(t) && !saveMenuBtn.contains(t)) closeSaveMenu();
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && !saveMenu.hidden) {
+    closeSaveMenu();
+    ev.stopImmediatePropagation();
+  }
+}, true);
+window.addEventListener('blur', closeSaveMenu);
 
 // ---- Blender-style timeline / dope sheet (bottom dock) ----
 // The panel is a read-only visualization: it scrubs/steps/plays through the
@@ -740,28 +800,73 @@ xfRedoBtn.addEventListener('click', () => {
   refreshPoseHint();
   refreshTransformHud();
 });
-xfSaveBtn.addEventListener('click', () => saveSelectionAs());
+// Same action as the inspector's per-node button: a bone goes back to the
+// bind pose, anything else to its load-time TRS.
+xfResetHudBtn.addEventListener('click', () => {
+  const target = viewer.getPoseTarget();
+  if (!target) return;
+  if ((target as THREE.Bone).isBone) {
+    resetPose();
+  } else {
+    viewer.resetTransform(target);
+    syncTransformFields();
+  }
+  refreshTransformHud();
+});
 refreshTransformHud();
 
 /** Mirror gizmo mode / space, history depth, and selection into the toolbar. */
 function refreshTransformHud(): void {
   const target = viewer.getPoseTarget();
   for (const btn of transformHud.querySelectorAll<HTMLButtonElement>('button[data-mode]')) {
-    btn.disabled = !target;
+    // Select is always available: it is the way back out of a transform mode.
+    btn.disabled = !target && btn.dataset.mode !== 'select';
     btn.classList.toggle('active', btn.dataset.mode === viewer.gizmoMode);
   }
   xfSpaceBtn.disabled = !target;
-  xfSpaceBtn.textContent = viewer.gizmoSpace === 'local' ? 'Local' : 'World';
+  // The label is the current orientation; the tip spells that out and names
+  // the other one, so the pill never reads as "click for Local".
+  const local = viewer.gizmoSpace === 'local';
+  xfSpaceBtn.textContent = local ? 'Local' : 'World';
+  xfSpaceBtn.dataset.tip = local
+    ? 'Orientation is Local (the node\'s own axes) — click to switch to World (the scene axes)'
+    : 'Orientation is World (the scene axes) — click to switch to Local (the node\'s own axes)';
   xfUndoBtn.disabled = !viewer.canUndo;
   xfRedoBtn.disabled = !viewer.canRedo;
-  xfSaveBtn.disabled = !viewer.getSelected();
+  refreshResetHudButton();
 }
 
-// ---- Save selection as a new file ----
+// ---- Export selection / scene as a new file ----
 // Two round trips with the host: it owns the Save dialog and the disk. The
 // node is remembered per request so a selection change mid-dialog cannot
 // swap what gets written.
-const pendingExports = new Map<string, { target: THREE.Object3D; toast?: HTMLDivElement }>();
+const pendingExports = new Map<string, { target: THREE.Object3D; label: string; toast?: HTMLDivElement }>();
+
+function requestExport(target: THREE.Object3D, label: string, stem: string, formats: ExportFormat[]): void {
+  const safe = stem.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'node';
+  const requestId = `export-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  pendingExports.set(requestId, { target, label });
+  vscode.postMessage({ type: 'saveExportAs', requestId, suggestedName: `${safe}.${formats[0].ext}`, formats });
+}
+
+/** Every imported file at once: contentRoot holds nothing but the entry wrappers. */
+function saveSceneAs(): void {
+  if (!viewer.entries.length) {
+    showToast({ title: 'Nothing to export', body: 'Open or import a file first.', kind: 'error' });
+    return;
+  }
+  const blocker = viewer.exportBlocker(viewer.contentRoot);
+  if (blocker) {
+    showToast({ title: 'Cannot export', body: blocker, kind: 'error' });
+    return;
+  }
+  // A single file round-trips to its own format; mixed sources lead with GLB,
+  // the only writer that keeps everything from all of them.
+  const single = viewer.entries.length === 1;
+  const formats = exportFormatsFor(single ? primaryFile?.ext : undefined);
+  const stem = (primaryFile?.name ?? 'scene').replace(/\.[^.]+$/, '');
+  requestExport(viewer.contentRoot, 'scene', single ? stem : `${stem}-scene`, formats);
+}
 
 /** The imported file a node belongs to (its top-level wrapper's entry). */
 function entryOf(obj: THREE.Object3D): AssetEntry | null {
@@ -787,10 +892,7 @@ function saveSelectionAs(): void {
   // A top-level row is named after its file; drop that extension so the
   // suggestion becomes "<file>.<ext>" rather than "<file>.<old>.<ext>".
   const stem = entry?.wrapper === target ? target.name.replace(/\.[^.]+$/, '') : target.name;
-  const safe = stem.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'node';
-  const requestId = `export-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  pendingExports.set(requestId, { target });
-  vscode.postMessage({ type: 'saveExportAs', requestId, suggestedName: `${safe}.${formats[0].ext}`, formats });
+  requestExport(target, target.name || 'node', stem, formats);
 }
 
 async function handleExportTarget(msg: ExportTargetMessage): Promise<void> {
@@ -800,7 +902,7 @@ async function handleExportTarget(msg: ExportTargetMessage): Promise<void> {
     pendingExports.delete(msg.requestId);
     return;
   }
-  pending.toast = showToast({ title: 'Exporting…', body: `${pending.target.name || 'node'} → .${msg.ext}`, sticky: true });
+  pending.toast = showToast({ title: 'Exporting…', body: `${pending.label} → .${msg.ext}`, sticky: true });
   try {
     const bytes = await viewer.exportNode(pending.target, msg.ext);
     vscode.postMessage({ type: 'writeExport', requestId: msg.requestId, uri: msg.uri, base64: toBase64(bytes) });
@@ -1962,6 +2064,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
   applyViewSettings(msg.settings);
   primaryFile = { name: msg.fileName, ext: msg.fileExtension, size: msg.fileSizeBytes };
   revealBtn.hidden = !msg.canReveal;
+  saveMenuCopyHint.textContent = `Byte-for-byte copy of ${msg.fileName}`;
   fileNameEl.textContent = msg.fileName;
   fileSubtitleEl.textContent = `${msg.fileExtension.toUpperCase()} · ${formatBytes(msg.fileSizeBytes)}`;
   document.title = `${msg.fileName} — 3D Mesh Viewer`;
@@ -2558,6 +2661,17 @@ function refreshResetTransformButton(): void {
   const btn = document.getElementById('xfReset') as HTMLButtonElement | null;
   const target = viewer.getPoseTarget();
   if (btn && target) btn.disabled = !viewer.hasTransformEdit(target);
+  refreshResetHudButton();
+}
+
+/** The toolbar Reset follows the target: pose for a bone, TRS for anything else. */
+function refreshResetHudButton(): void {
+  const target = viewer.getPoseTarget();
+  const isBone = !!target && (target as THREE.Bone).isBone;
+  xfResetHudBtn.disabled = isBone ? !viewer.hasBindPose : !(target && viewer.hasTransformEdit(target));
+  xfResetHudBtn.dataset.tip = isBone
+    ? 'Reset Pose — put every bone back to the bind pose'
+    : 'Reset Transform — put the node back to its load-time position, rotation, and scale';
 }
 
 /** Push the target's live TRS into the inspector, skipping any field being typed in. */
