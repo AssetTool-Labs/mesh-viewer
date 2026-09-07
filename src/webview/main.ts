@@ -3,12 +3,15 @@ import type {
   AddFileErrorMessage,
   AddFileMessage,
   CameraLinkMode,
+  ExportDoneMessage,
+  ExportTargetMessage,
   FilePayload,
   InitMessage,
   InitViewSettings,
   OrbitDelta,
   ViewSettings,
 } from '../types';
+import { exportFormatsFor } from './exporters';
 import { loadAsset, type LoadedAsset } from './loaders';
 import { hasRenderableGeometry } from './renderables';
 import { decodeText } from './textEncoding';
@@ -118,6 +121,11 @@ const weightLegend = $('weightLegend');
 const toggleXray = $<HTMLInputElement>('toggleXray');
 const toggleFlatShading = $<HTMLInputElement>('toggleFlatShading');
 const shadingHud = $('shadingHud');
+const transformHud = $('transformHud');
+const xfSpaceBtn = $<HTMLButtonElement>('xfSpace');
+const xfUndoBtn = $<HTMLButtonElement>('xfUndo');
+const xfRedoBtn = $<HTMLButtonElement>('xfRedo');
+const xfSaveBtn = $<HTMLButtonElement>('xfSave');
 const shadingModeBtns = Array.from(shadingHud.querySelectorAll<HTMLButtonElement>('[data-mode]'));
 const shadingXrayBtn = $<HTMLButtonElement>('shadingXray');
 const shadingFlatBtn = $<HTMLButtonElement>('shadingFlat');
@@ -696,17 +704,130 @@ shadingLinkBtn.addEventListener('click', (ev) => {
 // tooltips: it appears instantly and right-aligned so it never clips at the
 // viewport edge. data-tip is read on every hover since hudUpAxis rewrites its
 // tip text on each axis change.
-const shadingTip = $('shadingTip');
-for (const btn of shadingHud.querySelectorAll<HTMLButtonElement>('button')) {
-  btn.addEventListener('mouseenter', () => {
-    const tip = btn.dataset.tip;
-    if (!tip) return;
-    shadingTip.textContent = tip;
-    shadingTip.hidden = false;
-  });
-  btn.addEventListener('mouseleave', () => {
-    shadingTip.hidden = true;
-  });
+function wireHudTips(strip: HTMLElement, tipEl: HTMLElement): void {
+  for (const btn of strip.querySelectorAll<HTMLButtonElement>('button')) {
+    btn.addEventListener('mouseenter', () => {
+      const tip = btn.dataset.tip;
+      if (!tip) return;
+      tipEl.textContent = tip;
+      tipEl.hidden = false;
+    });
+    btn.addEventListener('mouseleave', () => {
+      tipEl.hidden = true;
+    });
+  }
+}
+wireHudTips(shadingHud, $('shadingTip'));
+wireHudTips(transformHud, $('transformTip'));
+
+// ---- Transform toolbar (Blender-style, viewport left edge) ----
+for (const btn of transformHud.querySelectorAll<HTMLButtonElement>('button[data-mode]')) {
+  btn.addEventListener('click', () => setGizmoMode(btn.dataset.mode as GizmoMode));
+}
+xfSpaceBtn.addEventListener('click', () => {
+  viewer.setGizmoSpace(viewer.gizmoSpace === 'local' ? 'world' : 'local');
+  refreshTransformHud();
+});
+xfUndoBtn.addEventListener('click', () => {
+  viewer.undoPose();
+  syncTransformFields();
+  refreshPoseHint();
+  refreshTransformHud();
+});
+xfRedoBtn.addEventListener('click', () => {
+  viewer.redoPose();
+  syncTransformFields();
+  refreshPoseHint();
+  refreshTransformHud();
+});
+xfSaveBtn.addEventListener('click', () => saveSelectionAs());
+refreshTransformHud();
+
+/** Mirror gizmo mode / space, history depth, and selection into the toolbar. */
+function refreshTransformHud(): void {
+  const target = viewer.getPoseTarget();
+  for (const btn of transformHud.querySelectorAll<HTMLButtonElement>('button[data-mode]')) {
+    btn.disabled = !target;
+    btn.classList.toggle('active', btn.dataset.mode === viewer.gizmoMode);
+  }
+  xfSpaceBtn.disabled = !target;
+  xfSpaceBtn.textContent = viewer.gizmoSpace === 'local' ? 'Local' : 'World';
+  xfUndoBtn.disabled = !viewer.canUndo;
+  xfRedoBtn.disabled = !viewer.canRedo;
+  xfSaveBtn.disabled = !viewer.getSelected();
+}
+
+// ---- Save selection as a new file ----
+// Two round trips with the host: it owns the Save dialog and the disk. The
+// node is remembered per request so a selection change mid-dialog cannot
+// swap what gets written.
+const pendingExports = new Map<string, { target: THREE.Object3D; toast?: HTMLDivElement }>();
+
+/** The imported file a node belongs to (its top-level wrapper's entry). */
+function entryOf(obj: THREE.Object3D): AssetEntry | null {
+  let node: THREE.Object3D | null = obj;
+  while (node && node.parent !== viewer.contentRoot) node = node.parent;
+  return node ? viewer.entries.find((e) => e.wrapper === node) ?? null : null;
+}
+
+function saveSelectionAs(): void {
+  const target = viewer.getSelected();
+  if (!target) {
+    showToast({ title: 'Nothing selected', body: 'Select a node in the hierarchy first.', kind: 'error' });
+    return;
+  }
+  const blocker = viewer.exportBlocker(target);
+  if (blocker) {
+    showToast({ title: 'Cannot export', body: blocker, kind: 'error' });
+    return;
+  }
+  const entry = entryOf(target);
+  const sourceExt = entry?.label.split('.').pop();
+  const formats = exportFormatsFor(sourceExt);
+  // A top-level row is named after its file; drop that extension so the
+  // suggestion becomes "<file>.<ext>" rather than "<file>.<old>.<ext>".
+  const stem = entry?.wrapper === target ? target.name.replace(/\.[^.]+$/, '') : target.name;
+  const safe = stem.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'node';
+  const requestId = `export-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  pendingExports.set(requestId, { target });
+  vscode.postMessage({ type: 'saveExportAs', requestId, suggestedName: `${safe}.${formats[0].ext}`, formats });
+}
+
+async function handleExportTarget(msg: ExportTargetMessage): Promise<void> {
+  const pending = pendingExports.get(msg.requestId);
+  if (!pending) return;
+  if (!msg.uri) {
+    pendingExports.delete(msg.requestId);
+    return;
+  }
+  pending.toast = showToast({ title: 'Exporting…', body: `${pending.target.name || 'node'} → .${msg.ext}`, sticky: true });
+  try {
+    const bytes = await viewer.exportNode(pending.target, msg.ext);
+    vscode.postMessage({ type: 'writeExport', requestId: msg.requestId, uri: msg.uri, base64: toBase64(bytes) });
+  } catch (err) {
+    pending.toast.remove();
+    pendingExports.delete(msg.requestId);
+    const message = err instanceof Error ? err.message : String(err);
+    showToast({ title: 'Export failed', body: message, kind: 'error' });
+  }
+}
+
+function handleExportDone(msg: ExportDoneMessage): void {
+  const pending = pendingExports.get(msg.requestId);
+  pendingExports.delete(msg.requestId);
+  pending?.toast?.remove();
+  if (msg.ok) showToast({ title: 'Saved', body: msg.fileName, kind: 'success' });
+  else showToast({ title: 'Save failed', body: msg.message ?? msg.fileName, kind: 'error' });
+}
+
+/** Chunked so a multi-megabyte export does not blow the argument limit of fromCharCode. */
+function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
 }
 toggleGrid.addEventListener('change', () => { viewer.setGridVisible(toggleGrid.checked); pushViewSettings(); });
 toggleAxes.addEventListener('change', () => { viewer.setAxesVisible(toggleAxes.checked); pushViewSettings(); });
@@ -964,6 +1085,7 @@ document.addEventListener('keydown', (ev) => {
     else viewer.undoPose();
     syncTransformFields();
     refreshPoseHint();
+    refreshTransformHud();
     return;
   }
   if (ev.ctrlKey || ev.metaKey) return;
@@ -1186,6 +1308,7 @@ viewer.onPoseEdit = () => {
   timeline.setPlaying(false);
   syncTransformFields();
   refreshPoseHint();
+  refreshTransformHud();
 };
 
 // ---- Picking ----
@@ -1649,6 +1772,7 @@ function deselect(): void {
   for (const v of nodeViews.values()) v.row.classList.remove('selected');
   viewer.setSelected(null);
   selectionDetails.innerHTML = '<div class="kv-empty">Select a node to inspect it.</div>';
+  refreshTransformHud();
   if (showUV) refreshUVOverlay();
 }
 
@@ -1800,6 +1924,13 @@ window.addEventListener('message', (ev) => {
     saveSnapshot();
   } else if (msg.type === 'command' && msg.command === 'saveSnapshotTransparent') {
     saveSnapshot(true);
+  } else if (msg.type === 'exportTarget') {
+    handleExportTarget(msg as ExportTargetMessage).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      showToast({ title: 'Export failed', body: message, kind: 'error' });
+    });
+  } else if (msg.type === 'exportDone') {
+    handleExportDone(msg as ExportDoneMessage);
   } else if (msg.type === 'viewerCount') {
     viewerCount = Number(msg.count) || 1;
     // Nobody left to sync with — drop the link so it can't silently stay on.
@@ -2094,6 +2225,7 @@ function buildHierarchy(): void {
     buildNode(entry.wrapper, treeContainer, 0);
   }
   refreshToggleButton();
+  refreshTransformHud();
 }
 
 function buildNode(obj: THREE.Object3D, parentContainer: HTMLElement, depth: number): void {
@@ -2200,6 +2332,7 @@ function selectObject(obj: THREE.Object3D): void {
   if (id) nodeViews.get(id)?.row.scrollIntoView({ block: 'nearest' });
   // 2) Draw a wireframe + bounding-box highlight around the mesh in the 3D viewport.
   viewer.setSelected(obj);
+  refreshTransformHud();
   // 3) Update the inspector pane with details about the selection.
   renderSelectionDetails(obj);
   // 4) If the user is viewing the Texture tab with UV overlay on, prefer the
@@ -2388,35 +2521,8 @@ function appendTransformFields(): void {
   row(`Rotation (${target.rotation.order})`, 'xfRot', '0.1');
   row('Scale', 'xfScl', '0.01');
 
-  // Gizmo mode strip: Move / Rotate / Scale, then Local / World.
-  const seg = document.createElement('div');
-  seg.className = 'kv-action kv-seg';
-  const modes: { mode: GizmoMode; label: string; key: string }[] = [
-    { mode: 'translate', label: 'Move', key: 'G' },
-    { mode: 'rotate', label: 'Rotate', key: 'R' },
-    { mode: 'scale', label: 'Scale', key: 'S' },
-  ];
-  for (const m of modes) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.dataset.mode = m.mode;
-    b.textContent = m.label;
-    b.title = `${m.label} gizmo (${m.key})`;
-    b.addEventListener('click', () => setGizmoMode(m.mode));
-    seg.append(b);
-  }
-  const space = document.createElement('button');
-  space.type = 'button';
-  space.dataset.space = '';
-  space.title = 'Gizmo axes follow the node (local) or the world';
-  space.addEventListener('click', () => {
-    viewer.setGizmoSpace(viewer.gizmoSpace === 'local' ? 'world' : 'local');
-    refreshGizmoModeButtons();
-  });
-  seg.append(space);
-  selectionDetails.append(seg);
-  refreshGizmoModeButtons();
-
+  // Gizmo mode, orientation, and undo live in the viewport toolbar; the panel
+  // keeps the per-node actions.
   const action = document.createElement('div');
   action.className = 'kv-action';
   const btn = document.createElement('button');
@@ -2434,21 +2540,18 @@ function appendTransformFields(): void {
       syncTransformFields();
     });
   }
-  action.append(btn);
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.textContent = 'Save Selection As…';
+  save.title = 'Write this node, with its current transform, to a new file';
+  save.addEventListener('click', () => saveSelectionAs());
+  action.append(btn, save);
   selectionDetails.append(action);
 }
 
 function setGizmoMode(mode: GizmoMode): void {
   viewer.setGizmoMode(mode);
-  refreshGizmoModeButtons();
-}
-
-function refreshGizmoModeButtons(): void {
-  for (const b of selectionDetails.querySelectorAll<HTMLButtonElement>('.kv-seg button[data-mode]')) {
-    b.classList.toggle('active', b.dataset.mode === viewer.gizmoMode);
-  }
-  const space = selectionDetails.querySelector<HTMLButtonElement>('.kv-seg button[data-space]');
-  if (space) space.textContent = viewer.gizmoSpace === 'local' ? 'Local' : 'World';
+  refreshTransformHud();
 }
 
 function refreshResetTransformButton(): void {

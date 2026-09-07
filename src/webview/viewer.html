@@ -263,6 +263,33 @@
           <span id="viewStateChipLabel"></span>
           <button type="button" id="viewStateChipClose" title="Exit this view">✕</button>
         </div>
+        <!-- Blender-style transform toolbar on the viewport's left edge: gizmo mode,
+             Local / World orientation, undo / redo, and Save Selection As. -->
+        <div id="transformHud">
+          <button id="xfMove" class="shading-btn" data-mode="translate" data-tip="Move (G) — drag an arrow for one axis, a square for two, the center for free screen-space movement">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M8 1.5 V14.5 M1.5 8 H14.5"/><path d="M6 3.5 L8 1.5 L10 3.5 M6 12.5 L8 14.5 L10 12.5 M3.5 6 L1.5 8 L3.5 10 M12.5 6 L14.5 8 L12.5 10"/></svg>
+          </button>
+          <button id="xfRotate" class="shading-btn" data-mode="rotate" data-tip="Rotate (R) — drag a ring; on a bone, R also starts the mouse-driven rotate">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M12.6 10.4 A5.2 5.2 0 1 1 12.6 5.6"/><path d="M12.9 2.6 L12.9 5.9 L9.6 5.9"/></svg>
+          </button>
+          <button id="xfScale" class="shading-btn" data-mode="scale" data-tip="Scale (S) — drag a handle for one axis, the center cube for uniform">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="2" y="7" width="7" height="7"/><path d="M6.5 9.5 L14 2 M9.8 2 H14 V6.2"/></svg>
+          </button>
+          <span class="shading-sep"></span>
+          <button id="xfSpace" class="shading-btn shading-axis" data-tip="Transform orientation — Local follows the node's own axes, World the scene axes (Blender's Local / Global)">Local</button>
+          <span class="shading-sep"></span>
+          <button id="xfUndo" class="shading-btn" disabled data-tip="Undo the last transform or pose edit (Ctrl/Cmd+Z)">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M4.5 6.5 H10 a3 3 0 0 1 0 6 H7"/><path d="M7 4 L4.5 6.5 L7 9"/></svg>
+          </button>
+          <button id="xfRedo" class="shading-btn" disabled data-tip="Redo (Ctrl/Cmd+Shift+Z)">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M11.5 6.5 H6 a3 3 0 0 0 0 6 H9"/><path d="M9 4 L11.5 6.5 L9 9"/></svg>
+          </button>
+          <span class="shading-sep"></span>
+          <button id="xfSave" class="shading-btn" disabled data-tip="Save selection as a new file… — the selected node with its current transform, in the source format when three.js can write it">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M2.5 2.5 H11 L13.5 5 V13.5 H2.5 Z"/><path d="M5 2.5 V6 H10 V2.5"/><rect x="4.5" y="9" width="7" height="4.5"/></svg>
+          </button>
+          <div id="transformTip" hidden></div>
+        </div>
         <!-- Blender-style shading mode strip, to the left of the corner view gizmo. -->
         <div id="shadingHud">
           <button id="shadingCollapse" class="shading-btn shading-collapse" data-tip="Hide the shading controls">›</button>

@@ -732,11 +732,7 @@ button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
 }
 .kv-list .kv-action { grid-column: 1 / -1; }
 
-/* Gizmo mode strip in the Selection panel: Move / Rotate / Scale + Local / World. */
-.kv-seg { display: flex; gap: 4px; flex-wrap: wrap; }
-.kv-seg button { padding: 3px 8px; }
-.kv-seg button.active { background: var(--button-bg); color: var(--button-fg); border-color: var(--button-bg); }
-.kv-seg button[data-space] { margin-left: auto; color: var(--muted); }
+.kv-action button + button { margin-left: 6px; }
 
 /* Viewport */
 #mainCol {
@@ -944,6 +940,40 @@ button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
   font-size: 11px;
   font-weight: 600;
 }
+/* Blender-style transform toolbar: the shading strip's styling turned into a
+   column on the viewport's left edge, level with the shading strip. */
+#transformHud {
+  position: absolute;
+  top: 57px;
+  left: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--button-bg);
+  border-radius: 15px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+#transformHud > .shading-sep {
+  width: 16px;
+  height: 1px;
+  margin: 2px 0;
+}
+/* Its hover explanation hangs to the right so it never clips at the edge. */
+#transformTip {
+  position: absolute;
+  top: 3px;
+  left: calc(100% + 6px);
+  padding: 4px 8px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #ddd;
+  font-size: 11px;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+#transformTip[hidden] { display: none; }
 /* Hover explanation, hanging below the strip and right-aligned to it so it
    never overflows the viewport edge. */
 #shadingTip {

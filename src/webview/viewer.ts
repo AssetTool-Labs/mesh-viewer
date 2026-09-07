@@ -10,6 +10,7 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { SparkRenderer } from '@sparkjsdev/spark';
 import type { CameraState, OrbitDelta } from '../types';
 import { setViewerRenderer, type LoadedAsset } from './loaders';
+import { exportBlocker, exportObject } from './exporters';
 import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
 import type { ElementMode, Topology } from './elementTopology';
 export type { WeightMode } from './weightMaterial';
@@ -306,6 +307,8 @@ export class Viewer {
   private readonly originalTransforms = new WeakMap<THREE.Object3D, BindPose>();
   private poseUndo: BindPose[][] = [];
   private poseRedo: BindPose[][] = [];
+  /** True while an export has transforms temporarily rewritten; tick() skips rendering. */
+  private exporting = false;
   private rotateModal: {
     startQuat: THREE.Quaternion;
     startX: number;
@@ -1745,6 +1748,39 @@ export class Viewer {
     this.poseRedo = [];
   }
 
+  get canUndo(): boolean {
+    return this.poseUndo.length > 0 || this.rotateModal !== null;
+  }
+
+  get canRedo(): boolean {
+    return this.poseRedo.length > 0;
+  }
+
+  /** The selected node as the UI sees it (a bone before Mixamo retargeting). */
+  getSelected(): THREE.Object3D | null {
+    return this.selectedObj;
+  }
+
+  /** Why `target` cannot be written out, or null when it can. */
+  exportBlocker(target: THREE.Object3D): string | null {
+    return exportBlocker(target);
+  }
+
+  /**
+   * Serialize a node with its current transform in the format named by `ext`.
+   * The exporters temporarily rewrite transforms (see exportObject), so the
+   * render loop is held for the duration to avoid a displaced frame.
+   */
+  async exportNode(target: THREE.Object3D, ext: string): Promise<Uint8Array> {
+    const entry = this.entries.find((e) => e.wrapper === target);
+    this.exporting = true;
+    try {
+      return await exportObject(target, ext, this.contentRoot, this.renderer, entry?.asset.animations ?? []);
+    } finally {
+      this.exporting = false;
+    }
+  }
+
   undoPose(): boolean {
     if (this.rotateModal) {
       this.cancelRotateModal();
@@ -2598,6 +2634,8 @@ export class Viewer {
   };
 
   private tick = (timeMs: number): void => {
+    // An export has transforms temporarily rewritten; don't show that frame.
+    if (this.exporting) return;
     // Throttle to the target frame rate. Bail out until at least one frame
     // budget (minus tolerance) has elapsed since the last rendered frame, then
     // snap lastFrameTime onto the 60Hz grid so refresh rates that aren't a clean
