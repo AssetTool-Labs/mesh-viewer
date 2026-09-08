@@ -294,6 +294,38 @@ export class MeshViewerProvider implements vscode.CustomReadonlyEditorProvider<V
           }
           break;
         }
+        case 'saveExportAs': {
+          // The webview cannot show dialogs or touch disk, so the export is two
+          // round trips: pick the target here, let the webview encode for the
+          // chosen extension, then write the bytes in `writeExport`.
+          const filters: Record<string, string[]> = {};
+          for (const f of msg.formats) filters[f.label] = [f.ext];
+          const target = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.joinPath(fileDir, msg.suggestedName),
+            filters,
+          });
+          const picked = target ? path.extname(target.fsPath).slice(1).toLowerCase() : '';
+          await webview.postMessage({
+            type: 'exportTarget',
+            requestId: msg.requestId,
+            uri: target ? target.toString() : null,
+            ext: picked || msg.formats[0]?.ext || 'glb',
+          });
+          break;
+        }
+        case 'writeExport': {
+          const target = vscode.Uri.parse(msg.uri);
+          const fileName = path.basename(target.fsPath);
+          try {
+            await vscode.workspace.fs.writeFile(target, Buffer.from(msg.base64, 'base64'));
+            await webview.postMessage({ type: 'exportDone', requestId: msg.requestId, ok: true, fileName });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            vscode.window.showErrorMessage(`3D Mesh Viewer: could not save ${fileName} — ${message}`);
+            await webview.postMessage({ type: 'exportDone', requestId: msg.requestId, ok: false, fileName, message });
+          }
+          break;
+        }
         case 'revealSource':
           // Inside the workspace, highlight it in the Explorer view; otherwise
           // fall back to the OS file manager (Finder / File Explorer).

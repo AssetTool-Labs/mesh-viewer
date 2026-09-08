@@ -3,12 +3,16 @@ import type {
   AddFileErrorMessage,
   AddFileMessage,
   CameraLinkMode,
+  ExportDoneMessage,
+  ExportFormat,
+  ExportTargetMessage,
   FilePayload,
   InitMessage,
   InitViewSettings,
   OrbitDelta,
   ViewSettings,
 } from '../types';
+import { exportFormatsFor } from './exporters';
 import { loadAsset, type LoadedAsset } from './loaders';
 import { hasRenderableGeometry } from './renderables';
 import { decodeText } from './textEncoding';
@@ -27,6 +31,7 @@ import {
   INSPECT_LABELS,
   type MorphMeshInfo,
   type HudInfo,
+  type GizmoMode,
 } from './viewer';
 import { UVView, type AreaTool, type UVBacking, type UVElementContext } from './uvView';
 import { elementSelection, type ElementMode } from './elementSelection';
@@ -117,6 +122,11 @@ const weightLegend = $('weightLegend');
 const toggleXray = $<HTMLInputElement>('toggleXray');
 const toggleFlatShading = $<HTMLInputElement>('toggleFlatShading');
 const shadingHud = $('shadingHud');
+const transformHud = $('transformHud');
+const xfSpaceBtn = $<HTMLButtonElement>('xfSpace');
+const xfUndoBtn = $<HTMLButtonElement>('xfUndo');
+const xfRedoBtn = $<HTMLButtonElement>('xfRedo');
+const xfResetHudBtn = $<HTMLButtonElement>('xfResetHud');
 const shadingModeBtns = Array.from(shadingHud.querySelectorAll<HTMLButtonElement>('[data-mode]'));
 const shadingXrayBtn = $<HTMLButtonElement>('shadingXray');
 const shadingFlatBtn = $<HTMLButtonElement>('shadingFlat');
@@ -141,7 +151,11 @@ const resetPoseBtn = $<HTMLButtonElement>('resetPose');
 const frameSelectionBtn = $<HTMLButtonElement>('frameSelection');
 const sidebarToggle = $<HTMLButtonElement>('sidebarToggle');
 const importMeshBtn = $<HTMLButtonElement>('importMeshBtn');
-const saveCopyBtn = $<HTMLButtonElement>('saveCopyBtn');
+const saveMenuBtn = $<HTMLButtonElement>('saveMenuBtn');
+const saveMenu = $('saveMenu');
+const saveMenuCopyHint = $('saveMenuCopyHint');
+const saveMenuSceneHint = $('saveMenuSceneHint');
+const saveMenuSelectionHint = $('saveMenuSelectionHint');
 const revealBtn = $<HTMLButtonElement>('revealBtn');
 const blendshapesTab = $<HTMLButtonElement>('blendshapesTab');
 const blendshapeList = $('blendshapeList');
@@ -192,9 +206,66 @@ document.addEventListener('keydown', (ev) => {
 
 importMeshBtn.addEventListener('click', () => requestPickAndImport());
 
-// Both act on the primary file; the host owns its URI, so these carry no payload.
-saveCopyBtn.addEventListener('click', () => vscode.postMessage({ type: 'saveSourceCopy' }));
+// Reveal acts on the primary file; the host owns its URI, so it carries no payload.
 revealBtn.addEventListener('click', () => vscode.postMessage({ type: 'revealSource' }));
+
+// ---- Save menu ----
+// One popover for every write-to-disk action. Row state is computed on open
+// rather than tracked, since selection and imports change constantly and the
+// menu is only visible for a moment.
+function openSaveMenu(): void {
+  const selected = viewer.getSelected();
+  const sceneBlocker = viewer.entries.length ? viewer.exportBlocker(viewer.contentRoot) : 'Nothing is loaded yet.';
+  const n = viewer.entries.length;
+  saveMenuSceneHint.textContent =
+    sceneBlocker ?? (n === 1 ? 'The whole model with its current transforms' : `All ${n} imported files with their current transforms`);
+  // A blocked selection (splat, or a skinned mesh without its skeleton) shows
+  // the reason as its hint, so a disabled row explains itself.
+  const selectionBlocker = selected ? viewer.exportBlocker(selected) : 'Select a node in the hierarchy first';
+  saveMenuSelectionHint.textContent =
+    selectionBlocker ?? `${selected!.name || selected!.type} and everything under it`;
+  for (const item of saveMenu.querySelectorAll<HTMLButtonElement>('.menu-item')) {
+    if (item.dataset.action === 'scene') item.disabled = sceneBlocker !== null;
+    else if (item.dataset.action === 'selection') item.disabled = selectionBlocker !== null;
+  }
+  saveMenu.hidden = false;
+  saveMenuBtn.setAttribute('aria-expanded', 'true');
+  // The panel clips at its bottom edge, so in a short editor pane the menu
+  // scrolls instead of losing its last rows.
+  saveMenu.style.maxHeight = `${Math.max(80, window.innerHeight - saveMenu.getBoundingClientRect().top - 8)}px`;
+}
+
+function closeSaveMenu(): void {
+  if (saveMenu.hidden) return;
+  saveMenu.hidden = true;
+  saveMenuBtn.setAttribute('aria-expanded', 'false');
+}
+
+saveMenuBtn.addEventListener('click', () => (saveMenu.hidden ? openSaveMenu() : closeSaveMenu()));
+saveMenu.addEventListener('click', (ev) => {
+  const item = (ev.target as HTMLElement).closest<HTMLButtonElement>('.menu-item');
+  if (!item || item.disabled) return;
+  closeSaveMenu();
+  switch (item.dataset.action) {
+    case 'copy': vscode.postMessage({ type: 'saveSourceCopy' }); break;
+    case 'scene': saveSceneAs(); break;
+    case 'selection': saveSelectionAs(); break;
+    case 'snapshot': saveSnapshot(false); break;
+    case 'snapshotTransparent': saveSnapshot(true); break;
+  }
+});
+// Any press outside the menu or its button dismisses it, as does leaving the window.
+document.addEventListener('pointerdown', (ev) => {
+  const t = ev.target as Node;
+  if (!saveMenu.contains(t) && !saveMenuBtn.contains(t)) closeSaveMenu();
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && !saveMenu.hidden) {
+    closeSaveMenu();
+    ev.stopImmediatePropagation();
+  }
+}, true);
+window.addEventListener('blur', closeSaveMenu);
 
 // ---- Blender-style timeline / dope sheet (bottom dock) ----
 // The panel is a read-only visualization: it scrubs/steps/plays through the
@@ -695,17 +766,172 @@ shadingLinkBtn.addEventListener('click', (ev) => {
 // tooltips: it appears instantly and right-aligned so it never clips at the
 // viewport edge. data-tip is read on every hover since hudUpAxis rewrites its
 // tip text on each axis change.
-const shadingTip = $('shadingTip');
-for (const btn of shadingHud.querySelectorAll<HTMLButtonElement>('button')) {
-  btn.addEventListener('mouseenter', () => {
-    const tip = btn.dataset.tip;
-    if (!tip) return;
-    shadingTip.textContent = tip;
-    shadingTip.hidden = false;
-  });
-  btn.addEventListener('mouseleave', () => {
-    shadingTip.hidden = true;
-  });
+function wireHudTips(strip: HTMLElement, tipEl: HTMLElement): void {
+  for (const btn of strip.querySelectorAll<HTMLButtonElement>('button')) {
+    btn.addEventListener('mouseenter', () => {
+      const tip = btn.dataset.tip;
+      if (!tip) return;
+      tipEl.textContent = tip;
+      tipEl.hidden = false;
+    });
+    btn.addEventListener('mouseleave', () => {
+      tipEl.hidden = true;
+    });
+  }
+}
+wireHudTips(shadingHud, $('shadingTip'));
+wireHudTips(transformHud, $('transformTip'));
+
+// ---- Transform toolbar (Blender-style, viewport left edge) ----
+for (const btn of transformHud.querySelectorAll<HTMLButtonElement>('button[data-mode]')) {
+  btn.addEventListener('click', () => setGizmoMode(btn.dataset.mode as GizmoMode));
+}
+xfSpaceBtn.addEventListener('click', () => {
+  viewer.setGizmoSpace(viewer.gizmoSpace === 'local' ? 'world' : 'local');
+  refreshTransformHud();
+});
+xfUndoBtn.addEventListener('click', () => {
+  viewer.undoPose();
+  syncTransformFields();
+  refreshPoseHint();
+  refreshTransformHud();
+});
+xfRedoBtn.addEventListener('click', () => {
+  viewer.redoPose();
+  syncTransformFields();
+  refreshPoseHint();
+  refreshTransformHud();
+});
+// Same action as the inspector's per-node button: a bone goes back to the
+// bind pose, anything else to its load-time TRS.
+xfResetHudBtn.addEventListener('click', () => {
+  const target = viewer.getPoseTarget();
+  if (!target) return;
+  if ((target as THREE.Bone).isBone) {
+    resetPose();
+  } else {
+    viewer.resetTransform(target);
+    syncTransformFields();
+  }
+  refreshTransformHud();
+});
+refreshTransformHud();
+
+/** Mirror gizmo mode / space, history depth, and selection into the toolbar. */
+function refreshTransformHud(): void {
+  const target = viewer.getPoseTarget();
+  for (const btn of transformHud.querySelectorAll<HTMLButtonElement>('button[data-mode]')) {
+    // Select is always available: it is the way back out of a transform mode.
+    btn.disabled = !target && btn.dataset.mode !== 'select';
+    btn.classList.toggle('active', btn.dataset.mode === viewer.gizmoMode);
+  }
+  xfSpaceBtn.disabled = !target;
+  // The label is the current orientation; the tip spells that out and names
+  // the other one, so the pill never reads as "click for Local".
+  const local = viewer.gizmoSpace === 'local';
+  xfSpaceBtn.textContent = local ? 'Local' : 'World';
+  xfSpaceBtn.dataset.tip = local
+    ? 'Orientation is Local (the node\'s own axes) — click to switch to World (the scene axes)'
+    : 'Orientation is World (the scene axes) — click to switch to Local (the node\'s own axes)';
+  xfUndoBtn.disabled = !viewer.canUndo;
+  xfRedoBtn.disabled = !viewer.canRedo;
+  refreshResetHudButton();
+}
+
+// ---- Export selection / scene as a new file ----
+// Two round trips with the host: it owns the Save dialog and the disk. The
+// node is remembered per request so a selection change mid-dialog cannot
+// swap what gets written.
+const pendingExports = new Map<string, { target: THREE.Object3D; label: string; toast?: HTMLDivElement }>();
+
+function requestExport(target: THREE.Object3D, label: string, stem: string, formats: ExportFormat[]): void {
+  const safe = stem.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'node';
+  const requestId = `export-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  pendingExports.set(requestId, { target, label });
+  vscode.postMessage({ type: 'saveExportAs', requestId, suggestedName: `${safe}.${formats[0].ext}`, formats });
+}
+
+/** Every imported file at once: contentRoot holds nothing but the entry wrappers. */
+function saveSceneAs(): void {
+  if (!viewer.entries.length) {
+    showToast({ title: 'Nothing to export', body: 'Open or import a file first.', kind: 'error' });
+    return;
+  }
+  const blocker = viewer.exportBlocker(viewer.contentRoot);
+  if (blocker) {
+    showToast({ title: 'Cannot export', body: blocker, kind: 'error' });
+    return;
+  }
+  // A single file round-trips to its own format; mixed sources lead with GLB,
+  // the only writer that keeps everything from all of them.
+  const single = viewer.entries.length === 1;
+  const formats = exportFormatsFor(single ? primaryFile?.ext : undefined);
+  const stem = (primaryFile?.name ?? 'scene').replace(/\.[^.]+$/, '');
+  requestExport(viewer.contentRoot, 'scene', single ? stem : `${stem}-scene`, formats);
+}
+
+/** The imported file a node belongs to (its top-level wrapper's entry). */
+function entryOf(obj: THREE.Object3D): AssetEntry | null {
+  let node: THREE.Object3D | null = obj;
+  while (node && node.parent !== viewer.contentRoot) node = node.parent;
+  return node ? viewer.entries.find((e) => e.wrapper === node) ?? null : null;
+}
+
+function saveSelectionAs(): void {
+  const target = viewer.getSelected();
+  if (!target) {
+    showToast({ title: 'Nothing selected', body: 'Select a node in the hierarchy first.', kind: 'error' });
+    return;
+  }
+  const blocker = viewer.exportBlocker(target);
+  if (blocker) {
+    showToast({ title: 'Cannot export', body: blocker, kind: 'error' });
+    return;
+  }
+  const entry = entryOf(target);
+  const sourceExt = entry?.label.split('.').pop();
+  const formats = exportFormatsFor(sourceExt);
+  // A top-level row is named after its file; drop that extension so the
+  // suggestion becomes "<file>.<ext>" rather than "<file>.<old>.<ext>".
+  const stem = entry?.wrapper === target ? target.name.replace(/\.[^.]+$/, '') : target.name;
+  requestExport(target, target.name || 'node', stem, formats);
+}
+
+async function handleExportTarget(msg: ExportTargetMessage): Promise<void> {
+  const pending = pendingExports.get(msg.requestId);
+  if (!pending) return;
+  if (!msg.uri) {
+    pendingExports.delete(msg.requestId);
+    return;
+  }
+  pending.toast = showToast({ title: 'Exporting…', body: `${pending.label} → .${msg.ext}`, sticky: true });
+  try {
+    const bytes = await viewer.exportNode(pending.target, msg.ext);
+    vscode.postMessage({ type: 'writeExport', requestId: msg.requestId, uri: msg.uri, base64: toBase64(bytes) });
+  } catch (err) {
+    pending.toast.remove();
+    pendingExports.delete(msg.requestId);
+    const message = err instanceof Error ? err.message : String(err);
+    showToast({ title: 'Export failed', body: message, kind: 'error' });
+  }
+}
+
+function handleExportDone(msg: ExportDoneMessage): void {
+  const pending = pendingExports.get(msg.requestId);
+  pendingExports.delete(msg.requestId);
+  pending?.toast?.remove();
+  if (msg.ok) showToast({ title: 'Saved', body: msg.fileName, kind: 'success' });
+  else showToast({ title: 'Save failed', body: msg.message ?? msg.fileName, kind: 'error' });
+}
+
+/** Chunked so a multi-megabyte export does not blow the argument limit of fromCharCode. */
+function toBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
 }
 toggleGrid.addEventListener('change', () => { viewer.setGridVisible(toggleGrid.checked); pushViewSettings(); });
 toggleAxes.addEventListener('change', () => { viewer.setAxesVisible(toggleAxes.checked); pushViewSettings(); });
@@ -961,8 +1187,9 @@ document.addEventListener('keydown', (ev) => {
     ev.preventDefault();
     if (ev.shiftKey) viewer.redoPose();
     else viewer.undoPose();
-    syncBoneRotationFields();
+    syncTransformFields();
     refreshPoseHint();
+    refreshTransformHud();
     return;
   }
   if (ev.ctrlKey || ev.metaKey) return;
@@ -992,11 +1219,28 @@ document.addEventListener('keydown', (ev) => {
     return;
   }
 
-  if (ev.code === 'KeyR' || ev.key === 'r' || ev.key === 'R') {
-    if (!viewer.getPoseBone()) return;
+  // Blender's G / R / S pick the gizmo mode for whatever is selected. On a bone,
+  // R additionally starts the mouse-driven rotate modal as before.
+  if (ev.code === 'KeyG' || ev.key === 'g' || ev.key === 'G') {
+    if (!viewer.getPoseTarget()) return;
     ev.preventDefault();
-    viewer.startRotateModal(lastPointerX, lastPointerY);
-    refreshPoseHint();
+    setGizmoMode('translate');
+    return;
+  }
+  if (ev.code === 'KeyS' || ev.key === 's' || ev.key === 'S') {
+    if (!viewer.getPoseTarget()) return;
+    ev.preventDefault();
+    setGizmoMode('scale');
+    return;
+  }
+  if (ev.code === 'KeyR' || ev.key === 'r' || ev.key === 'R') {
+    if (!viewer.getPoseTarget()) return;
+    ev.preventDefault();
+    setGizmoMode('rotate');
+    if (viewer.getPoseBone()) {
+      viewer.startRotateModal(lastPointerX, lastPointerY);
+      refreshPoseHint();
+    }
     return;
   }
 
@@ -1166,8 +1410,9 @@ viewer.setAnimationFinishedCallback(() => {
 
 viewer.onPoseEdit = () => {
   timeline.setPlaying(false);
-  syncBoneRotationFields();
+  syncTransformFields();
   refreshPoseHint();
+  refreshTransformHud();
 };
 
 // ---- Picking ----
@@ -1631,6 +1876,7 @@ function deselect(): void {
   for (const v of nodeViews.values()) v.row.classList.remove('selected');
   viewer.setSelected(null);
   selectionDetails.innerHTML = '<div class="kv-empty">Select a node to inspect it.</div>';
+  refreshTransformHud();
   if (showUV) refreshUVOverlay();
 }
 
@@ -1782,6 +2028,13 @@ window.addEventListener('message', (ev) => {
     saveSnapshot();
   } else if (msg.type === 'command' && msg.command === 'saveSnapshotTransparent') {
     saveSnapshot(true);
+  } else if (msg.type === 'exportTarget') {
+    handleExportTarget(msg as ExportTargetMessage).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      showToast({ title: 'Export failed', body: message, kind: 'error' });
+    });
+  } else if (msg.type === 'exportDone') {
+    handleExportDone(msg as ExportDoneMessage);
   } else if (msg.type === 'viewerCount') {
     viewerCount = Number(msg.count) || 1;
     // Nobody left to sync with — drop the link so it can't silently stay on.
@@ -1813,6 +2066,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
   applyViewSettings(msg.settings);
   primaryFile = { name: msg.fileName, ext: msg.fileExtension, size: msg.fileSizeBytes };
   revealBtn.hidden = !msg.canReveal;
+  saveMenuCopyHint.textContent = `Byte-for-byte copy of ${msg.fileName}`;
   fileNameEl.textContent = msg.fileName;
   fileSubtitleEl.textContent = `${msg.fileExtension.toUpperCase()} · ${formatBytes(msg.fileSizeBytes)}`;
   document.title = `${msg.fileName} — 3D Mesh Viewer`;
@@ -2076,6 +2330,7 @@ function buildHierarchy(): void {
     buildNode(entry.wrapper, treeContainer, 0);
   }
   refreshToggleButton();
+  refreshTransformHud();
 }
 
 function buildNode(obj: THREE.Object3D, parentContainer: HTMLElement, depth: number): void {
@@ -2182,6 +2437,7 @@ function selectObject(obj: THREE.Object3D): void {
   if (id) nodeViews.get(id)?.row.scrollIntoView({ block: 'nearest' });
   // 2) Draw a wireframe + bounding-box highlight around the mesh in the 3D viewport.
   viewer.setSelected(obj);
+  refreshTransformHud();
   // 3) Update the inspector pane with details about the selection.
   renderSelectionDetails(obj);
   // 4) If the user is viewing the Texture tab with UV overlay on, prefer the
@@ -2228,16 +2484,16 @@ function renderSelectionDetails(obj: THREE.Object3D): void {
   kv('Type', obj.type);
   kv('UUID', obj.uuid);
   kv('Visible', obj.visible ? 'yes' : 'no');
-  const pos = obj.position;
-  kv('Position', `${fmt(pos.x)}, ${fmt(pos.y)}, ${fmt(pos.z)}`);
-  if ((obj as THREE.Bone).isBone) {
-    appendBoneRotationFields(obj as THREE.Bone);
+  if (viewer.getPoseTarget()) {
+    appendTransformFields();
   } else {
+    const pos = obj.position;
+    kv('Position', `${fmt(pos.x)}, ${fmt(pos.y)}, ${fmt(pos.z)}`);
     const rotEuler = obj.rotation;
     kv('Rotation', `${fmtDeg(rotEuler.x)}°, ${fmtDeg(rotEuler.y)}°, ${fmtDeg(rotEuler.z)}°`);
+    const scale = obj.scale;
+    kv('Scale', `${fmt(scale.x)}, ${fmt(scale.y)}, ${fmt(scale.z)}`);
   }
-  const scale = obj.scale;
-  kv('Scale', `${fmt(scale.x)}, ${fmt(scale.y)}, ${fmt(scale.z)}`);
   kv('Children', String(obj.children.length));
 
   const mesh = obj as THREE.Mesh;
@@ -2297,69 +2553,140 @@ function resetPose(): void {
   if (!viewer.hasBindPose) return;
   viewer.resetBindPose();
   timeline.setPlaying(viewer.isAnimationPlaying);
-  syncBoneRotationFields();
+  syncTransformFields();
 }
 
 function refreshResetPoseButton(): void {
   resetPoseBtn.disabled = !viewer.hasBindPose;
 }
 
-function appendBoneRotationFields(bone: THREE.Bone): void {
-  const target = viewer.getPoseBone() ?? bone;
-  const key = document.createElement('div');
-  key.className = 'kv-key';
-  key.textContent = `Rotation (${target.rotation.order})`;
-  const val = document.createElement('div');
-  val.className = 'kv-val kv-rot';
+/** Inspector field groups, keyed by the id prefix of their X/Y/Z inputs. */
+type TransformGroup = 'xfPos' | 'xfRot' | 'xfScl';
+const TRANSFORM_AXES = ['X', 'Y', 'Z'] as const;
+
+/** Current values of one group as the inspector should display them. */
+function transformGroupValues(target: THREE.Object3D, group: TransformGroup): [string, string, string] {
+  if (group === 'xfPos') return [fmt(target.position.x), fmt(target.position.y), fmt(target.position.z)];
+  if (group === 'xfRot') return [fmtDeg(target.rotation.x), fmtDeg(target.rotation.y), fmtDeg(target.rotation.z)];
+  return [fmt(target.scale.x), fmt(target.scale.y), fmt(target.scale.z)];
+}
+
+function transformInputs(group: TransformGroup): HTMLInputElement[] | null {
+  const inputs = TRANSFORM_AXES.map((a) => document.getElementById(group + a) as HTMLInputElement | null);
+  return inputs.every((i) => i !== null) ? (inputs as HTMLInputElement[]) : null;
+}
+
+/**
+ * Editable Position / Rotation / Scale rows plus the gizmo mode strip for the
+ * current gizmo target. Each group writes only itself so typing in Position
+ * does not round-trip the rotation through its rounded display value.
+ */
+function appendTransformFields(): void {
+  const target = viewer.getPoseTarget();
+  if (!target) return;
+  const isBone = (target as THREE.Bone).isBone;
   let started = false;
-  for (const axis of ['x', 'y', 'z'] as const) {
-    const lab = document.createElement('label');
-    lab.textContent = axis.toUpperCase();
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.step = '0.1';
-    input.id = `poseRot${axis.toUpperCase()}`;
-    input.value = fmtDeg(target.rotation[axis]);
-    input.addEventListener('focus', () => { started = false; });
-    input.addEventListener('input', () => {
-      if (!started) {
-        viewer.beginPoseNumericEdit();
-        started = true;
-      }
-      const x = Number(($<HTMLInputElement>('poseRotX')).value);
-      const y = Number(($<HTMLInputElement>('poseRotY')).value);
-      const z = Number(($<HTMLInputElement>('poseRotZ')).value);
-      if (![x, y, z].every(Number.isFinite)) return;
-      viewer.setBoneRotationDegrees(target, x, y, z);
+  const write = (group: TransformGroup): void => {
+    const inputs = transformInputs(group);
+    if (!inputs) return;
+    const v = inputs.map((i) => Number(i.value)) as [number, number, number];
+    if (!v.every(Number.isFinite)) return;
+    if (!started) {
+      viewer.beginPoseNumericEdit();
+      started = true;
+    }
+    if (group === 'xfPos') viewer.setTargetTransform(target, { position: v });
+    else if (group === 'xfRot') viewer.setTargetTransform(target, { rotationDeg: v });
+    else viewer.setTargetTransform(target, { scale: v });
+    refreshResetTransformButton();
+  };
+  const row = (label: string, group: TransformGroup, step: string): void => {
+    const key = document.createElement('div');
+    key.className = 'kv-key';
+    key.textContent = label;
+    const val = document.createElement('div');
+    val.className = 'kv-val kv-rot';
+    const values = transformGroupValues(target, group);
+    TRANSFORM_AXES.forEach((axis, i) => {
+      const lab = document.createElement('label');
+      lab.textContent = axis;
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.step = step;
+      input.id = group + axis;
+      input.value = values[i];
+      input.addEventListener('focus', () => { started = false; });
+      input.addEventListener('input', () => write(group));
+      lab.append(input);
+      val.append(lab);
     });
-    lab.append(input);
-    val.append(lab);
-  }
-  selectionDetails.append(key, val);
+    selectionDetails.append(key, val);
+  };
+  row('Position', 'xfPos', '0.01');
+  row(`Rotation (${target.rotation.order})`, 'xfRot', '0.1');
+  row('Scale', 'xfScl', '0.01');
+
+  // Gizmo mode, orientation, and undo live in the viewport toolbar; the panel
+  // keeps the per-node actions.
   const action = document.createElement('div');
   action.className = 'kv-action';
   const btn = document.createElement('button');
   btn.type = 'button';
-  btn.textContent = 'Reset Pose';
-  btn.disabled = !viewer.hasBindPose;
-  btn.addEventListener('click', () => resetPose());
-  action.append(btn);
+  if (isBone) {
+    btn.textContent = 'Reset Pose';
+    btn.disabled = !viewer.hasBindPose;
+    btn.addEventListener('click', () => resetPose());
+  } else {
+    btn.id = 'xfReset';
+    btn.textContent = 'Reset Transform';
+    btn.disabled = !viewer.hasTransformEdit(target);
+    btn.addEventListener('click', () => {
+      viewer.resetTransform(target);
+      syncTransformFields();
+    });
+  }
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.textContent = 'Save Selection As…';
+  save.title = 'Write this node, with its current transform, to a new file';
+  save.addEventListener('click', () => saveSelectionAs());
+  action.append(btn, save);
   selectionDetails.append(action);
 }
 
-function syncBoneRotationFields(): void {
-  const bone = viewer.getPoseBone();
-  if (!bone) return;
-  const x = document.getElementById('poseRotX') as HTMLInputElement | null;
-  const y = document.getElementById('poseRotY') as HTMLInputElement | null;
-  const z = document.getElementById('poseRotZ') as HTMLInputElement | null;
-  if (!x || !y || !z) return;
-  if (document.activeElement === x || document.activeElement === y || document.activeElement === z) {
-    return;
+function setGizmoMode(mode: GizmoMode): void {
+  viewer.setGizmoMode(mode);
+  refreshTransformHud();
+}
+
+function refreshResetTransformButton(): void {
+  const btn = document.getElementById('xfReset') as HTMLButtonElement | null;
+  const target = viewer.getPoseTarget();
+  if (btn && target) btn.disabled = !viewer.hasTransformEdit(target);
+  refreshResetHudButton();
+}
+
+/** The toolbar Reset follows the target: pose for a bone, TRS for anything else. */
+function refreshResetHudButton(): void {
+  const target = viewer.getPoseTarget();
+  const isBone = !!target && (target as THREE.Bone).isBone;
+  xfResetHudBtn.disabled = isBone ? !viewer.hasBindPose : !(target && viewer.hasTransformEdit(target));
+  xfResetHudBtn.dataset.tip = isBone
+    ? 'Reset Pose — put every bone back to the bind pose'
+    : 'Reset Transform — put the node back to its load-time position, rotation, and scale';
+}
+
+/** Push the target's live TRS into the inspector, skipping any field being typed in. */
+function syncTransformFields(): void {
+  const target = viewer.getPoseTarget();
+  if (!target) return;
+  for (const group of ['xfPos', 'xfRot', 'xfScl'] as const) {
+    const inputs = transformInputs(group);
+    if (!inputs || inputs.some((i) => document.activeElement === i)) continue;
+    const values = transformGroupValues(target, group);
+    inputs.forEach((input, i) => { input.value = values[i]; });
   }
-  x.value = fmtDeg(bone.rotation.x);
-  y.value = fmtDeg(bone.rotation.y);
-  z.value = fmtDeg(bone.rotation.z);
+  refreshResetTransformButton();
 }
 
 function fmt(n: number): string {

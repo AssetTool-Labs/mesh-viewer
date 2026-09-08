@@ -95,6 +95,8 @@ html, body {
   display: flex;
   align-items: flex-start;
   gap: 8px;
+  /* Anchors the Save menu popover. */
+  position: relative;
 }
 .sidebar-header .header-text {
   flex: 1;
@@ -132,6 +134,68 @@ html, body {
   height: 14px;
 }
 .sidebar-header .header-btn.icon[hidden] { display: none; }
+.sidebar-header .save-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.sidebar-header .save-menu-btn .caret {
+  width: 8px;
+  height: 8px;
+}
+.sidebar-header .save-menu-btn[aria-expanded="true"] { background: var(--button-hover); }
+
+/* Save menu: a popover under the header button. Rows carry a muted hint so the
+   byte-for-byte copy and the re-encoded exports read as different things. */
+#saveMenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  /* The panel clips its overflow, so the menu may never be wider than the
+     header row; below 250px the labels wrap instead. Height is capped from
+     main.ts when it opens, so a short editor pane scrolls the menu. */
+  min-width: min(250px, 100%);
+  max-width: 100%;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  z-index: 20;
+}
+#saveMenu[hidden] { display: none; }
+#saveMenu .menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent;
+  border: none;
+  border-radius: 3px;
+  color: var(--fg);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+#saveMenu .menu-item:hover:not(:disabled),
+#saveMenu .menu-item:focus-visible { background: var(--hover); outline: none; }
+#saveMenu .menu-item:disabled { color: var(--muted); cursor: default; }
+#saveMenu .menu-item .hint {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+#saveMenu .menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--panel-border);
+}
 
 .tabs {
   display: flex;
@@ -732,6 +796,8 @@ button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
 }
 .kv-list .kv-action { grid-column: 1 / -1; }
 
+.kv-action button + button { margin-left: 6px; }
+
 /* Viewport */
 #mainCol {
   flex: 1 1 auto;
@@ -938,6 +1004,42 @@ button.primary:hover, #frameSelection:hover { background: var(--button-hover); }
   font-size: 11px;
   font-weight: 600;
 }
+/* Blender-style transform toolbar: the shading strip's styling turned into a
+   column on the viewport's left edge. It sits below the shading strip (30px
+   tall at top 57px) rather than level with it, so a narrow viewport can never
+   drive the right-anchored strip into the column or over its hover tip. */
+#transformHud {
+  position: absolute;
+  top: 95px;
+  left: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--button-bg);
+  border-radius: 15px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+#transformHud > .shading-sep {
+  width: 16px;
+  height: 1px;
+  margin: 2px 0;
+}
+/* Its hover explanation hangs to the right so it never clips at the edge. */
+#transformTip {
+  position: absolute;
+  top: 3px;
+  left: calc(100% + 6px);
+  padding: 4px 8px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #ddd;
+  font-size: 11px;
+  border-radius: 3px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+#transformTip[hidden] { display: none; }
 /* Hover explanation, hanging below the strip and right-aligned to it so it
    never overflows the viewport edge. */
 #shadingTip {

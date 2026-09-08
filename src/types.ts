@@ -113,6 +113,33 @@ export interface ViewerCountMessage {
   count: number;
 }
 
+/** One writable format offered in the Save Selection As dialog. */
+export interface ExportFormat {
+  /** Filter label shown in the dialog, e.g. "glTF Binary". */
+  label: string;
+  /** Lowercase extension without the dot. */
+  ext: string;
+}
+
+/** Message: extension -> webview, the Save dialog result for a `saveExportAs` request. */
+export interface ExportTargetMessage {
+  type: 'exportTarget';
+  requestId: string;
+  /** Chosen file as a URI string, or null when the dialog was cancelled. */
+  uri: string | null;
+  /** Extension of the chosen file (decides the export format). */
+  ext: string;
+}
+
+/** Message: extension -> webview, whether `writeExport` landed on disk. */
+export interface ExportDoneMessage {
+  type: 'exportDone';
+  requestId: string;
+  ok: boolean;
+  fileName: string;
+  message?: string;
+}
+
 /** Webview -> extension. */
 export type FromWebviewMessage =
   | { type: 'ready' }
@@ -135,6 +162,10 @@ export type FromWebviewMessage =
   /** Ask the host to save a copy of the primary file somewhere the user picks. */
   | { type: 'saveSourceCopy' }
   /** Ask the host to reveal the primary file in the Explorer (or the OS file manager). */
-  | { type: 'revealSource' };
+  | { type: 'revealSource' }
+  /** Ask the host for a Save dialog offering these formats; answered with `exportTarget`. */
+  | { type: 'saveExportAs'; requestId: string; suggestedName: string; formats: ExportFormat[] }
+  /** The exported bytes for the target chosen in `exportTarget`; answered with `exportDone`. */
+  | { type: 'writeExport'; requestId: string; uri: string; base64: string };
 
 
