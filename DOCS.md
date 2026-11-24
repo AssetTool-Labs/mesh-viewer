@@ -99,6 +99,10 @@ Bump the `version` in `package.json` (e.g. `0.1.0` → `0.1.1`), then re-run **s
 (`f_dc_*`) or a PlayCanvas-compressed `chunk` element renders as Gaussian splats,
 anything else renders as a mesh or point cloud as before.
 
+Plain PLY point clouds use a fixed 3-pixel point size so their points stay visible
+regardless of coordinate units or zoom. Vertex colors are preserved when present.
+This does not change PLY mesh rendering, Gaussian splats, or PCD/XYZ point clouds.
+
 STEP files are parsed and tessellated locally in a dedicated worker. The built-in
 viewer-focused importer handles common AP203/AP214/AP242 B-rep solids, assemblies,
 colors, units, analytic surfaces, rational B-splines, and AP242 tessellated solids or
