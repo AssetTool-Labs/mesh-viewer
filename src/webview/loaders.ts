@@ -792,10 +792,11 @@ async function loadPLY(buf: ArrayBuffer): Promise<LoadedAsset> {
     root.add(new THREE.Mesh(geometry, material));
   } else {
     const material = new THREE.PointsMaterial({
-      size: 0.005,
+      // Screen-space sizing keeps sparse clouds visible regardless of file units or zoom.
+      size: 3,
       vertexColors: geometry.hasAttribute('color'),
       color: geometry.hasAttribute('color') ? 0xffffff : 0xb5b5b5,
-      sizeAttenuation: true,
+      sizeAttenuation: false,
     });
     root.add(new THREE.Points(geometry, material));
   }
