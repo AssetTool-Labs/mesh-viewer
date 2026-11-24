@@ -10,6 +10,7 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { SparkRenderer } from '@sparkjsdev/spark';
 import type { CameraState, OrbitDelta } from '../types';
 import { setViewerRenderer, type LoadedAsset } from './loaders';
+import { exportBlocker, exportObject, retargetClips } from './exporters';
 import { createWeightMaterial, applyWeightUniforms, type WeightMaterialEntry, type WeightMode } from './weightMaterial';
 import type { ElementMode, Topology } from './elementTopology';
 export type { WeightMode } from './weightMaterial';
@@ -159,12 +160,32 @@ interface MaterialBackup {
   flatShading?: boolean;
 }
 
-/** Local TRS of one bone at load time (bind / rest pose). */
+/** Local TRS of one node. Used for bones' bind pose at load time and for the
+ *  undo history of every node the transform gizmo has touched. */
 interface BindPose {
-  bone: THREE.Bone;
+  object: THREE.Object3D;
   position: THREE.Vector3;
   quaternion: THREE.Quaternion;
   scale: THREE.Vector3;
+}
+
+/** `select` is Blender's select tool: the node highlights, no gizmo attaches. */
+export type GizmoMode = 'select' | 'translate' | 'rotate' | 'scale';
+export type GizmoSpace = 'local' | 'world';
+
+function snapshotTRS(object: THREE.Object3D): BindPose {
+  return {
+    object,
+    position: object.position.clone(),
+    quaternion: object.quaternion.clone(),
+    scale: object.scale.clone(),
+  };
+}
+
+function restoreTRS(pose: BindPose): void {
+  pose.object.position.copy(pose.position);
+  pose.object.quaternion.copy(pose.quaternion);
+  pose.object.scale.copy(pose.scale);
 }
 
 /** One imported asset under `contentRoot`. The first entry is the file the editor
@@ -276,10 +297,23 @@ export class Viewer {
   private mixer: THREE.AnimationMixer | null = null;
   private readonly poseControls: TransformControls;
   private bindPoses: BindPose[] = [];
-  /** The bone TransformControls / R-rotate actually edit (may be a Mixamo parent). */
-  private poseBone: THREE.Bone | null = null;
+  /** The node TransformControls and the inspector fields edit: the selected
+   *  object, or for bones the resolved pose bone (may be a Mixamo parent). */
+  private poseTarget: THREE.Object3D | null = null;
+  private gizmoModeState: GizmoMode = 'select';
+  private gizmoSpaceState: GizmoSpace = 'local';
+  /** Load-time TRS of non-bone nodes, recorded the first time each is edited so
+   *  Reset Transform has a target without snapshotting every node up front.
+   *  Bones are covered by `bindPoses` instead. */
+  private readonly originalTransforms = new WeakMap<THREE.Object3D, BindPose>();
+  /** Every non-bone node the gizmo or inspector has ever edited. History
+   *  snapshots cover all of them, so undo / redo do not depend on what happens
+   *  to be selected when they run. */
+  private readonly editedNodes = new Set<THREE.Object3D>();
   private poseUndo: BindPose[][] = [];
   private poseRedo: BindPose[][] = [];
+  /** True while an export has transforms temporarily rewritten; tick() skips rendering. */
+  private exporting = false;
   private rotateModal: {
     startQuat: THREE.Quaternion;
     startX: number;
@@ -350,19 +384,23 @@ export class Viewer {
       if (!this.suppressCameraChange) this.onCameraChange?.();
     });
 
-    // Rotate-only local gizmo for posing a selected bone. The helper lives on
-    // the scene (not contentRoot) so framing / bounds ignore it. Orbit is
-    // disabled while the gizmo is dragged so the two left-button tools don't
-    // fight. objectChange pauses the mixer — otherwise the next tick overwrites
-    // the bone.
+    // Transform gizmo for the selected node (bones pose, everything else moves /
+    // rotates / scales). Starts in Select: a click only highlights, and the
+    // toolbar or G / R / S attaches the gizmo, so browsing a scene never
+    // shows handles nobody asked for. The helper lives on the scene (not
+    // contentRoot) so framing / bounds
+    // ignore it. Orbit is disabled while the gizmo is dragged so the two
+    // left-button tools don't fight. objectChange pauses the mixer — otherwise
+    // the next tick overwrites the bone.
     this.poseControls = new TransformControls(this.camera, canvas);
-    this.poseControls.mode = 'rotate';
-    this.poseControls.space = 'local';
+    this.poseControls.space = this.gizmoSpaceState;
     this.poseControls.detach();
     this.scene.add(this.poseControls.getHelper());
     this.poseControls.addEventListener('dragging-changed', (e) => {
       this.controls.enabled = !e.value;
       if (e.value) this.pushPoseUndo();
+      // Box3Helper snapshots its box at construction, so re-fit once the drag ends.
+      else if (this.showBounds) this.rebuildBoundsHelper();
     });
     this.poseControls.addEventListener('objectChange', () => {
       this.pauseForPose();
@@ -1520,16 +1558,107 @@ export class Viewer {
     this.cancelRotateModal();
     this.selectedObj = obj;
     this.outlinePass.selectedObjects = obj ? [obj] : [];
+    // Anything in the tree is a gizmo target. contentRoot never is: its
+    // rotation / position are owned by setUpAxis and alignContentToGrid.
     const bone = obj && (obj as THREE.Bone).isBone ? (obj as THREE.Bone) : null;
-    this.poseBone = bone ? resolvePoseBone(bone) : null;
-    if (this.poseBone) this.poseControls.attach(this.poseBone);
-    else this.poseControls.detach();
+    this.poseTarget = bone ? resolvePoseBone(bone) : obj && obj !== this.contentRoot ? obj : null;
+    this.syncGizmo();
     if (this.showSkeleton) this.updateSkeletonHighlight();
   }
 
-  /** Bone the gizmo / inspector / R-rotate edit. */
+  /** Attach the gizmo to the target in the current mode, or detach in Select. */
+  private syncGizmo(): void {
+    const mode = this.gizmoModeState;
+    if (mode === 'select' || !this.poseTarget) {
+      this.poseControls.detach();
+      return;
+    }
+    this.poseControls.mode = mode;
+    this.poseControls.attach(this.poseTarget);
+  }
+
+  /** The bone the gizmo / inspector / R-rotate edit, or null when the target is not a bone. */
+  private get poseBone(): THREE.Bone | null {
+    const t = this.poseTarget;
+    return t && (t as THREE.Bone).isBone ? (t as THREE.Bone) : null;
+  }
+
   getPoseBone(): THREE.Bone | null {
     return this.poseBone;
+  }
+
+  /** Node the gizmo and the inspector transform fields edit. */
+  getPoseTarget(): THREE.Object3D | null {
+    return this.poseTarget;
+  }
+
+  get gizmoMode(): GizmoMode {
+    return this.gizmoModeState;
+  }
+
+  setGizmoMode(mode: GizmoMode): void {
+    this.gizmoModeState = mode;
+    this.syncGizmo();
+  }
+
+  get gizmoSpace(): GizmoSpace {
+    return this.gizmoSpaceState;
+  }
+
+  setGizmoSpace(space: GizmoSpace): void {
+    this.gizmoSpaceState = space;
+    this.poseControls.space = space;
+  }
+
+  /**
+   * Write a node's local TRS from the inspector fields. Rotation is in degrees
+   * in the node's existing Euler order. Undo is the caller's job (see
+   * beginPoseNumericEdit) so one keystroke run makes one history entry.
+   */
+  setTargetTransform(
+    target: THREE.Object3D,
+    trs: { position?: [number, number, number]; rotationDeg?: [number, number, number]; scale?: [number, number, number] },
+  ): void {
+    this.rememberOriginalTransform(target);
+    if (trs.position) target.position.set(...trs.position);
+    if (trs.rotationDeg) {
+      target.rotation.set(
+        THREE.MathUtils.degToRad(trs.rotationDeg[0]),
+        THREE.MathUtils.degToRad(trs.rotationDeg[1]),
+        THREE.MathUtils.degToRad(trs.rotationDeg[2]),
+        target.rotation.order,
+      );
+    }
+    if (trs.scale) target.scale.set(...trs.scale);
+    this.pauseForPose();
+    if (this.showBounds) this.rebuildBoundsHelper();
+  }
+
+  /** True once a non-bone node has been edited away from its load-time TRS. */
+  hasTransformEdit(target: THREE.Object3D): boolean {
+    const orig = this.originalTransforms.get(target);
+    if (!orig) return false;
+    return (
+      !orig.position.equals(target.position) ||
+      !orig.quaternion.equals(target.quaternion) ||
+      !orig.scale.equals(target.scale)
+    );
+  }
+
+  /** Put a non-bone node back to the TRS it had when first edited (i.e. load time). */
+  resetTransform(target: THREE.Object3D): void {
+    const orig = this.originalTransforms.get(target);
+    if (!orig) return;
+    this.pushPoseUndo();
+    restoreTRS(orig);
+    this.pauseForPose();
+    if (this.showBounds) this.rebuildBoundsHelper();
+  }
+
+  private rememberOriginalTransform(target: THREE.Object3D): void {
+    if ((target as THREE.Bone).isBone || this.originalTransforms.has(target)) return;
+    this.originalTransforms.set(target, snapshotTRS(target));
+    this.editedNodes.add(target);
   }
 
   get hasBindPose(): boolean {
@@ -1573,11 +1702,7 @@ export class Viewer {
   resetBindPose(): void {
     this.cancelRotateModal();
     this.pushPoseUndo();
-    for (const pose of this.bindPoses) {
-      pose.bone.position.copy(pose.position);
-      pose.bone.quaternion.copy(pose.quaternion);
-      pose.bone.scale.copy(pose.scale);
-    }
+    for (const pose of this.bindPoses) restoreTRS(pose);
     this.contentRoot.updateMatrixWorld(true);
     if (this.showSkeleton) this.updateSkeletonMarkers();
     this.pauseForPose();
@@ -1598,36 +1723,28 @@ export class Viewer {
    * that are not in `skeleton.bones`. Shared bones are stored once.
    */
   private snapshotBindPoses(root: THREE.Object3D): void {
-    const seen = new Set<THREE.Bone>(this.bindPoses.map((p) => p.bone));
+    const seen = new Set<THREE.Object3D>(this.bindPoses.map((p) => p.object));
     root.traverse((o) => {
       const bone = o as THREE.Bone;
       if (!bone.isBone || seen.has(bone)) return;
       seen.add(bone);
-      this.bindPoses.push({
-        bone,
-        position: bone.position.clone(),
-        quaternion: bone.quaternion.clone(),
-        scale: bone.scale.clone(),
-      });
+      this.bindPoses.push(snapshotTRS(bone));
     });
   }
 
+  /** Every bone's current TRS plus every node ever edited, so poses and node
+   *  transforms share a single undo history and each entry restores the same
+   *  set of objects whichever node is selected when it is applied. */
   private capturePoseSnapshot(): BindPose[] {
-    return this.bindPoses.map((p) => ({
-      bone: p.bone,
-      position: p.bone.position.clone(),
-      quaternion: p.bone.quaternion.clone(),
-      scale: p.bone.scale.clone(),
-    }));
+    const snapshot = this.bindPoses.map((p) => snapshotTRS(p.object));
+    for (const node of this.editedNodes) snapshot.push(snapshotTRS(node));
+    return snapshot;
   }
 
   private restorePoseSnapshot(snapshot: BindPose[]): void {
-    for (const pose of snapshot) {
-      pose.bone.position.copy(pose.position);
-      pose.bone.quaternion.copy(pose.quaternion);
-      pose.bone.scale.copy(pose.scale);
-    }
+    for (const pose of snapshot) restoreTRS(pose);
     this.applyPoseToSkin();
+    if (this.showBounds) this.rebuildBoundsHelper();
   }
 
   private applyPoseToSkin(): void {
@@ -1640,9 +1757,89 @@ export class Viewer {
   }
 
   pushPoseUndo(): void {
-    if (this.bindPoses.length === 0) return;
+    if (this.bindPoses.length === 0 && !this.poseTarget && this.editedNodes.size === 0) return;
+    // Gizmo drags land here (dragging-changed) before the first objectChange,
+    // so this is the one place guaranteed to see the pre-edit TRS.
+    if (this.poseTarget) this.rememberOriginalTransform(this.poseTarget);
     this.poseUndo.push(this.capturePoseSnapshot());
     this.poseRedo = [];
+  }
+
+  get canUndo(): boolean {
+    return this.poseUndo.length > 0 || this.rotateModal !== null;
+  }
+
+  get canRedo(): boolean {
+    return this.poseRedo.length > 0;
+  }
+
+  /** The selected node as the UI sees it (a bone before Mixamo retargeting). */
+  getSelected(): THREE.Object3D | null {
+    return this.selectedObj;
+  }
+
+  /** Why `target` cannot be written out, or null when it can. */
+  exportBlocker(target: THREE.Object3D): string | null {
+    return exportBlocker(target);
+  }
+
+  /**
+   * Serialize a node with its current transform in the format named by `ext`.
+   * The exporters temporarily rewrite transforms (see exportObject), so the
+   * render loop is held for the duration to avoid a displaced frame.
+   */
+  async exportNode(target: THREE.Object3D, ext: string): Promise<Uint8Array> {
+    // contentRoot itself means the whole scene, so every file's clips ride
+    // along. Each entry's clips are bound inside that entry first, so two
+    // imports of the same rig do not both drive the first one.
+    const clips =
+      target === this.contentRoot
+        ? this.entries.flatMap((e) => retargetClips(e.asset.animations, e.wrapper))
+        : this.entries
+            .filter((e) => e.wrapper === target)
+            .flatMap((e) => retargetClips(e.asset.animations, e.wrapper));
+    this.exporting = true;
+    try {
+      return await this.withAuthoredScene(() => exportObject(target, ext, this.contentRoot, clips));
+    } finally {
+      this.exporting = false;
+    }
+  }
+
+  /**
+   * Run `fn` with the content tree in its authored state: the asset's own
+   * materials in place of the shading, inspect, weight, and x-ray variants,
+   * disabled map slots filled back in, and the viewer-owned overlay children
+   * (wireframe overlays, element highlight) taken out of the tree. The
+   * exporters read whatever is on the objects, so without this a file saved
+   * in Normals shading would carry the debug material. Everything is put back
+   * afterwards; rendering is held by the caller so no intermediate frame shows.
+   */
+  private async withAuthoredScene<T>(fn: () => Promise<T>): Promise<T> {
+    this.clearWireframeOverlays();
+    const overlay = this.elementOverlay;
+    overlay?.parent?.remove(overlay);
+    this.restoreXray();
+    this.restoreMaps();
+    const shown: { mesh: THREE.Mesh; material: THREE.Material | THREE.Material[] }[] = [];
+    this.contentRoot.traverse((o) => {
+      const backup = this.originalMaterials.get(o);
+      const mesh = o as THREE.Mesh;
+      if (!backup || !(mesh.isMesh || (o as THREE.Points).isPoints)) return;
+      shown.push({ mesh, material: mesh.material });
+      this.restoreAuthoredMaterial(mesh, backup);
+    });
+    try {
+      return await fn();
+    } finally {
+      // Hand the generated materials back first: applyAllShading disposes and
+      // rebuilds them for the active mode, and leaves weight-mode skinned
+      // meshes alone, so those keep the material they had.
+      for (const { mesh, material } of shown) mesh.material = material;
+      this.applyAllShading();
+      if (overlay && this.overlayMesh) this.overlayMesh.add(overlay);
+      if (this.showWireframeOverlay) this.rebuildWireframeOverlays();
+    }
   }
 
   undoPose(): boolean {
@@ -1988,6 +2185,19 @@ export class Viewer {
     });
   }
 
+  /** Put the asset's own material back on `mesh`, with the flags the shading
+   *  modes flip (flat shading, wireframe) at their authored values. */
+  private restoreAuthoredMaterial(mesh: THREE.Mesh, backup: MaterialBackup): void {
+    mesh.material = backup.material;
+    forEachMaterial(backup.material, (m) => {
+      if ('flatShading' in m && backup.flatShading != null) {
+        (m as THREE.MeshStandardMaterial).flatShading = backup.flatShading;
+      }
+      if ('wireframe' in m) (m as THREE.MeshBasicMaterial).wireframe = false;
+      m.needsUpdate = true;
+    });
+  }
+
   private applyShadingToObject(o: THREE.Object3D): void {
     // Weight display takes precedence over the shading dropdown on skinned
     // meshes — leave the debug material in place until weight mode is 'off'.
@@ -2009,16 +2219,7 @@ export class Viewer {
       return;
     }
 
-    const restore = (): void => {
-      (mesh as THREE.Mesh).material = backup.material;
-      forEachMaterial(backup.material, (m) => {
-        if ('flatShading' in m && backup.flatShading != null) {
-          (m as THREE.MeshStandardMaterial).flatShading = backup.flatShading;
-        }
-        if ('wireframe' in m) (m as THREE.MeshBasicMaterial).wireframe = false;
-        m.needsUpdate = true;
-      });
-    };
+    const restore = (): void => this.restoreAuthoredMaterial(mesh, backup);
 
     switch (mode) {
       case 'material':
@@ -2256,7 +2457,8 @@ export class Viewer {
     this.bindPoses = [];
     this.poseUndo = [];
     this.poseRedo = [];
-    this.poseBone = null;
+    this.editedNodes.clear();
+    this.poseTarget = null;
     this.clearSkeletonHelpers();
     this.clearWireframeOverlays();
     this.clearWeightMaterials();
@@ -2498,6 +2700,8 @@ export class Viewer {
   };
 
   private tick = (timeMs: number): void => {
+    // An export has transforms temporarily rewritten; don't show that frame.
+    if (this.exporting) return;
     // Throttle to the target frame rate. Bail out until at least one frame
     // budget (minus tolerance) has elapsed since the last rendered frame, then
     // snap lastFrameTime onto the 60Hz grid so refresh rates that aren't a clean
